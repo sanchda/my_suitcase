@@ -24,11 +24,6 @@ if [ -f ${SUITCASE}/bashrc ]; then
   # Create the new bashrc
   echo "#DAVEGEN_SC"                 >  ${HOME}/.bashrc
   echo "export SUITCASE=${SUITCASE}" >> ${HOME}/.bashrc
-
-  # Change permissions for e_sc
-  chmod 777 ${SUITCASE}/bin/e_sc
-  echo ". ${SUITCASE}/bashrc" >> ${HOME}/.bashrc
-  . ${HOME}/.bashrc
 fi
 
 # vimrc 
