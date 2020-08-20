@@ -24,6 +24,9 @@ if [ -f ${SUITCASE}/bashrc ]; then
   # Create the new bashrc
   echo "#DAVEGEN_SC"                 >  ${HOME}/.bashrc
   echo "export SUITCASE=${SUITCASE}" >> ${HOME}/.bashrc
+
+  echo ". ${SUITCASE}/bashrc" >> ${HOME}/.bashrc
+  . ${HOME}/.bashrc
 fi
 
 # vimrc 
