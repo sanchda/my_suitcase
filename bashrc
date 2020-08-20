@@ -21,7 +21,7 @@ export SVN_EDITOR="$(which vim)"
 export EDITOR="$(which vim)"
 
 # Grab my htop configs too!
-export HTOPRC=${SUITCASE}/htoprc
+export SC_HTOPRC=${SUITCASE}/htoprc
 
 [ -x /usr/bin/lesspipe ] && eval "$(SHELL=/bin/sh lesspipe)"   # Nicer less for non-text files
 if [ -z "$debian_chroot" ] && [ -r /etc/debian_chroot ]; then  # Identify chroot, if any

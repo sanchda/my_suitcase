@@ -1,0 +1,29 @@
+#!/bin/bash
+# This script just installs suitcase to the given machine.  That's all.
+SVN_REPO=""
+if [[ $# -lt 1 ]]; then
+  echo "Need to specify at least one remote machine."
+  exit -1
+fi
+
+# Get username and password.
+echo Username:
+read -s username
+echo Password:
+read -s password
+
+# SSH into the target machine and gogogo
+for mach in "$@"; do
+  echo "Hang on a second, preparing $mach"
+  ssh -T $mach "bash --noprofile --norc" << EOF
+    if [ -z \${SUITCASE} ]; then
+      svn checkout --username $username --password $password --non-interactive ${SVN_REPO} \${HOME}/suitcase 2>&1 
+      cd \${HOME}/suitcase 
+      ./install.sh 2>&1
+    else
+      if [ -d \${SUITCASE}/.svn ]; then
+        svn up --username $username --password $password --non-interactive \${HOME}/suitcase 2>&1
+      fi
+    fi
+EOF
+done

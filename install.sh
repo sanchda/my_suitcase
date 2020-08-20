@@ -33,8 +33,6 @@ fi
 
 # vimrc 
 if [ -f ${SUITCASE}/vimrc ] && [ -d ${SUITCASE}/vim ]; then
-#    echo "export VIMINIT='let "'$MYVIMRC'"=\"$SUITCASE/vimrc\" | source "'$MYVIMRC'"'" >> $HOME/.bashrc
-
   # Detect whether this is a David-generated vimrc
   if [ -f ${HOME}/.vimrc ]; then
     if [ $(head -n 1 ${HOME}/.vimrc) = "\"${header_sc}" ]; then
@@ -45,6 +43,8 @@ if [ -f ${SUITCASE}/vimrc ] && [ -d ${SUITCASE}/vim ]; then
       mkdir -p ${bakdir}   # Make the backup directory
       mv ${HOME}/.vimrc ${bakdir}
     fi
+  else
+    echo "No vimrc detected, installing suitcase version" 
   fi
 
   # Create new ~/.vimrc
@@ -81,6 +81,8 @@ if [ -f ${SUITCASE}/tmux.conf ]; then
       mkdir -p ${bakdir}   # Make the backup directory
       mv ${HOME}/.tmux.conf ${bakdir}
     fi
+  else
+    echo "No tmux.conf detected, installing suitcase version" 
   fi
 
   # Very slim

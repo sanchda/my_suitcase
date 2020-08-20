@@ -21,6 +21,7 @@ set novisualbell
 set t_vb=
 set background=dark
 set tm=500
+set mouse=a
 let $MYVIMRC="$SUITCASE/vim/vimrc"
 
 " === Color column stuff
@@ -69,6 +70,10 @@ au BufRead,BufNewFile Makefile* set noexpandtab
 
 " TEX settings
 au BufRead,BufNewFile *.tex call Dave_style()
+
+" K settings
+au BufRead,BufNewFile *.k set filetype=k3
+au BufRead,BufNewFile *.k call Dave_style()
 
 " JL settings
 au BufRead,BufNewFile *.jl set filetype=julia

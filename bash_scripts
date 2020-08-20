@@ -1,12 +1,1 @@
 #!/bin/bash
-function installWemux() {
-  if [ ! -d /usr/local/share/wemux/.svn ]; then
-    sudo svn co --force ${TODO!} /usr/local/share/wemux
-  else
-    sudo svn up /usr/local/share/wemux
-  fi
-  if [ ! -f /usr/local/bin/wemux ]; then
-    sudo ln -s /usr/local/share/wemux/wemux /usr/local/bin/wemux
-  fi
-  sudo cp /usr/local/share/wemux.conf /usr/local/etc/wemux.conf # Do we really want to trash old conf?
-}; export -f installWemux
