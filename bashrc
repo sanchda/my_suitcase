@@ -9,6 +9,7 @@ export PATH=${SUITCASE}/bin:$PATH
 if [ "Darwin" == $(uname -s) ]; then
   LC_CTYPE=C
   PATH="/usr/local/opt/coreutils/libexec/gnubin:$PATH"  # Yum, hardcoded!
+  PATH="/usr/local/opt/grep/libexec/gnubin:$PATH"
 fi
 
 # don't put duplicate lines in the history. See bash(1) for more options
