@@ -1,5 +1,16 @@
 # Opens Dave's suitcase
 header_sc="#DAVEGEN_SC"
+cfg_bash=${HOME}/.bashrc
+if [ "Darwin" == $(uname -s) ]; then
+  # We need to do some things, since I wrote this for Linux
+  if ! type "greadlink" > /dev/null; then
+    echo "You're on Mac, but you haven't installed coreutils.  I sort of need that."
+    exit -1
+  fi
+  LC_CTYPE=C
+  PATH="/usr/local/opt/coreutils/libexec/gnubin:$PATH"
+  cfg_bash=${HOME}/.bash_profile
+fi
 bakdir=${HOME}/dotbak/"SCB_"$(cat /dev/urandom | tr -cd 'a-f0-9' | head -c 16)
 
 # Figure out where the install.sh script lives.  That's going to be the root of
@@ -10,23 +21,22 @@ SUITCASE=$(dirname "$(readlink -f "$0")")
 if [ -f ${SUITCASE}/bashrc ]; then
   # If we're dealing with a suitcase-generated ~/.bashrc, then just destroy it.
   # Else, attempt to preserve it
-  if [ -f ${HOME}/.bashrc ]; then
-    if [[ $(head -n 1 ${HOME}/.bashrc) = "${header_sc}" ]]; then
+  if [ -f ${cfg_bash} ]; then
+    if [[ $(head -n 1 ${cfg_bash}) = "${header_sc}" ]]; then
       echo "Suitcase bashrc detected.  Deleting."
-      rm -rf ${HOME}/.bashrc
+      rm -rf ${cfg_bash}
     else
       echo "Non-suitcase bashrc detected.  Backing to" ${bakdir}
       mkdir -p ${bakdir}   # Make the backup directory
-      mv ~/.bashrc ${bakdir}
+      mv ${cfg_bash} ${bakdir}
     fi
   fi
 
   # Create the new bashrc
-  echo "#DAVEGEN_SC"                 >  ${HOME}/.bashrc
-  echo "export SUITCASE=${SUITCASE}" >> ${HOME}/.bashrc
-
-  echo ". ${SUITCASE}/bashrc" >> ${HOME}/.bashrc
-  . ${HOME}/.bashrc
+  echo "#DAVEGEN_SC"                 >  ${cfg_bash}
+  echo "export SUITCASE=${SUITCASE}" >> ${cfg_bash}
+  echo ". ${SUITCASE}/bashrc"        >> ${cfg_bash}
+  . ${cfg_bash}
 fi
 
 # vimrc 
