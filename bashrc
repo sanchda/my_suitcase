@@ -4,6 +4,13 @@
 export GPG_TTY=$(tty)
 export PATH=${SUITCASE}/bin:$PATH
 
+# Mac overrides.  We don't check that things are installed, since that was
+# checked by the installer
+if [ "Darwin" == $(uname -s) ]; then
+  LC_CTYPE=C
+  PATH="/usr/local/opt/coreutils/libexec/gnubin:$PATH"  # Yum, hardcoded!
+fi
+
 # don't put duplicate lines in the history. See bash(1) for more options
 # ... or force ignoredups and ignorespace
 export HISTSIZE=1000
