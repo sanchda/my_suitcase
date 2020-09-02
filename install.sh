@@ -77,8 +77,12 @@ if [ -f ${SUITCASE}/vimrc ] && [ -d ${SUITCASE}/vim ]; then
 
   # vim8 plugins DO NOT check runtimepath literally; rather they still refer
   # to ${HOME}/.vim .  Create a symlink to manage
-  mkdir -p ${HOME}/.vim  # Is this an expensive way to save a check?
-  rm -rf ${HOME}/.vim
+  if [ -L ${HOME}/.vim ]; then  # if a symlink, just clear it out
+    rm -f ${HOME}/.vim
+  fi
+  if [ -d ${HOME}/.vim ]; then  # if a real directory, back it up
+    mv ${HOME}/.vim ${bakdir}/.vim
+  fi
   ln -s ${SUITCASE}/vim ${HOME}/.vim
 fi
 
