@@ -1,0 +1,9 @@
+[submodule "vim/pack/plugins/start/lightline.vim"]
+	path = vim/pack/plugins/start/lightline.vim
+	url = github.com:itchyny/lightline.vim
+[submodule "vim/pack/plugins/start/vim-gitgutter"]
+	path = vim/pack/plugins/start/vim-gitgutter
+	url = github.com:airblade/vim-gitgutter.git
+[submodule "vim/pack/plugins/start/vim-slime"]
+	path = vim/pack/plugins/start/vim-slime
+	url = github.com:jpalardy/vim-slime

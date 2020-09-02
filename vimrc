@@ -1,6 +1,6 @@
 " === Global Settings ===
 set modeline
-set encoding=utf-8
+set encoding=utf-8"
 set ignorecase
 set smartcase
 set foldenable
@@ -20,9 +20,11 @@ set noerrorbells
 set novisualbell
 set t_vb=
 set background=dark
+set laststatus=2
+set updatetime=500
 set tm=500
 set mouse=a
-let $MYVIMRC="$SUITCASE/vim/vimrc"
+let $MYVIMRC="$SUITCASE/vimrc"
 
 " === Color column stuff
 execute "set colorcolumn=" . join(range(81,335), ',')
@@ -63,7 +65,11 @@ fu Dave_style()
   set expandtab
   set tabstop=2
   set softtabstop=2
+endf
+
+fu Corp_style()
   set shiftwidth=2
+  set tabstop=2
 endf
 au BufRead,BufNewFile *.sh,*.js,*.html,*.css,*py,*pyw,*.c,*.h,*.cpp,*.hpp call Dave_style()
 au BufRead,BufNewFile Makefile* set noexpandtab
@@ -82,6 +88,9 @@ au BufRead,BufNewFile *.jl call Dave_style()
 " strace settings
 au BufRead,BufNewFile *.strace set filetype=strace
 
+" go settings
+au BufRead,BufNewFile *.go call Corp_style()
+
 " Use the below highlight group when displaying bad whitespace is desired.
 highlight BadWhitespace ctermbg=red guibg=red
 " Display tabs at the beginning of a line in Python mode as bad.
@@ -90,3 +99,4 @@ au BufRead,BufNewFile *.k,*.py,*.pyw,*.c,*.h match BadWhitespace /\s\+$/
  
 " Python: not needed, C: prevents insertion of '*' at the beginning of every line in a comment
 au BufRead,BufNewFile *.c,*.h set formatoptions-=c formatoptions-=o formatoptions-=r
+

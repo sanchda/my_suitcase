@@ -72,8 +72,14 @@ if [ -f ${SUITCASE}/vimrc ] && [ -d ${SUITCASE}/vim ]; then
   rtp+="${SUITCASE}/vim/after"
   echo $rtp >> ${HOME}/.vimrc
 
-  # Finally, import the real vimrc
+  # Import the real vimrc
   echo "source $SUITCASE/vimrc" >> ${HOME}/.vimrc
+
+  # vim8 plugins DO NOT check runtimepath literally; rather they still refer
+  # to ${HOME}/.vim .  Create a symlink to manage
+  mkdir -p ${HOME}/.vim  # Is this an expensive way to save a check?
+  rm -rf ${HOME}/.vim
+  ln -s ${SUITCASE}/vim ${HOME}/.vim
 fi
 
 # tmux.conf
