@@ -5,7 +5,9 @@ export GPG_TTY=$(tty)
 export PATH=${SUITCASE}/bin:$PATH
 
 # Work-specific overrides
-. ~/.workstuff/workstuff
+if [ -f ${HOME}/.workstuff/workstuff ]; then
+  . ~/.workstuff/workstuff
+fi
 
 # pyenv overrides
 if command -v pyenv 1>/dev/null 2>&1; then
