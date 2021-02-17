@@ -3,6 +3,10 @@ header_sc="#DAVEGEN_SC"
 cfg_bash=${HOME}/.bashrc
 if [ "Darwin" == $(uname -s) ]; then
   # We need to do some things, since I wrote this for Linux
+  # Instructions:
+  brew install coreutils findutils gnu-tar gnu-sed gawk gnutls gnu-indent gnu-getopt grep pyenv
+  pyenv install 3.8.5
+  pyenv global 3.8.5
   if ! type "greadlink" > /dev/null; then
     echo "You're on Mac, but you haven't installed coreutils.  I sort of need that."
     exit -1

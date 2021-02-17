@@ -4,6 +4,16 @@
 export GPG_TTY=$(tty)
 export PATH=${SUITCASE}/bin:$PATH
 
+# Work-specific overrides
+if [ -f ${HOME}/.workstuff/workstuff ]; then
+  . ~/.workstuff/workstuff
+fi
+
+# pyenv overrides
+if command -v pyenv 1>/dev/null 2>&1; then
+  eval "$(pyenv init -)"
+fi
+
 # Mac overrides.  We don't check that things are installed, since that was
 # checked by the installer
 if [ "Darwin" == $(uname -s) ]; then
