@@ -7,3 +7,6 @@
 [submodule "vim/pack/plugins/start/vim-slime"]
 	path = vim/pack/plugins/start/vim-slime
 	url = github.com:jpalardy/vim-slime
+[submodule "vim/pack/plugins/start/vimwiki"]
+	path = vim/pack/plugins/start/vimwiki
+	url = https://github.com/vimwiki/vimwiki.git
