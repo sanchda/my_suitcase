@@ -15,6 +15,7 @@ set hlsearch
 set nu
 set ruler
 set autoread
+set nocompatible
 set nobackup
 set noerrorbells
 set novisualbell
@@ -46,6 +47,8 @@ set smartindent
 let g:slime_target = "tmux"
 let g:slime_paste_file = "$HOME/.slime_paste"
 
+" === vimwiki/markdown ===
+let g:vimwiki_list = [{'path': '~/vimwiki/', 'syntax': 'markdown', 'ext': '.md'}]
 
 " === Wildmenu ===
 set wildmenu
@@ -57,7 +60,6 @@ set wildignore=.svn,CVS,*.o,*.a,*.class,*.mo,*.la,*.so,*.obj,*.swp,*.jpg,*.png,*
 " Show < or > when characters are not displayed on the left or right.
 set list
 set list listchars=nbsp:¬,tab:>-,precedes:<,extends:>
-
 
 " === Coding tweaks ===
 fu Dave_style()
@@ -72,7 +74,7 @@ fu Corp_style()
   set tabstop=2
 endf
 au BufRead,BufNewFile *.sh,*.js,*.html,*.css,*py,*pyw,*.c,*.h,*.cpp,*.hpp call Dave_style()
-au BufRead,BufNewFile *.cc,*.cxx,*.hh,*.cxx call Dave_style()
+au BufRead,BufNewFile *.cc,*.cxx,*.hh,*.cxx,Makefile* call Dave_style()
 au BufRead,BufNewFile Makefile* set noexpandtab
 
 " TEX settings
