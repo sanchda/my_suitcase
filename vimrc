@@ -72,6 +72,7 @@ fu Corp_style()
   set tabstop=2
 endf
 au BufRead,BufNewFile *.sh,*.js,*.html,*.css,*py,*pyw,*.c,*.h,*.cpp,*.hpp call Dave_style()
+au BufRead,BufNewFile *.cc,*.cxx,*.hh,*.cxx call Dave_style()
 au BufRead,BufNewFile Makefile* set noexpandtab
 
 " TEX settings
