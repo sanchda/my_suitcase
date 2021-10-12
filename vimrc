@@ -29,7 +29,7 @@ let $MYVIMRC="$SUITCASE/vimrc"
 
 " === Color column stuff
 execute "set colorcolumn=" . join(range(81,335), ',')
-highlight ColorColumn ctermbg=0
+highlight ColorColumn ctermbg=lightgrey
 
 " === Syntax Highlighting & auto-indent ===
 let python_highlight_all=1
@@ -73,9 +73,19 @@ fu Corp_style()
   set shiftwidth=2
   set tabstop=2
 endf
+
+fu Bazel_style()
+  set shiftwidth=4
+  set expandtab
+  set tabstop=4
+  set softtabstop=4
+endf
 au BufRead,BufNewFile *.sh,*.js,*.html,*.css,*py,*pyw,*.c,*.h,*.cpp,*.hpp call Dave_style()
 au BufRead,BufNewFile *.cc,*.cxx,*.hh,*.cxx,Makefile* call Dave_style()
 au BufRead,BufNewFile Makefile* set noexpandtab
+
+" Bazel
+au BufRead,BufNewFile *.bzl,*.bazel call Bazel_style()
 
 " TEX settings
 au BufRead,BufNewFile *.tex call Dave_style()
