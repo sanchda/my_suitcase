@@ -104,6 +104,9 @@ au BufRead,BufNewFile *.strace set filetype=strace
 " go settings
 au BufRead,BufNewFile *.go call Corp_style()
 
+" cmake settings
+au BufRead,BufNewFile CMakeLists.txt call dave_style()
+
 " Use the below highlight group when displaying bad whitespace is desired.
 highlight BadWhitespace ctermbg=red guibg=red
 " Display tabs at the beginning of a line in Python mode as bad.

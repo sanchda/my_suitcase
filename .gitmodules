@@ -16,3 +16,6 @@
 [submodule "vim/pack/plugins/start/diffconflicts"]
 	path = vim/pack/plugins/start/diffconflicts
 	url = https://github.com/whiteinge/diffconflicts.git
+[submodule "vim/pack/plugins/start/vim-cmake-syntax"]
+	path = vim/pack/plugins/start/vim-cmake-syntax
+	url = https://github.com/pboettch/vim-cmake-syntax.git
