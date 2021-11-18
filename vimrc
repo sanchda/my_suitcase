@@ -28,7 +28,7 @@ set mouse=a
 let $MYVIMRC="$SUITCASE/vimrc"
 
 " === Color column stuff
-execute "set colorcolumn=" . join(range(81,335), ',')
+execute "set colorcolumn=" . join(range(81,465), ',')
 highlight ColorColumn ctermbg=lightgrey
 
 " === Syntax Highlighting & auto-indent ===
@@ -80,7 +80,7 @@ fu Bazel_style()
   set tabstop=4
   set softtabstop=4
 endf
-au BufRead,BufNewFile *.sh,*.js,*.html,*.css,*py,*pyw,*.c,*.h,*.cpp,*.hpp call Dave_style()
+au BufRead,BufNewFile *.sh,*.js,*.html,*.css,*py,*pyw,*.c,*.h,*.cpp,*.hpp,*.rs call Dave_style()
 au BufRead,BufNewFile *.cc,*.cxx,*.hh,*.cxx,Makefile* call Dave_style()
 au BufRead,BufNewFile Makefile* set noexpandtab
 
