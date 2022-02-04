@@ -66,13 +66,7 @@ if [ -f ${SUITCASE}/vimrc ] && [ -d ${SUITCASE}/vim ]; then
   # Set runtimepath
   rtp="set runtimepath="
   rtp+="${SUITCASE}/vim,"
-  rtp+="/var/lib/vim/addons,"
-  rtp+="/usr/share/vim/vimfiles,"
-  for i in $(ls /usr/share/vim | grep "^vim[0-9]"); do
-    rtp+="/usr/share/vim/"$i","
-  done
-  rtp+="/usr/share/vim/vimfiles/after,"
-  rtp+="/var/lib/vim/addons/after,"
+  rtp+=$(vim --clean -e -s -c ":set runtimepath?" -c "quit" | sed 's/.*runtimepath=//g')
   rtp+="${SUITCASE}/vim/after"
   echo $rtp >> ${HOME}/.vimrc
 
