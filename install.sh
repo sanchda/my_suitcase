@@ -21,6 +21,11 @@ bakdir=${HOME}/dotbak/"SCB_"$(cat /dev/urandom | tr -cd 'a-f0-9' | head -c 16)
 # the suitcase
 SUITCASE=$(dirname "$(readlink -f "$0")")
 
+# Recursively update/pull submodules
+cd $SUITCASE
+git submodule update --init --recursive
+cd -
+
 # bashrc
 if [ -f ${SUITCASE}/bashrc ]; then
   # If we're dealing with a suitcase-generated ~/.bashrc, then just destroy it.
