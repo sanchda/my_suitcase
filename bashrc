@@ -16,11 +16,13 @@ fi
 
 # Mac overrides.  We don't check that things are installed, since that was
 # checked by the installer
-if [ "Darwin" == $(uname -s) ]; then
-  LC_CTYPE=C
-  PATH="/usr/local/opt/coreutils/libexec/gnubin:$PATH"  # Yum, hardcoded!
-  PATH="/usr/local/opt/grep/libexec/gnubin:$PATH"
-fi
+case $(uname -s) in
+  "Darwin")
+    LC_CTYPE=C
+    PATH="/usr/local/opt/coreutils/libexec/gnubin:$PATH"  # Yum, hardcoded!
+    PATH="/usr/local/opt/grep/libexec/gnubin:$PATH"
+  ;;
+esac
 
 # don't put duplicate lines in the history. See bash(1) for more options
 # ... or force ignoredups and ignorespace
@@ -28,14 +30,27 @@ export HISTSIZE=1000
 export HISTFILESIZE=2000
 export HISTIGNORE=$'[ \t]*:&:[fb]g:exit:ls'
 export HISTCONTROL=ignoredups:ignorespace:erasedups  # Avoid duplicates
-shopt -s histappend     # Append, don't overwrite, history
-shopt -s checkwinsize   # Check window size after each command
+
+
+if [ -n "$ZSH_VERSION" ]; then
+  HISTFILE=~/.zsh_history
+  SAVEHIST=5000
+  HISTDUP=erase
+  setopt appendhistory
+  setopt sharehistory
+  setopt incappendhistory
+  SHELL=$(which zsh)
+elif [ -n "$BASH_VERSION" ]; then
+  shopt -s histappend     # Append, don't overwrite, history
+  shopt -s checkwinsize   # Check window size after each command
+  SHELL=$(which bash)
+fi
 
 # If using rlwrap, might as well us the environment vars
 export RLWRAP_EDITOR="$(which vim) '+call cursor(%L,%C)'"
 export SVN_EDITOR="$(which vim)"
-#export GIT_EDITOR="$(which vim)"
-#export GIT_PAGER="$(which vim)"" - -R -c 'set foldmethod=syntax"
+export GIT_EDITOR="$(which vim)"
+export GIT_PAGER="$(which vim)"" - -R -c 'set foldmethod=syntax'"
 export EDITOR="$(which vim)"
 
 # Grab my htop configs too!
@@ -55,7 +70,10 @@ if [ -n "$force_color_prompt" ]; then
     color_prompt=$([ -x /usr/bin/tput ] && tput setaf 1>&/dev/null && echo "yes" || echo "")
 fi
 
-if [ "$color_prompt" = yes ]; then
+
+if [ -n "$ZSH_VERSION" ]; then
+    eval "$(starship init zsh)"
+elif [ "$color_prompt" = yes ]; then
     PS1='${debian_chroot:+($debian_chroot)}\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
 else
     PS1='${debian_chroot:+($debian_chroot)}\u@\h:\w\$ '
@@ -63,13 +81,15 @@ fi
 unset color_prompt force_color_prompt
 
 # If this is an xterm set the title to user@host:dir
-case "$TERM" in
-xterm*|rxvt*)
-    PS1="\[\e]0;${debian_chroot:+($debian_chroot)}\u@\h: \w\a\]$PS1"
-    ;;
-*)
-    ;;
-esac
+if [ ! -n "$ZSH_VERSION" ]; then
+  case "$TERM" in
+  xterm*|rxvt*)
+      PS1="\[\e]0;${debian_chroot:+($debian_chroot)}\u@\h: \w\a\]$PS1"
+      ;;
+  *)
+      ;;
+  esac
+fi
 
 if [ -x /usr/bin/dircolors ]; then  # If we have dircolors, use dircolors
     test -r ~/.dircolors && eval "$(dircolors -b ~/.dircolors)" || eval "$(dircolors -b)"
@@ -82,7 +102,7 @@ fi
 # includes
 if [ -f ${SUITCASE}/bash_aliases ];     then . ${SUITCASE}/bash_aliases; fi           # Use suitcase aliases
 if [ -f ${SUITCASE}/bash_scripts ];     then . ${SUITCASE}/bash_scripts; fi           # Install AWS functions
-if [ -f ${SUITCASE}/aws_scripts ];      then . ${SUITCASE}/aws_scripts; fi            # AWS stuff
+#if [ -f ${SUITCASE}/aws_scripts ];      then . ${SUITCASE}/aws_scripts; fi            # AWS stuff
 if [[ "$(uname -v)" = *"Micro"* ]];     then . ${SUITCASE}/wsl_scripts.sh; fi         # WSL scripts
 if [ -f /etc/bash_completion ] && ! shopt -oq posix; then . /etc/bash_completion; fi  # Handy completion!
 if [ -f ${SUITCASE}/bash_completion ];  then . ${SUITCASE}/bash_completion;fi         # Install David's completion

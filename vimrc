@@ -28,7 +28,7 @@ set mouse=a
 let $MYVIMRC="$SUITCASE/vimrc"
 
 " === Color column stuff
-execute "set colorcolumn=" . join(range(81,465), ',')
+"execute "set colorcolumn=" . join(range(81,465), ',')
 highlight ColorColumn ctermbg=lightgrey
 
 " === Syntax Highlighting & auto-indent ===
