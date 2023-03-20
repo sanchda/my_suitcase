@@ -50,7 +50,6 @@ fi
 export RLWRAP_EDITOR="$(which vim) '+call cursor(%L,%C)'"
 export SVN_EDITOR="$(which vim)"
 export GIT_EDITOR="$(which vim)"
-export GIT_PAGER="$(which vim)"" - -R -c 'set foldmethod=syntax'"
 export EDITOR="$(which vim)"
 
 # Grab my htop configs too!

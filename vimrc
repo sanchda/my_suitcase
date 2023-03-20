@@ -105,7 +105,7 @@ au BufRead,BufNewFile *.strace set filetype=strace
 au BufRead,BufNewFile *.go call Corp_style()
 
 " cmake settings
-au BufRead,BufNewFile CMakeLists.txt call dave_style()
+au BufRead,BufNewFile CMakeLists.txt call Dave_style()
 
 " Use the below highlight group when displaying bad whitespace is desired.
 highlight BadWhitespace ctermbg=red guibg=red
