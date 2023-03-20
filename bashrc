@@ -1,12 +1,14 @@
 [[ "$-" != *i* ]]  && return # Don't do anything if not interactive
 
 # Be able to reference myself
-export GPG_TTY=$(tty)
-export PATH=${SUITCASE}/bin:$PATH
+GPG_TTY=$(tty)
+export GPG_TTY
+PATH=${SUITCASE}/bin:$PATH
+export PATH
 
 # Work-specific overrides
-if [ -f ${HOME}/.workstuff/workstuff ]; then
-  . ~/.workstuff/workstuff
+if [ -f "$HOME"/.workstuff/workstuff ]; then
+  source "$HOME"/.workstuff/workstuff
 fi
 
 # pyenv overrides
@@ -35,7 +37,9 @@ export HISTCONTROL=ignoredups:ignorespace:erasedups  # Avoid duplicates
 if [ -n "$ZSH_VERSION" ]; then
   HISTFILE=~/.zsh_history
   SAVEHIST=5000
+  export SAVEHIST
   HISTDUP=erase
+  export HISTDUP
   setopt appendhistory
   setopt sharehistory
   setopt incappendhistory
@@ -47,13 +51,20 @@ elif [ -n "$BASH_VERSION" ]; then
 fi
 
 # If using rlwrap, might as well us the environment vars
-export RLWRAP_EDITOR="$(which vim) '+call cursor(%L,%C)'"
-export SVN_EDITOR="$(which vim)"
-export GIT_EDITOR="$(which vim)"
-export EDITOR="$(which vim)"
+RLWRAP_EDITOR=("$(which vim)" '+call cursor(%L,%C)')
+SVN_EDITOR="$(which vim)"
+GIT_EDITOR="$(which vim)"
+GIT_PAGER=("$(which vim)" - -R -c 'set foldmethod=syntax')
+EDITOR="$(which vim)"
+export RLWRAP_EDITOR
+export SVN_EDITOR
+export GIT_EDITOR
+export GIT_PAGER
+export EDITOR
 
 # Grab my htop configs too!
-export SC_HTOPRC=${SUITCASE}/htoprc
+SC_HTOPRC=${SUITCASE}/htoprc
+export SC_HTOPRC
 
 [ -x /usr/bin/lesspipe ] && eval "$(SHELL=/bin/sh lesspipe)"   # Nicer less for non-text files
 if [ -z "$debian_chroot" ] && [ -r /etc/debian_chroot ]; then  # Identify chroot, if any
@@ -80,7 +91,7 @@ fi
 unset color_prompt force_color_prompt
 
 # If this is an xterm set the title to user@host:dir
-if [ ! -n "$ZSH_VERSION" ]; then
+if [ -z "$ZSH_VERSION" ]; then
   case "$TERM" in
   xterm*|rxvt*)
       PS1="\[\e]0;${debian_chroot:+($debian_chroot)}\u@\h: \w\a\]$PS1"
@@ -90,8 +101,12 @@ if [ ! -n "$ZSH_VERSION" ]; then
   esac
 fi
 
-if [ -x /usr/bin/dircolors ]; then  # If we have dircolors, use dircolors
-    test -r ~/.dircolors && eval "$(dircolors -b ~/.dircolors)" || eval "$(dircolors -b)"
+if command -v dircolors 1>/dev/null 2>&1; then
+    if test -r ~/.dircolors; then
+        eval "$(dircolors -b ~/.dircolors)"
+    else 
+        eval "$(dircolors -b)"
+    fi
     alias ls='ls --color=auto'
     alias grep='grep --color=auto'
     alias fgrep='fgrep --color=auto'
@@ -99,12 +114,13 @@ if [ -x /usr/bin/dircolors ]; then  # If we have dircolors, use dircolors
 fi
 
 # includes
-if [ -f ${SUITCASE}/bash_aliases ];     then . ${SUITCASE}/bash_aliases; fi           # Use suitcase aliases
-if [ -f ${SUITCASE}/bash_scripts ];     then . ${SUITCASE}/bash_scripts; fi           # Install AWS functions
-#if [ -f ${SUITCASE}/aws_scripts ];      then . ${SUITCASE}/aws_scripts; fi            # AWS stuff
-if [[ "$(uname -v)" = *"Micro"* ]];     then . ${SUITCASE}/wsl_scripts.sh; fi         # WSL scripts
-if [ -f /etc/bash_completion ] && ! shopt -oq posix; then . /etc/bash_completion; fi  # Handy completion!
-if [ -f ${SUITCASE}/bash_completion ];  then . ${SUITCASE}/bash_completion;fi         # Install David's completion
+if [ -f "$SUITCASE/bash_aliases" ];     then source "$SUITCASE/bash_aliases"; fi           # Use suitcase aliases
+if [ -f "$SUITCASE/bash_scripts" ];     then source "$SUITCASE/bash_scripts"; fi           # Install AWS functions
+if [ -f "$SUITCASE/bash_completion" ];  then source "$SUITCASE/bash_completion"; fi        # Install David's completion
+if [[ "$(uname -v)" = *"Micro"* ]];     then source "$SUITCASE/wsl_scripts.sh"; fi         # WSL scripts
+if [ -f /etc/bash_completion ] && ! shopt -oq posix; then source /etc/bash_completion; fi  # Handy completion!
+#if [ -f "$SUITCASE/aws_scripts" ];    then source "$SUITCASE/aws_scripts"; fi            # AWS stuff
 
 ## Finalize
 export DAVE_LOADED=1
+
