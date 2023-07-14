@@ -27,6 +27,9 @@ set tm=500
 set mouse=a
 let $MYVIMRC="$SUITCASE/vimrc"
 
+" === What information in statusline?
+set statusline+=%F
+
 " === Color column stuff
 "execute "set colorcolumn=" . join(range(81,465), ',')
 highlight ColorColumn ctermbg=lightgrey

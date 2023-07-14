@@ -12,8 +12,13 @@ if [ -f "$HOME"/.workstuff/workstuff ]; then
 fi
 
 # pyenv overrides
+if [ -f "$HOME"/.pyenv/bin/pyenv ]; then
+  export PYENV_ROOT="$HOME/.pyenv"
+  export PATH="$PYENV_ROOT/bin:$PATH"
+fi
 if command -v pyenv 1>/dev/null 2>&1; then
   eval "$(pyenv init -)"
+  eval "$(pyenv virtualenv-init -)"
 fi
 
 # Mac overrides.  We don't check that things are installed, since that was
@@ -28,8 +33,8 @@ esac
 
 # don't put duplicate lines in the history. See bash(1) for more options
 # ... or force ignoredups and ignorespace
-export HISTSIZE=1000
-export HISTFILESIZE=2000
+export HISTSIZE=2000
+export HISTFILESIZE=20000
 export HISTIGNORE=$'[ \t]*:&:[fb]g:exit:ls'
 export HISTCONTROL=ignoredups:ignorespace:erasedups  # Avoid duplicates
 
@@ -45,8 +50,14 @@ if [ -n "$ZSH_VERSION" ]; then
   setopt incappendhistory
   SHELL=$(which zsh)
 elif [ -n "$BASH_VERSION" ]; then
-  shopt -s histappend     # Append, don't overwrite, history
+  HISTSIZE=10000
+  HISTFILESIZE=2000000
+  HISTCONTROL=ignoreboth
+  HISTIGNORE='ls:ll:ls -alh:pwd:clear:history'
+  HISTTIMEFORMAT='%F %T '
+  shopt -s cmdhist
   shopt -s checkwinsize   # Check window size after each command
+  shopt -s histappend
   SHELL=$(which bash)
 fi
 
@@ -123,4 +134,5 @@ if [ -f /etc/bash_completion ] && ! shopt -oq posix; then source /etc/bash_compl
 
 ## Finalize
 export DAVE_LOADED=1
-
+export JAVA_HOME="/usr/lib/jvm/java-17-openjdk-amd64"
+export PATH=$JAVA_HOME:$PATH
