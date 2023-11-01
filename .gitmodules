@@ -19,3 +19,6 @@
 [submodule "vim/pack/plugins/start/vim-cmake-syntax"]
 	path = vim/pack/plugins/start/vim-cmake-syntax
 	url = https://github.com/pboettch/vim-cmake-syntax.git
+[submodule "vim/pack/plugins/start/copilot.vim"]
+	path = vim/pack/plugins/start/copilot.vim
+	url = https://github.com/github/copilot.vim.git
