@@ -40,7 +40,7 @@ export HISTCONTROL=ignoredups:ignorespace:erasedups  # Avoid duplicates
 
 
 if [ -n "$ZSH_VERSION" ]; then
-  HISTFILE=~/.zsh_history
+  export HISTFILE=~/.zsh_history
   SAVEHIST=5000
   export SAVEHIST
   HISTDUP=erase
@@ -48,17 +48,19 @@ if [ -n "$ZSH_VERSION" ]; then
   setopt appendhistory
   setopt sharehistory
   setopt incappendhistory
-  SHELL=$(which zsh)
+  export SHELL=$(which zsh)
 elif [ -n "$BASH_VERSION" ]; then
-  HISTSIZE=10000
-  HISTFILESIZE=2000000
-  HISTCONTROL=ignoreboth
-  HISTIGNORE='ls:ll:ls -alh:pwd:clear:history'
-  HISTTIMEFORMAT='%F %T '
+  export HISTSIZE=10000
+  export HISTFILESIZE=2000000
+  export HISTCONTROL=ignoredups:ignorespace:erasedups  # Avoid duplicates
+  export HISTIGNORE='ls:ll:ls -alh:pwd:clear:history'
+  export HISTTIMEFORMAT='%F %T '
+  export PROMPT_COMMAND="history -a"
   shopt -s cmdhist
   shopt -s checkwinsize   # Check window size after each command
   shopt -s histappend
-  SHELL=$(which bash)
+  export SHELL=$(which bash)
+  history -r
 fi
 
 # If using rlwrap, might as well us the environment vars
