@@ -19,9 +19,6 @@
 [submodule "vim/pack/plugins/start/vim-cmake-syntax"]
 	path = vim/pack/plugins/start/vim-cmake-syntax
 	url = https://github.com/pboettch/vim-cmake-syntax.git
-[submodule "vim/pack/plugins/start/YankRing.vim"]
-	path = vim/pack/plugins/start/YankRing.vim
-	url = https://github.com/vim-scripts/YankRing.vim.git
-[submodule "vim/pack/plugins/start/vim-tmux-clipboard"]
-	path = vim/pack/plugins/start/vim-tmux-clipboard
-	url = https://github.com/roxma/vim-tmux-clipboard.git
+[submodule "vim/pack/plugins/start/copilot.vim"]
+	path = vim/pack/plugins/start/copilot.vim
+	url = https://github.com/github/copilot.vim.git

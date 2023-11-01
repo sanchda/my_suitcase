@@ -12,13 +12,18 @@ if [ -f "$HOME"/.workstuff/workstuff ]; then
 fi
 
 # pyenv overrides
-if [ -f "$HOME"/.pyenv/bin/pyenv ]; then
-  export PYENV_ROOT="$HOME/.pyenv"
-  export PATH="$PYENV_ROOT/bin:$PATH"
-fi
 if command -v pyenv 1>/dev/null 2>&1; then
+  export PYENV_ROOT=$(pyenv root)
+  export PATH="$PYENV_ROOT/bin:$PATH"
   eval "$(pyenv init -)"
-  eval "$(pyenv virtualenv-init -)"
+  if pyenv commands | grep -q virtualenv-init; then
+    eval "$(pyenv virtualenv-init -)"
+  fi
+fi
+
+# rbenv overrides
+if command -v rbenv >/dev/null 2>&1; then
+  eval "$(rbenv init -)"
 fi
 
 # Mac overrides.  We don't check that things are installed, since that was
