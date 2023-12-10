@@ -33,6 +33,7 @@ case $(uname -s) in
     LC_CTYPE=C
     PATH="/usr/local/opt/coreutils/libexec/gnubin:$PATH"  # Yum, hardcoded!
     PATH="/usr/local/opt/grep/libexec/gnubin:$PATH"
+    PATH="/usr/local/opt/llvm/bin:$PATH"
   ;;
 esac
 
