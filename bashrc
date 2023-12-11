@@ -123,7 +123,7 @@ fi
 if command -v dircolors 1>/dev/null 2>&1; then
     if test -r ~/.dircolors; then
         eval "$(dircolors -b ~/.dircolors)"
-    else 
+    else
         eval "$(dircolors -b)"
     fi
     alias ls='ls --color=auto'
@@ -136,9 +136,7 @@ fi
 if [ -f "$SUITCASE/bash_aliases" ];     then source "$SUITCASE/bash_aliases"; fi           # Use suitcase aliases
 if [ -f "$SUITCASE/bash_scripts" ];     then source "$SUITCASE/bash_scripts"; fi           # Install AWS functions
 if [ -f "$SUITCASE/bash_completion" ];  then source "$SUITCASE/bash_completion"; fi        # Install David's completion
-if [[ "$(uname -v)" = *"Micro"* ]];     then source "$SUITCASE/wsl_scripts.sh"; fi         # WSL scripts
 if [ -f /etc/bash_completion ] && ! shopt -oq posix; then source /etc/bash_completion; fi  # Handy completion!
-#if [ -f "$SUITCASE/aws_scripts" ];    then source "$SUITCASE/aws_scripts"; fi            # AWS stuff
 
 ## Finalize
 export DAVE_LOADED=1
