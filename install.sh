@@ -4,7 +4,8 @@ cfg_bash=${HOME}/.bashrc
 if [ "Darwin" == $(uname -s) ]; then
   # We need to do some things, since I wrote this for Linux
   # Instructions:
-  brew install spaceship coreutils findutils gnu-tar gnu-sed gawk gnutls gnu-indent gnu-getopt grep pyenv
+  brew install spaceship coreutils findutils gnu-tar gnu-sed gawk gnutls gnu-indent gnu-getopt grep pyenv llvm
+  git clone https://github.com/pyenv/pyenv-virtualenv.git $(pyenv root)/plugins/pyenv-virtualenv
   pyenv install 3.8.5
   pyenv global 3.8.5
   if ! type "greadlink" > /dev/null; then
