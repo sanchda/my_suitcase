@@ -46,6 +46,10 @@ filetype indent on
 set autoindent
 set smartindent
 
+" Highlight trailing whitespace
+highlight ExtraWhitespace ctermbg=red guibg=red
+match ExtraWhitespace /\s\+$/
+
 " === vim SLIME stuff ===
 let g:slime_target = "tmux"
 let g:slime_paste_file = "$HOME/.slime_paste"
