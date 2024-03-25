@@ -12,13 +12,33 @@ if [ -f "$HOME"/.workstuff/workstuff ]; then
 fi
 
 # pyenv overrides
+if [ -z "${PYENV_ROOT}" ]; then
+  if [ -d "$HOME/.pyenv" ]; then
+    export PYENV_ROOT="$HOME/.pyenv"
+  fi
+else
+  if [ ! -d "${PYENV_ROOT}" ]; then
+    # If we're here, the PYENV_ROOT was given, but it doesn't exist.
+    # We unset it.
+    unset PYENV_ROOT
+  fi
+fi
+
+# Ensure $PYENV_ROOT/bin is in PATH
+if [[ ":$PATH:" != *":$PYENV_ROOT/bin:"* ]]; then
+  export PATH="${PYENV_ROOT}/bin:$PATH"
+fi
+
+# Initialize pyenv
 if command -v pyenv 1>/dev/null 2>&1; then
-  export PYENV_ROOT=$(pyenv root)
-  export PATH="$PYENV_ROOT/bin:$PATH"
   eval "$(pyenv init -)"
+
+  # Check for virtualenv-init in the pyenv commands
   if pyenv commands | grep -q virtualenv-init; then
     eval "$(pyenv virtualenv-init -)"
   fi
+else
+  echo "pyenv is installed but not found in the PATH."
 fi
 
 # rbenv overrides
@@ -28,80 +48,81 @@ fi
 
 # Mac overrides.  We don't check that things are installed, since that was
 # checked by the installer
-case $(uname -s) in
+case "$(uname -s)" in
   "Darwin")
-    LC_CTYPE=C
-    PATH="/usr/local/opt/coreutils/libexec/gnubin:$PATH"  # Yum, hardcoded!
-    PATH="/usr/local/opt/grep/libexec/gnubin:$PATH"
-    PATH="/usr/local/opt/llvm/bin:$PATH"
+    export LC_CTYPE=C
+    for dir in /usr/local/opt/coreutils/libexec/gnubin /usr/local/opt/grep/libexec/gnubin /usr/local/opt/llvm/bin; do
+      if [[ ":$PATH:" != *":$dir:"* ]]; then
+        export PATH="$dir:$PATH"
+      fi
+    done
   ;;
 esac
 
-# don't put duplicate lines in the history. See bash(1) for more options
-# ... or force ignoredups and ignorespace
-export HISTSIZE=2000
-export HISTFILESIZE=20000
-export HISTIGNORE=$'[ \t]*:&:[fb]g:exit:ls'
-export HISTCONTROL=ignoredups:ignorespace:erasedups  # Avoid duplicates
+# Common history settings
+export HISTSIZE=10000
+export HISTFILESIZE=2000000
+export HISTCONTROL=ignoreboth:erasedups
+export HISTIGNORE='ls:ll:ls -alh:pwd:clear:history'
+export HISTFILE=~/.shared_history  # Use a common history file for Bash and Zsh
 
-
-if [ -n "$ZSH_VERSION" ]; then
-  export HISTFILE=~/.zsh_history
-  SAVEHIST=5000
-  export SAVEHIST
-  HISTDUP=erase
-  export HISTDUP
-  setopt appendhistory
-  setopt sharehistory
-  setopt incappendhistory
-  export SHELL=$(which zsh)
-elif [ -n "$BASH_VERSION" ]; then
-  export HISTSIZE=10000
-  export HISTFILESIZE=2000000
-  export HISTCONTROL=ignoredups:ignorespace:erasedups  # Avoid duplicates
-  export HISTIGNORE='ls:ll:ls -alh:pwd:clear:history'
+# Bash-specific settings
+if [ -n "$BASH_VERSION" ]; then
   export HISTTIMEFORMAT='%F %T '
-  export PROMPT_COMMAND="history -a"
-  shopt -s cmdhist
-  shopt -s checkwinsize   # Check window size after each command
-  shopt -s histappend
+  shopt -s histappend cmdhist checkwinsize
+  PROMPT_COMMAND="history -a; history -c; history -r; $PROMPT_COMMAND"
   export SHELL=$(which bash)
-  history -r
+elif [ -n "$ZSH_VERSION" ]; then
+  export SAVEHIST=10000
+  setopt SHARE_HISTORY APPEND_HISTORY INC_APPEND_HISTORY
+  setopt HIST_EXPIRE_DUPS_FIRST
+  setopt HIST_IGNORE_DUPS
+  setopt HIST_IGNORE_ALL_DUPS
+  setopt HIST_FIND_NO_DUPS
+  setopt HIST_IGNORE_SPACE
+  setopt HIST_SAVE_NO_DUPS
+  export SHELL=$(which zsh)
 fi
 
-# If using rlwrap, might as well us the environment vars
-RLWRAP_EDITOR=("$(which vim)" '+call cursor(%L,%C)')
-SVN_EDITOR="$(which vim)"
-GIT_EDITOR="$(which vim)"
-GIT_PAGER=("$(which vim)" - -R -c 'set foldmethod=syntax')
-EDITOR="$(which vim)"
-export RLWRAP_EDITOR
-export SVN_EDITOR
-export GIT_EDITOR
-export GIT_PAGER
-export EDITOR
+# Editor settings
+VIM_PATH="$(which vim)"
+export EDITOR="$VIM_PATH"
+export SVN_EDITOR="$VIM_PATH"
+export GIT_EDITOR="$VIM_PATH"
+export GIT_PAGER=("$VIM_PATH" - -R -c 'set foldmethod=syntax')
+export RLWRAP_EDITOR=("$VIM_PATH" '+call cursor(%L,%C)')
 
 # Grab my htop configs too!
-SC_HTOPRC=${SUITCASE}/htoprc
-export SC_HTOPRC
+export SC_HTOPRC="${SUITCASE}/htoprc"
 
-[ -x /usr/bin/lesspipe ] && eval "$(SHELL=/bin/sh lesspipe)"   # Nicer less for non-text files
-if [ -z "$debian_chroot" ] && [ -r /etc/debian_chroot ]; then  # Identify chroot, if any
+# Nicer less for non-text files
+[ -x /usr/bin/lesspipe ] && eval "$(SHELL=/bin/sh lesspipe)"
+
+# Identify chroot, if any
+if [ -z "$debian_chroot" ] && [ -r /etc/debian_chroot ]; then
     debian_chroot=$(cat /etc/debian_chroot)
 fi
 
-case "$TERM" in  # set a fancy prompt (non-color, unless we know otherwise)
-    xterm-color) color_prompt=yes;;
+# set a fancy prompt (non-color, unless we know otherwise)
+case "$TERM" in
+    xterm-color|*-256color) color_prompt=yes;;  # Add support for 256 color terminals
 esac
 
-force_color_prompt=yes  # Force colors?
-if [ -n "$force_color_prompt" ]; then
-    color_prompt=$([ -x /usr/bin/tput ] && tput setaf 1>&/dev/null && echo "yes" || echo "")
+# Force colors?
+force_color_prompt=yes
+if [ "$force_color_prompt" = yes ]; then
+    if [ -x /usr/bin/tput ] && tput setaf 1 &>/dev/null; then
+        color_prompt=yes
+    else
+        color_prompt=no
+    fi
 fi
 
-
+# Set the prompt
 if [ -n "$ZSH_VERSION" ]; then
-    eval "$(starship init zsh)"
+    if command -v starship >/dev/null 2>&1; then
+        eval "$(starship init zsh)"
+    fi
 elif [ "$color_prompt" = yes ]; then
     PS1='${debian_chroot:+($debian_chroot)}\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
 else
