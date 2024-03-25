@@ -4,9 +4,9 @@ set encoding=utf-8"
 set ignorecase
 set smartcase
 set foldenable
-set foldmethod=indent 
+set foldmethod=indent
 set t_Co=256
-set backspace=indent,eol,start 
+set backspace=indent,eol,start
 set incsearch
 set lazyredraw
 set showmatch
@@ -112,14 +112,14 @@ au BufRead,BufNewFile *.strace set filetype=strace
 au BufRead,BufNewFile *.go call Corp_style()
 
 " cmake settings
-au BufRead,BufNewFile CMakeLists.txt call Dave_style()
+au BufRead,BufNewFile *.cmake,CMakeLists.txt call Dave_style()
 
 " Use the below highlight group when displaying bad whitespace is desired.
 highlight BadWhitespace ctermbg=red guibg=red
 " Display tabs at the beginning of a line in Python mode as bad.
 au BufRead,BufNewFile *.py,*.pyw match BadWhitespace /^\t\+/
 au BufRead,BufNewFile *.k,*.py,*.pyw,*.c,*.h match BadWhitespace /\s\+$/
- 
+
 " Python: not needed, C: prevents insertion of '*' at the beginning of every line in a comment
 au BufRead,BufNewFile *.c,*.h set formatoptions-=c formatoptions-=o formatoptions-=r
 
