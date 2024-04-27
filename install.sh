@@ -49,7 +49,7 @@ if [ -f ${SUITCASE}/bashrc ]; then
   . ${cfg_bash}
 fi
 
-# vimrc 
+# vimrc
 if [ -f ${SUITCASE}/vimrc ] && [ -d ${SUITCASE}/vim ]; then
   # Detect whether this is a David-generated vimrc
   if [ -f ${HOME}/.vimrc ]; then
@@ -62,7 +62,7 @@ if [ -f ${SUITCASE}/vimrc ] && [ -d ${SUITCASE}/vim ]; then
       mv ${HOME}/.vimrc ${bakdir}
     fi
   else
-    echo "No vimrc detected, installing suitcase version" 
+    echo "No vimrc detected, installing suitcase version"
   fi
 
   # Create new ~/.vimrc
@@ -90,6 +90,16 @@ if [ -f ${SUITCASE}/vimrc ] && [ -d ${SUITCASE}/vim ]; then
   ln -s ${SUITCASE}/vim ${HOME}/.vim
 fi
 
+# Direct neovim to look at suitcase .vimrc
+mkdir -p ${HOME}/.config/nvim
+if [ -f ${SUITCASE}/vimrc ] && [ -d ${SUITCASE}/vim ]; then
+  NVIMFILE=${HOME}/.config/nvim/init.vim
+  echo "set runtimepath^=${SUITCASE}/vim" > ${NVIMFILE}
+  echo "source ${SUITCASE}/vimrc" >> ${NVIMFILE}
+  echo "let &packpath = &runtimepath" >>${NVIMFILE}
+fi
+
+
 # tmux.conf
 if [ -f ${SUITCASE}/tmux.conf ]; then
 
@@ -104,7 +114,7 @@ if [ -f ${SUITCASE}/tmux.conf ]; then
       mv ${HOME}/.tmux.conf ${bakdir}
     fi
   else
-    echo "No tmux.conf detected, installing suitcase version" 
+    echo "No tmux.conf detected, installing suitcase version"
   fi
 
   # Very slim

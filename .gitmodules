@@ -22,3 +22,6 @@
 [submodule "vim/pack/plugins/start/copilot.vim"]
 	path = vim/pack/plugins/start/copilot.vim
 	url = https://github.com/github/copilot.vim.git
+[submodule "vim/pack/plugins/start/nvim-treesitter"]
+	path = vim/pack/plugins/start/nvim-treesitter
+	url = https://github.com/nvim-treesitter/nvim-treesitter.git
