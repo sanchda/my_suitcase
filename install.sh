@@ -95,8 +95,8 @@ mkdir -p ${HOME}/.config/nvim
 if [ -f ${SUITCASE}/vimrc ] && [ -d ${SUITCASE}/vim ]; then
   NVIMFILE=${HOME}/.config/nvim/init.vim
   echo "set runtimepath^=${SUITCASE}/vim" > ${NVIMFILE}
-  echo "source ${SUITCASE}/vimrc" >> ${NVIMFILE}
   echo "let &packpath = &runtimepath" >>${NVIMFILE}
+  echo "source ${SUITCASE}/vimrc" >> ${NVIMFILE}
 fi
 
 
