@@ -49,10 +49,6 @@ match ExtraWhitespace /\s\+$/
 "execute "set colorcolumn=" . join(range(81,465), ',')
 highlight ColorColumn ctermbg=lightgrey
 
-" === vim SLIME stuff ===
-let g:slime_target = "tmux"
-let g:slime_paste_file = "$HOME/.slime_paste"
-
 " === vimwiki/markdown ===
 let g:vimwiki_list = [{'path': '~/.vimwiki/', 'syntax': 'markdown', 'ext': '.md'}]
 
@@ -139,6 +135,6 @@ EOF
 " DiffView
 nnoremap <leader>gd :Gvdiffsplit!<CR>
 nnoremap <leader>gh :DiffviewFileHistory %<CR>
-nnoremap <leader>go :DiffviewOpen<CR>
+nnoremap <leader>go :DiffviewOpen main...HEAD<CR>
 nnoremap <leader>gc :DiffviewClose<CR>
 endif
