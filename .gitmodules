@@ -25,3 +25,9 @@
 [submodule "vim/pack/plugins/start/nvim-treesitter"]
 	path = vim/pack/plugins/start/nvim-treesitter
 	url = https://github.com/nvim-treesitter/nvim-treesitter.git
+[submodule "vim/pack/plugins/start/vim-fugitive.git"]
+	path = vim/pack/plugins/start/vim-fugitive
+	url = git@github.com:tpope/vim-fugitive.git
+[submodule "vim/pack/plugins/start/diffview.nvim"]
+	path = vim/pack/plugins/start/diffview.nvim
+	url = git@github.com:sindrets/diffview.nvim.git

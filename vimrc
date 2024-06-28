@@ -135,4 +135,10 @@ require'nvim-treesitter.configs'.setup {
   },
 }
 EOF
+
+" DiffView
+nnoremap <leader>gd :Gvdiffsplit!<CR>
+nnoremap <leader>gh :DiffviewFileHistory %<CR>
+nnoremap <leader>go :DiffviewOpen<CR>
+nnoremap <leader>gc :DiffviewClose<CR>
 endif
