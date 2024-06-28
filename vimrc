@@ -33,8 +33,29 @@ let $MYVIMRC="$SUITCASE/vimrc"
 set statusline+=%F
 
 " === Syntax Highlighting & auto-indent ===
-syntax enable
-filetype plugin indent on
+if has("nvim")
+  let g:python3_host_prog = expand('~/.pyenv/versions/3.12.2/bin/python3')
+lua << EOF
+require'nvim-treesitter.configs'.setup {
+  ensure_installed = { "c", "lua", "vim", "vimdoc", "query" },
+  sync_install = false,
+  auto_install = true,
+  highlight = {
+    enable = true,
+    additional_vim_regex_highlighting = false,
+  },
+}
+EOF
+
+  " DiffView
+  nnoremap <leader>gd :Gvdiffsplit!<CR>
+  nnoremap <leader>gh :DiffviewFileHistory %<CR>
+  nnoremap <leader>go :DiffviewOpen main...HEAD<CR>
+  nnoremap <leader>gc :DiffviewClose<CR>
+else
+  syntax enable
+  filetype plugin indent on
+endif
 set ofu=syntaxcomplete#Complete
 set autoindent
 set smartindent
@@ -117,24 +138,3 @@ au BufRead,BufNewFile *.k,*.py,*.pyw,*.c,*.h match BadWhitespace /\s\+$/
 
 " Python: not needed, C: prevents insertion of '*' at the beginning of every line in a comment
 au BufRead,BufNewFile *.c,*.h set formatoptions-=c formatoptions-=o formatoptions-=r
-
-" Neovim setup
-if has("nvim")
-lua << EOF
-require'nvim-treesitter.configs'.setup {
-  ensure_installed = { "c", "lua", "vim", "vimdoc", "query" },
-  sync_install = false,
-  auto_install = true,
-  highlight = {
-    enable = true,
-    additional_vim_regex_highlighting = false,
-  },
-}
-EOF
-
-" DiffView
-nnoremap <leader>gd :Gvdiffsplit!<CR>
-nnoremap <leader>gh :DiffviewFileHistory %<CR>
-nnoremap <leader>go :DiffviewOpen main...HEAD<CR>
-nnoremap <leader>gc :DiffviewClose<CR>
-endif

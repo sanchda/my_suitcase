@@ -1,18 +1,12 @@
 [submodule "vim/pack/plugins/start/lightline.vim"]
 	path = vim/pack/plugins/start/lightline.vim
 	url = github.com:itchyny/lightline.vim
-[submodule "vim/pack/plugins/start/vim-gitgutter"]
-	path = vim/pack/plugins/start/vim-gitgutter
-	url = github.com:airblade/vim-gitgutter.git
 [submodule "vim/pack/plugins/start/vimwiki"]
 	path = vim/pack/plugins/start/vimwiki
 	url = https://github.com/vimwiki/vimwiki.git
 [submodule "vim/pack/plugins/start/rust.vim"]
 	path = vim/pack/plugins/start/rust.vim
 	url = https://github.com/rust-lang/rust.vim
-[submodule "vim/pack/plugins/start/diffconflicts"]
-	path = vim/pack/plugins/start/diffconflicts
-	url = https://github.com/whiteinge/diffconflicts.git
 [submodule "vim/pack/plugins/start/vim-cmake-syntax"]
 	path = vim/pack/plugins/start/vim-cmake-syntax
 	url = https://github.com/pboettch/vim-cmake-syntax.git
