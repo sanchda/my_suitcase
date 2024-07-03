@@ -22,3 +22,9 @@
 [submodule "vim/pack/plugins/start/diffview.nvim"]
 	path = vim/pack/plugins/start/diffview.nvim
 	url = git@github.com:sindrets/diffview.nvim.git
+[submodule "vim/pack/plugins/start/nvim-web-devicons"]
+	path = vim/pack/plugins/start/nvim-web-devicons
+	url = git@github.com:nvim-tree/nvim-web-devicons.git
+[submodule "vim/pack/plugins/start/gitsigns.nvim"]
+	path = vim/pack/plugins/start/gitsigns.nvim
+	url = https://github.com/lewis6991/gitsigns.nvim.git
