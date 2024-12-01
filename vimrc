@@ -118,6 +118,9 @@ au BufRead,BufNewFile *.k,*.py,*.pyw,*.c,*.h match BadWhitespace /\s\+$/
 " Python: not needed, C: prevents insertion of '*' at the beginning of every line in a comment
 au BufRead,BufNewFile *.c,*.h set formatoptions-=c formatoptions-=o formatoptions-=r
 
+" Odin
+au BufRead,BufNewFile *.odin call Dave_style()
+
 " Neovim setup
 if has("nvim")
 lua << EOF

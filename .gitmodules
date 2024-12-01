@@ -28,3 +28,6 @@
 [submodule "vim/pack/plugins/start/diffview.nvim"]
 	path = vim/pack/plugins/start/diffview.nvim
 	url = git@github.com:sindrets/diffview.nvim.git
+[submodule "vim/pack/plugins/start/odin.vim"]
+	path = vim/pack/plugins/start/odin.vim
+	url = https://github.com/Tetralux/odin.vim.git
