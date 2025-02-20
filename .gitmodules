@@ -43,3 +43,6 @@
 [submodule "vim/pack/plugins/start/nvim-telescope"]
 	path = vim/pack/plugins/start/nvim-telescope
 	url = https://github.com/nvim-telescope/telescope.nvim.git
+[submodule "vim/pack/plugins/start/odin.vim"]
+	path = vim/pack/plugins/start/odin.vim
+	url = https://github.com/Tetralux/odin.vim.git
