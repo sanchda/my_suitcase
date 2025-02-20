@@ -177,4 +177,3 @@ nnoremap <leader>gh :DiffviewFileHistory %<CR>
 nnoremap <leader>go :DiffviewOpen main...HEAD<CR>
 nnoremap <leader>gc :DiffviewClose<CR>
 endif
->>>>>>> 55936fce5d4eeec29ebf2ddafa839a711d38ab13
