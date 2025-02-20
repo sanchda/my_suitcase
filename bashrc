@@ -13,15 +13,11 @@ fi
 
 # pyenv overrides
 if [ -z "${PYENV_ROOT}" ]; then
-  if [ -d "$HOME/.pyenv" ]; then
-    export PYENV_ROOT="$HOME/.pyenv"
-  fi
-else
-  if [ ! -d "${PYENV_ROOT}" ]; then
-    # If we're here, the PYENV_ROOT was given, but it doesn't exist.
-    # We unset it.
-    unset PYENV_ROOT
-  fi
+  export PYENV_ROOT="$HOME/.pyenv"
+fi
+
+if [ ! -d "${PYENV_ROOT}" ]; then
+  git clone https://github.com/pyenv/pyenv.git "${PYENV_ROOT}"
 fi
 
 # Ensure $PYENV_ROOT/bin is in PATH
@@ -29,16 +25,26 @@ if [[ ":$PATH:" != *":$PYENV_ROOT/bin:"* ]]; then
   export PATH="${PYENV_ROOT}/bin:$PATH"
 fi
 
-# Initialize pyenv
+# Initialize pyenv and pyenv-virtualenv
 if command -v pyenv 1>/dev/null 2>&1; then
-  eval "$(pyenv init -)"
+    # Initialize pyenv depending on the shell
+    if [ -n "$ZSH_VERSION" ]; then
+        eval "$(pyenv init - zsh)"
+    else
+        eval "$(pyenv init - bash)"
+    fi
 
-  # Check for virtualenv-init in the pyenv commands
+  # Check for pyenv-virtualenv plugin
+  if [ ! -d "$(pyenv root)/plugins/pyenv-virtualenv" ]; then
+    echo "pyenv-virtualenv not found, installing..."
+    git clone https://github.com/pyenv/pyenv-virtualenv.git "$(pyenv root)/plugins/pyenv-virtualenv"
+  fi
+
   if pyenv commands | grep -q virtualenv-init; then
     eval "$(pyenv virtualenv-init -)"
   fi
 else
-  echo "pyenv is installed but not found in the PATH."
+  echo "pyenv is not installed or not found in the PATH."
 fi
 
 # rbenv overrides

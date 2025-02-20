@@ -28,3 +28,18 @@
 [submodule "vim/pack/plugins/start/gitsigns.nvim"]
 	path = vim/pack/plugins/start/gitsigns.nvim
 	url = https://github.com/lewis6991/gitsigns.nvim.git
+[submodule "vim/pack/plugins/start/nvim-lspconfig"]
+	path = vim/pack/plugins/start/nvim-lspconfig
+	url = https://github.com/neovim/nvim-lspconfig.git
+[submodule "vim/pack/plugins/start/nvim-lspsaga"]
+	path = vim/pack/plugins/start/nvim-lspsaga
+	url = https://github.com/nvimdev/lspsaga.nvim.git
+[submodule "vim/pack/plugins/start/nvim-lsp-inlayhints"]
+	path = vim/pack/plugins/start/nvim-lsp-inlayhints
+	url = https://github.com/lvimuser/lsp-inlayhints.nvim.git
+[submodule "vim/pack/plugins/start/nvim-plenary"]
+	path = vim/pack/plugins/start/nvim-plenary
+	url = https://github.com/nvim-lua/plenary.nvim.git
+[submodule "vim/pack/plugins/start/nvim-telescope"]
+	path = vim/pack/plugins/start/nvim-telescope
+	url = https://github.com/nvim-telescope/telescope.nvim.git

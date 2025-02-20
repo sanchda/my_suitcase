@@ -46,6 +46,18 @@ require'nvim-treesitter.configs'.setup {
   },
 }
 require('gitsigns').setup()
+require('lspconfig').rust_analyzer.setup{}
+require('lspsaga').setup()
+require('lsp-inlayhints').setup()
+require('telescope').setup()
+vim.api.nvim_set_keymap('n', '<leader>lr', '<cmd>Telescope lsp_references<CR>', { noremap = true, silent = true })
+vim.api.nvim_set_keymap('n', '<leader>ld', '<cmd>Telescope lsp_definitions<CR>', { noremap = true, silent = true })
+local builtin = require('telescope.builtin')
+vim.keymap.set('n', '<leader>ff', builtin.find_files, { desc = 'Telescope find files' })
+vim.keymap.set('n', '<leader>fg', builtin.live_grep, { desc = 'Telescope live grep' })
+vim.keymap.set('n', '<leader>fb', builtin.buffers, { desc = 'Telescope buffers' })
+vim.keymap.set('n', '<leader>fh', builtin.help_tags, { desc = 'Telescope help tags' })
+vim.api.nvim_set_keymap('n', '<leader>ca', '<cmd>Lspsaga code_action<CR>', { noremap = true, silent = true })
 EOF
 
   " DiffView
