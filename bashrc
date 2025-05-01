@@ -11,46 +11,46 @@ if [ -f "$HOME"/.workstuff/workstuff ]; then
   source "$HOME"/.workstuff/workstuff
 fi
 
-# pyenv overrides
-if [ -z "${PYENV_ROOT}" ]; then
-  export PYENV_ROOT="$HOME/.pyenv"
-fi
-
-if [ ! -d "${PYENV_ROOT}" ]; then
-  git clone https://github.com/pyenv/pyenv.git "${PYENV_ROOT}"
-fi
-
-# Ensure $PYENV_ROOT/bin is in PATH
-if [[ ":$PATH:" != *":$PYENV_ROOT/bin:"* ]]; then
-  export PATH="${PYENV_ROOT}/bin:$PATH"
-fi
-
-# Initialize pyenv and pyenv-virtualenv
-if command -v pyenv 1>/dev/null 2>&1; then
-    # Initialize pyenv depending on the shell
-    if [ -n "$ZSH_VERSION" ]; then
-        eval "$(pyenv init - zsh)"
-    else
-        eval "$(pyenv init - bash)"
-    fi
-
-  # Check for pyenv-virtualenv plugin
-  if [ ! -d "$(pyenv root)/plugins/pyenv-virtualenv" ]; then
-    echo "pyenv-virtualenv not found, installing..."
-    git clone https://github.com/pyenv/pyenv-virtualenv.git "$(pyenv root)/plugins/pyenv-virtualenv"
-  fi
-
-  if pyenv commands | grep -q virtualenv-init; then
-    eval "$(pyenv virtualenv-init -)"
-  fi
-else
-  echo "pyenv is not installed or not found in the PATH."
-fi
-
-# rbenv overrides
-if command -v rbenv >/dev/null 2>&1; then
-  eval "$(rbenv init -)"
-fi
+## pyenv overrides
+#if [ -z "${PYENV_ROOT}" ]; then
+#  export PYENV_ROOT="$HOME/.pyenv"
+#fi
+#
+#if [ ! -d "${PYENV_ROOT}" ]; then
+#  git clone https://github.com/pyenv/pyenv.git "${PYENV_ROOT}"
+#fi
+#
+## Ensure $PYENV_ROOT/bin is in PATH
+#if [[ ":$PATH:" != *":$PYENV_ROOT/bin:"* ]]; then
+#  export PATH="${PYENV_ROOT}/bin:$PATH"
+#fi
+#
+## Initialize pyenv and pyenv-virtualenv
+#if command -v pyenv 1>/dev/null 2>&1; then
+#    # Initialize pyenv depending on the shell
+#    if [ -n "$ZSH_VERSION" ]; then
+#        eval "$(pyenv init - zsh)"
+#    else
+#        eval "$(pyenv init - bash)"
+#    fi
+#
+#  # Check for pyenv-virtualenv plugin
+#  if [ ! -d "$(pyenv root)/plugins/pyenv-virtualenv" ]; then
+#    echo "pyenv-virtualenv not found, installing..."
+#    git clone https://github.com/pyenv/pyenv-virtualenv.git "$(pyenv root)/plugins/pyenv-virtualenv"
+#  fi
+#
+#  if pyenv commands | grep -q virtualenv-init; then
+#    eval "$(pyenv virtualenv-init -)"
+#  fi
+#else
+#  echo "pyenv is not installed or not found in the PATH."
+#fi
+#
+## rbenv overrides
+#if command -v rbenv >/dev/null 2>&1; then
+#  eval "$(rbenv init -)"
+#fi
 
 # Mac overrides.  We don't check that things are installed, since that was
 # checked by the installer
@@ -161,11 +161,11 @@ fi
 
 # includes
 if [ -f "$SUITCASE/bash_aliases" ];     then source "$SUITCASE/bash_aliases"; fi           # Use suitcase aliases
-if [ -f "$SUITCASE/bash_scripts" ];     then source "$SUITCASE/bash_scripts"; fi           # Install AWS functions
-if [ -f "$SUITCASE/bash_completion" ];  then source "$SUITCASE/bash_completion"; fi        # Install David's completion
-if [ -f /etc/bash_completion ] && ! shopt -oq posix; then source /etc/bash_completion; fi  # Handy completion!
+#if [ -f "$SUITCASE/bash_scripts" ];     then source "$SUITCASE/bash_scripts"; fi           # Install AWS functions
+#if [ -f "$SUITCASE/bash_completion" ];  then source "$SUITCASE/bash_completion"; fi        # Install David's completion
+#if [ -f /etc/bash_completion ] && ! shopt -oq posix; then source /etc/bash_completion; fi  # Handy completion!
 
 ## Finalize
 export DAVE_LOADED=1
-export JAVA_HOME="/usr/lib/jvm/java-17-openjdk-amd64"
-export PATH=$JAVA_HOME:$PATH
+#export JAVA_HOME="/usr/lib/jvm/java-17-openjdk-amd64"
+#export PATH=$JAVA_HOME:$PATH
