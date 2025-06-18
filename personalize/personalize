@@ -1,12 +1,5 @@
 #!/bin/bash
-# Script starts on coder startup
-# This script traverses through the personalize_scripts directory
-# and executes all files that have the executable bit set
-
-# Resolve the script path even if it's a symlink
 SCRIPT_PATH="$(realpath "$0")"
-
-# Define the path to the personalize_scripts directory based on the resolved script location
 SCRIPTS_DIR="$(dirname "$SCRIPT_PATH")/scripts"
 if [ ! -d "$SCRIPTS_DIR" ]; then
     echo "Error: Directory $SCRIPTS_DIR does not exist"
@@ -19,4 +12,3 @@ find "$SCRIPTS_DIR" -type f -executable | sort | while read -r script; do
     echo "Executing: $script"
     "$script" || echo "Error: Failed to execute $script"
 done
-
