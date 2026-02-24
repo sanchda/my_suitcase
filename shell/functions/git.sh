@@ -1,4 +1,3 @@
-#!/bin/bash
 
 # Git worktree function to create new branch from main or checkout existing remote
 gwA() {

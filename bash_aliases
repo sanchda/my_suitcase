@@ -12,3 +12,11 @@ alias grep='grep --color=auto --exclude-dir="*.svn" --exclude-dir="*.git"'
 alias tmuxs='tmux_sixel -L tmux_sixel'
 alias mytop='HTOPRC=${SC_HTOPRC} htop'
 alias k='kubectl'
+
+# Git worktree aliases
+alias gw='git worktree'
+alias gwl='git worktree list'
+alias gwr='git worktree remove'
+alias gwa='git worktree add'
+alias gwn='git fetch origin && git worktree add'
+alias gwb='git worktree add -b'
