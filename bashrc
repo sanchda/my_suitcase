@@ -74,7 +74,11 @@ export HISTSIZE=10000
 export HISTFILESIZE=2000000
 export HISTCONTROL=ignoreboth:erasedups
 export HISTIGNORE='ls:ll:ls -alh:pwd:clear:history'
-export HISTFILE=~/.shared_history  # Use a common history file for Bash and Zsh
+if [ -n "$BASH_VERSION" ]; then
+  export HISTFILE=~/.bash_history
+elif [ -n "$ZSH_VERSION" ]; then
+  export HISTFILE=~/.zsh_history
+fi
 
 # Bash-specific settings
 if [ -n "$BASH_VERSION" ]; then
@@ -168,6 +172,16 @@ if [ -f "$SUITCASE/bash_aliases" ];     then source "$SUITCASE/bash_aliases"; fi
 if [ -f "$SUITCASE/bash_scripts" ];     then source "$SUITCASE/bash_scripts"; fi           # Install scripts and functions
 #if [ -f "$SUITCASE/bash_completion" ];  then source "$SUITCASE/bash_completion"; fi        # Install David's completion
 #if [ -f /etc/bash_completion ] && ! shopt -oq posix; then source /etc/bash_completion; fi  # Handy completion!
+
+# atuin shell history (https://atuin.sh) — takes over Ctrl-R and Up arrow.
+# Guarded so the rc still works on machines where atuin isn't installed yet.
+if command -v atuin >/dev/null 2>&1; then
+  if [ -n "$BASH_VERSION" ]; then
+    eval "$(atuin init bash)"
+  elif [ -n "$ZSH_VERSION" ]; then
+    eval "$(atuin init zsh)"
+  fi
+fi
 
 ## Finalize
 export DAVE_LOADED=1

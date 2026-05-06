@@ -19,6 +19,38 @@ if [ -f "$HOME/.workstuff/workstuff" ]; then
   source "$HOME/.workstuff/workstuff"
 fi
 
+# pyenv
+if [ -d "$HOME/.pyenv" ]; then
+  export PYENV_ROOT="$HOME/.pyenv"
+  if [[ ":$PATH:" != *":$PYENV_ROOT/bin:"* ]]; then
+    export PATH="$PYENV_ROOT/bin:$PATH"
+  fi
+  if command -v pyenv 1>/dev/null 2>&1; then
+    if [ -n "$ZSH_VERSION" ]; then
+      eval "$(pyenv init - zsh)"
+    else
+      eval "$(pyenv init - bash)"
+    fi
+  fi
+fi
+
+# rbenv
+if [ -d "$HOME/.rbenv" ]; then
+  if [[ ":$PATH:" != *":$HOME/.rbenv/bin:"* ]]; then
+    export PATH="$HOME/.rbenv/bin:$PATH"
+  fi
+  if command -v rbenv 1>/dev/null 2>&1; then
+    eval "$(rbenv init -)"
+  fi
+fi
+
+# nvm
+if [ -d "$HOME/.nvm" ]; then
+  export NVM_DIR="$HOME/.nvm"
+  [ -s "$NVM_DIR/nvm.sh" ] && source "$NVM_DIR/nvm.sh"
+  [ -s "$NVM_DIR/bash_completion" ] && source "$NVM_DIR/bash_completion"
+fi
+
 # macOS GNU path fixups
 case "$(uname -s)" in
   "Darwin")
@@ -93,3 +125,8 @@ for _fn_file in "$SUITCASE"/shell/functions/*.sh; do
   [ -f "$_fn_file" ] && source "$_fn_file"
 done
 unset _fn_file
+
+# Per-machine overrides (not tracked in git)
+if [ -f "$SUITCASE/overrides" ]; then
+  source "$SUITCASE/overrides"
+fi
