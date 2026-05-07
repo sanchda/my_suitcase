@@ -22,6 +22,9 @@ bash "$SUITCASE/install/shell.sh"
 # tmux
 bash "$SUITCASE/install/tmux.sh"
 
+# atuin (config symlink only — binary install lives in personalize/scripts/get_atuin.sh)
+bash "$SUITCASE/install/atuin.sh"
+
 # rlwrap histories
 [ ! -d "${HOME}/history" ] && mkdir -m 0700 "${HOME}/history"
 

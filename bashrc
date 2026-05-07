@@ -174,14 +174,9 @@ if [ -f "$SUITCASE/bash_scripts" ];     then source "$SUITCASE/bash_scripts"; fi
 #if [ -f /etc/bash_completion ] && ! shopt -oq posix; then source /etc/bash_completion; fi  # Handy completion!
 
 # atuin shell history (https://atuin.sh) — takes over Ctrl-R and Up arrow.
-# Guarded so the rc still works on machines where atuin isn't installed yet.
-if command -v atuin >/dev/null 2>&1; then
-  if [ -n "$BASH_VERSION" ]; then
-    eval "$(atuin init bash)"
-  elif [ -n "$ZSH_VERSION" ]; then
-    eval "$(atuin init zsh)"
-  fi
-fi
+# Config ships from the suitcase via a symlink at ~/.config/atuin/config.toml
+# (installed by install/atuin.sh). Init logic lives in atuin/shell-init.sh.
+[ -f "$SUITCASE/atuin/shell-init.sh" ] && . "$SUITCASE/atuin/shell-init.sh"
 
 ## Finalize
 export DAVE_LOADED=1

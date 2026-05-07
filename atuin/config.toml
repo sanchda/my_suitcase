@@ -1,0 +1,25 @@
+# Atuin configuration — shipped via the suitcase.
+# install/atuin.sh symlinks ~/.config/atuin/config.toml here so that any
+# atuin invocation (including the tmux popup, which doesn't propagate
+# $ATUIN_CONFIG_DIR) finds this file via the default config path.
+# Per-machine tweaks: override individual ATUIN_* env vars in $SUITCASE/overrides.
+
+# Tmux harmonization: Ctrl-R searches global history; Up arrow shows just
+# this shell's history. Each tmux pane is its own atuin session, so
+# "session" naturally maps to "this pane."
+filter_mode = "global"
+filter_mode_shell_up_key_binding = "session"
+
+enter_accept = true
+
+[search]
+# Tab in the search UI cycles through these in order. Local-feeling modes
+# come first so a few Tabs widens the scope; global is always one Tab away.
+filters = ["session", "directory", "global", "host"]
+
+[tmux]
+# Open the search UI in a tmux popup when running inside tmux (>= 3.2).
+enabled = true
+
+[sync]
+records = true
