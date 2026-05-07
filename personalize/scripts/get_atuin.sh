@@ -10,7 +10,27 @@ fi
 
 # Variables
 ATUIN_VERSION="18.16.0"
-ATUIN_TARGET="x86_64-unknown-linux-musl"
+
+# Pick the cargo-dist target triple matching this host. Note: atuin upstream
+# does NOT publish an x86_64-apple-darwin (Intel Mac) build — fall through to
+# brew there.
+os=$(uname -s)
+arch=$(uname -m)
+case "$os/$arch" in
+    Linux/x86_64)              ATUIN_TARGET="x86_64-unknown-linux-musl" ;;
+    Linux/aarch64|Linux/arm64) ATUIN_TARGET="aarch64-unknown-linux-musl" ;;
+    Darwin/arm64)              ATUIN_TARGET="aarch64-apple-darwin" ;;
+    Darwin/x86_64)
+        echo "atuin upstream does not publish an Intel-Mac binary." >&2
+        echo "Install via Homebrew instead: brew install atuin" >&2
+        exit 1
+        ;;
+    *)
+        echo "Unsupported OS/arch for atuin install: $os/$arch" >&2
+        exit 1
+        ;;
+esac
+
 ATUIN_ARCHIVE="atuin-${ATUIN_TARGET}.tar.gz"
 ATUIN_URL="https://github.com/atuinsh/atuin/releases/download/v${ATUIN_VERSION}/${ATUIN_ARCHIVE}"
 EXTRACT_DIR="atuin-${ATUIN_TARGET}"
