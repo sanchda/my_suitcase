@@ -4,6 +4,9 @@
 GPG_TTY=$(tty)
 export GPG_TTY
 PATH=${SUITCASE}/bin:$PATH
+if [ -x "$HOME/.claude/local/claude" ]; then
+  PATH="$HOME/.claude/local:$PATH"
+fi
 export PATH
 
 # Set the locale to C
