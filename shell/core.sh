@@ -7,6 +7,9 @@ export GPG_TTY
 
 # PATH
 PATH="${SUITCASE}/bin:$PATH"
+if [ -x "$HOME/.claude/local/claude" ]; then
+  PATH="$HOME/.claude/local:$PATH"
+fi
 export PATH
 
 # Locale
