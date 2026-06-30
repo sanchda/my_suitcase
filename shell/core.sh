@@ -12,10 +12,11 @@ if [ -x "$HOME/.claude/local/claude" ]; then
 fi
 export PATH
 
-# Locale
-LC_ALL=C
-LC_LANG=C
-export LC_ALL LC_LANG
+# Locale — C.UTF-8 keeps C's predictable sort/format behavior but enables
+# UTF-8 character handling (needed for tmux to render non-ASCII glyphs).
+LC_ALL=C.UTF-8
+LANG=C.UTF-8
+export LC_ALL LANG
 
 # Work-specific overrides
 if [ -f "$HOME/.workstuff/workstuff" ]; then
@@ -57,7 +58,7 @@ fi
 # macOS GNU path fixups
 case "$(uname -s)" in
   "Darwin")
-    export LC_CTYPE=C
+    export LC_CTYPE=C.UTF-8
     for dir in /usr/local/opt/coreutils/libexec/gnubin /usr/local/opt/grep/libexec/gnubin /usr/local/opt/llvm/bin; do
       if [[ ":$PATH:" != *":$dir:"* ]]; then
         export PATH="$dir:$PATH"
