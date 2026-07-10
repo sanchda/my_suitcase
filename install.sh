@@ -30,3 +30,8 @@ bash "$SUITCASE/install/atuin.sh"
 
 echo ""
 echo "=== Suitcase installed ==="
+
+# Verify — run in a subshell with SUITCASE exported so sc-doctor can resolve
+# sourced files even though this shell never sourced the new rc files.
+echo ""
+SUITCASE="$SUITCASE" bash "$SUITCASE/bin/sc-doctor" || true
