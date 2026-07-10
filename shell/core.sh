@@ -10,6 +10,9 @@ PATH="${SUITCASE}/bin:$PATH"
 if [ -x "$HOME/.claude/local/claude" ]; then
   PATH="$HOME/.claude/local:$PATH"
 fi
+if [ -d "$HOME/.local/bin" ]; then
+  PATH="$HOME/.local/bin:$PATH"
+fi
 export PATH
 
 # Locale — C.UTF-8 keeps C's predictable sort/format behavior but enables
