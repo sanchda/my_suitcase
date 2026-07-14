@@ -12,12 +12,14 @@ I pack a suitcase.
 ## Install
 
 ```sh
-git clone <this-repo> ~/my_suitcase
-cd ~/my_suitcase
+git clone <this-repo> ~/suitcase   # clone wherever you like
+cd ~/suitcase
 ./install.sh
 ```
 
-The installer is modular and safe to re-run. It generates `~/.bashrc`,
+The installer resolves `$SUITCASE` to wherever you cloned the repo (it derives
+the path from its own location), so the clone directory above is just an
+example — any path works. The installer is modular and safe to re-run. It generates `~/.bashrc`,
 `~/.zshrc`, and `~/.zshenv` (each marked with a `#DAVEGEN_SC` header), installs
 `tmux.conf`, and links the atuin config. Any pre-existing, non-suitcase file it
 would overwrite is moved to `~/dotbak/SCB_<random>/` first.
