@@ -1,0 +1,15 @@
+# Atuin configuration — shipped via the suitcase.
+# install/atuin.sh symlinks ~/.config/atuin/config.toml here so that any
+# atuin invocation (including the tmux popup, which doesn't propagate
+# $ATUIN_CONFIG_DIR) finds this file via the default config path.
+# Per-machine tweaks: override individual ATUIN_* env vars in $SUITCASE/overrides.
+filter_mode = "global"
+filter_mode_shell_up_key_binding = "session"
+
+enter_accept = true
+
+[search]
+filters = ["session", "directory", "global", "host"]
+
+[tmux]
+enabled = true

@@ -1,0 +1,101 @@
+#!/bin/bash
+# sc-doctor — verify a suitcase install is healthy.
+#
+# Checks that SUITCASE resolves, that generated rc files are suitcase-owned,
+# that every file they source actually exists, and that expected tools are
+# present. Exits non-zero if anything is broken (✗); warnings (⚠) don't fail.
+
+HEADER="#DAVEGEN_SC"
+fail=0
+
+green() { printf '\033[32m✓\033[0m %s\n' "$1"; }
+warn()  { printf '\033[33m⚠\033[0m %s\n' "$1"; }
+bad()   { printf '\033[31m✗\033[0m %s\n' "$1"; fail=1; }
+
+echo "=== sc-doctor ==="
+
+# --- SUITCASE ---
+if [ -z "$SUITCASE" ]; then
+  bad "SUITCASE is not set (open a new shell, or run install.sh)"
+  echo ""
+  echo "Cannot continue without SUITCASE."
+  exit 1
+elif [ ! -d "$SUITCASE" ]; then
+  bad "SUITCASE=$SUITCASE but that directory does not exist"
+  exit 1
+else
+  green "SUITCASE → $SUITCASE"
+fi
+
+# --- generated rc files carry the header ---
+# Format: "label:path:shellfile" (shellfile = the shell-specific file it sources)
+rc_files=(
+  ".bashrc:$HOME/.bashrc:bash.sh"
+  ".zshrc:$HOME/.zshrc:zsh.sh"
+  ".zshenv:$HOME/.zshenv:"
+)
+[ "$(uname -s)" = "Darwin" ] && rc_files[0]=".bash_profile:$HOME/.bash_profile:bash.sh"
+
+for entry in "${rc_files[@]}"; do
+  label="${entry%%:*}"
+  rest="${entry#*:}"
+  path="${rest%%:*}"
+  if [ ! -f "$path" ]; then
+    bad "$label missing ($path) — run install.sh"
+  elif [ "$(head -n 1 "$path")" != "$HEADER" ]; then
+    warn "$label exists but is not suitcase-generated (no $HEADER header)"
+  else
+    green "$label is suitcase-owned"
+  fi
+done
+
+# --- every suitcase file the rc files source must exist ---
+sourced=(
+  "shell/boot.sh"
+  "shell/core.sh"
+  "shell/bash.sh"
+  "shell/zsh.sh"
+)
+for rel in "${sourced[@]}"; do
+  if [ -r "$SUITCASE/$rel" ]; then
+    green "sources $rel"
+  else
+    bad "sourced file missing: $SUITCASE/$rel"
+  fi
+done
+
+# function files (loaded by core.sh's glob loop)
+fn_count=$(find "$SUITCASE/shell/functions" -maxdepth 1 -name '*.sh' -type f 2>/dev/null | wc -l | tr -d ' ')
+if [ "$fn_count" -gt 0 ]; then
+  green "shell/functions: $fn_count file(s)"
+else
+  warn "shell/functions has no *.sh files"
+fi
+
+# --- atuin config symlink ---
+atuin_src="$SUITCASE/atuin/config.toml"
+atuin_dst="$HOME/.config/atuin/config.toml"
+if [ ! -f "$atuin_src" ]; then
+  warn "no atuin/config.toml in suitcase"
+elif [ "$(readlink "$atuin_dst" 2>/dev/null)" = "$atuin_src" ]; then
+  green "atuin config → suitcase"
+else
+  warn "atuin config not linked to suitcase (run install/atuin.sh)"
+fi
+
+# --- expected tools (missing = warning, not failure) ---
+for tool in starship atuin vim tmux htop; do
+  if command -v "$tool" >/dev/null 2>&1; then
+    green "tool: $tool"
+  else
+    warn "tool not found: $tool"
+  fi
+done
+
+echo ""
+if [ "$fail" -eq 0 ]; then
+  printf '\033[32mAll good.\033[0m\n'
+else
+  printf '\033[31mProblems found — run %s/install.sh to repair.\033[0m\n' "$SUITCASE"
+fi
+exit "$fail"
