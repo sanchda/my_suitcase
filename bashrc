@@ -115,6 +115,9 @@ if [ "$force_color_prompt" = yes ]; then
     fi
 fi
 
+# Force IPv4
+export NODE_OPTIONS="--dns-result-order=ipv4first"
+
 # Set the prompt
 if [ -n "$ZSH_VERSION" ]; then
     if command -v starship >/dev/null 2>&1; then
@@ -161,3 +164,5 @@ if [ -f "$SUITCASE/overrides" ];     then source "$SUITCASE/overrides"; fi
 export DAVE_LOADED=1
 #export JAVA_HOME="/usr/lib/jvm/java-17-openjdk-amd64"
 #export PATH=$JAVA_HOME:$PATH
+source ~/miniconda3/bin/activate
+conda init --all
