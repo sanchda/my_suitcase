@@ -1,29 +1,36 @@
 #!/bin/bash
-# Configure the Claude Code status line to show live usage/cost via ccusage.
+# Configure the Claude Code status line to show live usage/cost + limit bars.
 #
-# Merges ONLY the statusLine key into ~/.claude/settings.json, so any existing
-# per-machine config (model, enabledPlugins, ...) is preserved. Idempotent —
-# safe to re-run. The status line shells out to `npx ccusage`, so the box needs
-# Node.js at runtime.
+# Points statusLine at bin/cc-statusline (ccusage cost/burn line + 5h/7d
+# subscription limit bars). Merges ONLY the statusLine key into
+# ~/.claude/settings.json, so any existing per-machine config (model,
+# enabledPlugins, ...) is preserved. Idempotent — safe to re-run. The status
+# line shells out to `npx ccusage`, so the box needs Node.js at runtime.
 set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SUITCASE_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+RENDERER="$SUITCASE_ROOT/bin/cc-statusline"
 
 settings_dir="$HOME/.claude"
 settings="$settings_dir/settings.json"
 
-# The statusLine config we want present.
-read -r -d '' FRAG <<'JSON' || true
-{
-  "statusLine": {
-    "type": "command",
-    "command": "npx -y ccusage statusline"
-  }
-}
-JSON
+if [ ! -x "$RENDERER" ]; then
+  echo "Renderer not found or not executable: $RENDERER" >&2
+  echo "Run: chmod +x \"$RENDERER\"" >&2
+  exit 1
+fi
 
 if ! command -v jq >/dev/null 2>&1; then
   echo "jq is required to merge Claude settings. Install jq first." >&2
   exit 1
 fi
+
+# The statusLine config we want present. jq --arg injects the absolute renderer
+# path for THIS box (settings.json is per-machine, so an absolute path is fine
+# and portable-by-reinstall wherever the suitcase is cloned).
+FRAG="$(jq -n --arg cmd "$RENDERER" \
+  '{statusLine: {type: "command", command: $cmd}}')"
 
 if ! command -v npx >/dev/null 2>&1; then
   echo "Warning: npx (Node.js) not found. ccusage runs via npx at runtime —" >&2

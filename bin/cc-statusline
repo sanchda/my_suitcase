@@ -1,0 +1,107 @@
+#!/bin/bash
+# Claude Code status line (hybrid):
+#   line 1 — ccusage: session/today/block cost, burn rate, context
+#   line 2 — subscription limit bars: 5-hour and 7-day usage %, with a marker
+#            showing how far through each window we are, and time-to-reset.
+#
+# Claude Code pipes the status-line JSON on stdin. Both lines degrade
+# gracefully: no npx -> no line 1; no rate_limits in the JSON -> no line 2.
+
+input=$(cat)
+
+# --- line 1: ccusage ---------------------------------------------------------
+if command -v npx >/dev/null 2>&1; then
+  printf '%s' "$input" | npx -y ccusage statusline 2>/dev/null
+fi
+
+# --- line 2: rate-limit bars -------------------------------------------------
+command -v jq >/dev/null 2>&1 || exit 0
+
+FIVE_H=$(printf '%s' "$input" | jq -r '.rate_limits.five_hour.used_percentage // empty')
+WEEK=$(printf '%s' "$input" | jq -r '.rate_limits.seven_day.used_percentage // empty')
+FIVE_H_RESETS=$(printf '%s' "$input" | jq -r '.rate_limits.five_hour.resets_at // empty')
+WEEK_RESETS=$(printf '%s' "$input" | jq -r '.rate_limits.seven_day.resets_at // empty')
+
+GREY='\033[90m'
+WHITE='\033[97m'
+BLUE='\033[94m'
+NC='\033[0m'
+
+# make_bar <used_pct> <resets_at_epoch> <window_secs>
+# Draws a 10-cell bar filled to used_pct. The cell at the current time position
+# within the window is highlighted white, so you can see usage vs. elapsed time.
+make_bar() {
+  local pct=$1 resets_at=$2 window_secs=$3
+  local filled=$(( ${pct%.*} / 10 ))
+  local time_pos=""
+
+  if [[ "$resets_at" =~ ^[0-9]+$ ]] && [ -n "$window_secs" ] && [ "$window_secs" -gt 0 ]; then
+    local now_ts remaining
+    now_ts=$(date +%s)
+    remaining=$(( resets_at - now_ts ))
+    time_pos=$(( (window_secs - remaining) * 10 / window_secs ))
+    [ "$time_pos" -lt 0 ] && time_pos=0
+    [ "$time_pos" -gt 9 ] && time_pos=9
+  fi
+
+  local bar="" i
+  for i in $(seq 0 9); do
+    if [ -n "$time_pos" ] && [ "$i" -eq "$time_pos" ]; then
+      if [ "$i" -lt "$filled" ]; then
+        bar="${bar}${WHITE}█${GREY}"
+      else
+        bar="${bar}${WHITE}░${GREY}"
+      fi
+    elif [ "$i" -lt "$filled" ]; then
+      bar="${bar}█"
+    else
+      bar="${bar}░"
+    fi
+  done
+  printf '%s' "$bar"
+}
+
+# format_reset <resets_at_epoch> -> "4d6h" / "3h12m" / "45m"
+format_reset() {
+  local resets_at=$1
+  [[ "$resets_at" =~ ^[0-9]+$ ]] || { printf ''; return; }
+  local now_ts remaining days hours mins
+  now_ts=$(date +%s)
+  remaining=$(( resets_at - now_ts ))
+  [ "$remaining" -lt 0 ] && remaining=0
+  days=$(( remaining / 86400 ))
+  hours=$(( (remaining % 86400) / 3600 ))
+  mins=$(( (remaining % 3600) / 60 ))
+  if [ "$days" -gt 0 ]; then
+    printf '%dd%dh' "$days" "$hours"
+  elif [ "$hours" -gt 0 ]; then
+    printf '%dh%dm' "$hours" "$mins"
+  else
+    printf '%dm' "$mins"
+  fi
+}
+
+FIVE_H_SEG=""
+WEEK_SEG=""
+
+if [ -n "$FIVE_H" ]; then
+  bar=$(make_bar "$FIVE_H" "$FIVE_H_RESETS" $(( 5 * 3600 )))
+  reset=$(format_reset "$FIVE_H_RESETS")
+  FIVE_H_SEG="${GREY}5h: ${FIVE_H%.*}% ${NC}${bar}${NC}"
+  [ -n "$reset" ] && FIVE_H_SEG="${FIVE_H_SEG}${GREY} (${BLUE}${reset}${NC}${GREY})${NC}"
+fi
+
+if [ -n "$WEEK" ]; then
+  bar=$(make_bar "$WEEK" "$WEEK_RESETS" $(( 7 * 24 * 3600 )))
+  reset=$(format_reset "$WEEK_RESETS")
+  WEEK_SEG="${GREY}7d: ${WEEK%.*}% ${NC}${bar}${NC}"
+  [ -n "$reset" ] && WEEK_SEG="${WEEK_SEG}${GREY} (${BLUE}${reset}${NC}${GREY})${NC}"
+fi
+
+if [ -n "$FIVE_H_SEG" ] && [ -n "$WEEK_SEG" ]; then
+  printf '%b\n' "${FIVE_H_SEG} | ${WEEK_SEG}"
+elif [ -n "$FIVE_H_SEG" ]; then
+  printf '%b\n' "$FIVE_H_SEG"
+elif [ -n "$WEEK_SEG" ]; then
+  printf '%b\n' "$WEEK_SEG"
+fi
