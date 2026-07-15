@@ -37,6 +37,3 @@ case "$TERM" in
     PS1="\[\e]0;${debian_chroot:+($debian_chroot)}\u@\h: \w\a\]$PS1"
     ;;
 esac
-
-# atuin shell history — takes over Ctrl-R and Up arrow.
-[ -f "$SUITCASE/atuin/shell-init.sh" ] && . "$SUITCASE/atuin/shell-init.sh"

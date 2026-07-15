@@ -17,6 +17,13 @@ fi
 #   Emit a thin rc file that bootstraps sc_source (with a trivial fallback if
 #   boot.sh is missing) and guard-sources core + the shell-specific file, so a
 #   moved/renamed file warns clearly instead of erroring on every startup.
+#
+#   atuin/shell-init.sh is sourced here at TOP-LEVEL scope, NOT via sc_source.
+#   bash-preexec runs `declare -a preexec_functions` at its top level; `declare`
+#   inside a function creates a *local* array, so sourcing it through the
+#   sc_source function frame would make atuin append its hook to a local that
+#   vanishes on return, leaving the global preexec_functions empty (atuin then
+#   records nothing). Keep this line in the rc file's global scope.
 rc_body() {
   cat <<RCEOF
 $HEADER
@@ -25,6 +32,7 @@ if [ -r "\$SUITCASE/shell/boot.sh" ]; then . "\$SUITCASE/shell/boot.sh"; fi
 command -v sc_source >/dev/null 2>&1 || sc_source() { [ -r "\$1" ] && . "\$1"; }
 sc_source "\$SUITCASE/shell/core.sh"
 sc_source "\$SUITCASE/shell/$1"
+[ -r "\$SUITCASE/atuin/shell-init.sh" ] && . "\$SUITCASE/atuin/shell-init.sh"
 RCEOF
 }
 
