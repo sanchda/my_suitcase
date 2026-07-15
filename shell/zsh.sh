@@ -14,6 +14,3 @@ export SHELL=$(which zsh)
 if command -v starship >/dev/null 2>&1; then
   eval "$(starship init zsh)"
 fi
-
-# atuin shell history — takes over Ctrl-R and Up arrow.
-[ -f "$SUITCASE/atuin/shell-init.sh" ] && . "$SUITCASE/atuin/shell-init.sh"
