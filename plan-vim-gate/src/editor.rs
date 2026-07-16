@@ -42,6 +42,7 @@ pub fn open_and_wait(path: &Path) -> R<()> {
         return Err(e);
     }
 
+    crate::debug::log(&format!("editor pane spawned (chan={chan}); waiting for close"));
     // Blocks until the pane's `-U` releases the lock (editor closed).
     tmux(&["wait-for", "-L", &chan])?;
     // Final release to leave the channel clean.

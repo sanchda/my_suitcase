@@ -36,6 +36,7 @@ pub fn emit(outcome: Outcome, mode: ApproveMode) {
         Outcome::Approve { plan, tool_input } => approve(plan, tool_input, mode),
         Outcome::Reject { reason } => reject(reason),
     };
+    crate::debug::log(&format!("emitting to stdout: {value}"));
     println!("{value}");
 }
 
