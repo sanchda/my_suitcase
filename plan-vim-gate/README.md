@@ -38,30 +38,31 @@ decision: approve
 
 ## Install
 
+This project is part of the [suitcase](../Readme.md). Its personalize script
+builds the binary, installs it to `~/.local/bin`, and wires the hook into
+`~/.claude/settings.json` (idempotent, preserves other settings):
+
 ```bash
-cargo build --release
-cp target/release/plan-vim-gate ~/.local/bin/
+suitcase/personalize/scripts/setup_plan_vim_gate.sh
+# or, with everything else: suitcase/personalize/personalize
 ```
 
-Then add the hook to `~/.claude/settings.json` (merge into existing `hooks`):
+Rebuild after source changes by re-running that script.
+
+<details>
+<summary>What it wires into <code>~/.claude/settings.json</code></summary>
 
 ```json
-{
-  "hooks": {
-    "PermissionRequest": [
-      {
-        "matcher": "ExitPlanMode",
-        "hooks": [
-          { "type": "command", "command": "plan-vim-gate", "timeout": 345600 }
-        ]
-      }
-    ]
-  }
-}
+{ "hooks": { "PermissionRequest": [
+  { "matcher": "ExitPlanMode",
+    "hooks": [{ "type": "command",
+                "command": "<HOME>/.local/bin/plan-vim-gate",
+                "timeout": 345600 }] } ] } }
 ```
 
-> Only one hook should own the `ExitPlanMode` gate. If plannotator is installed,
-> disable its plan hook so the two don't collide.
+Only one hook may own the `ExitPlanMode` gate; the script replaces any existing
+`ExitPlanMode` matcher with this one.
+</details>
 
 ## Requirements
 
