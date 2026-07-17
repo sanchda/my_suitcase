@@ -44,7 +44,17 @@ a final self-assessment finds no remaining high-value gap.}}
    - `sonnet` — normal implementation work (the default; when unsure, sonnet).
    - `opus` — only when the next step is genuinely hard: cross-system design,
      gnarly refactor, or after two consecutive failed attempts at a step.
-7. Commit this iteration (see Committing) so history is one clean step per commit.
+7. Declare THIS iteration's type: write exactly one word (no other text) to
+   `.ralph/STATUS`, EVERY iteration:
+   - `code` — a normal iteration that makes a verified change and COMMITS it.
+   - `review` (or `plan`) — an intentional non-code pass (e.g. auditing progress
+     or rewriting `{{BACKLOG_FILE}}`) that does not change product code.
+   - `blocked` — you hit a blocker and recorded it (see Rules).
+   The harness expects a `code` iteration to produce a new commit; if it doesn't,
+   that counts as no-progress and — repeated — escalates the model, then aborts.
+   Non-`code` passes are excluded from that check, so mark them honestly. (An
+   absent STATUS is treated as `code`.)
+8. Commit this iteration (see Committing) so history is one clean step per commit.
    Only commit if step 4 verified green.
 
 ## Committing
