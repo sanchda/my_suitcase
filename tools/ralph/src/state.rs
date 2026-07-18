@@ -166,8 +166,16 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 mod tests {
     use super::*;
 
+    // Unique temp dir per call — process id alone is shared across threads, so
+    // the parallel test runner would otherwise race two tests onto one path.
     fn tmp() -> PathBuf {
-        let base = std::env::temp_dir().join(format!("ralph-state-{}", std::process::id()));
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let base = std::env::temp_dir().join(format!(
+            "ralph-state-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
         let _ = fs::remove_dir_all(&base);
         base
     }
