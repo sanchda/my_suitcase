@@ -197,6 +197,7 @@ pub fn run(cfg: &Config) -> R<i32> {
 
                 if stream::has_marker(&text, &cfg.marker) {
                     state.log("  marker seen (own line) → COMPLETE");
+                    archive_backlog(cfg, &state, repo);
                     state.log(&format!("=== ralph COMPLETE after {iter} iterations ==="));
                     break;
                 }
@@ -259,6 +260,30 @@ pub fn run(cfg: &Config) -> R<i32> {
         }
     }
     Ok(0)
+}
+
+/// On completion, move the backlog file into `<dir>/archive/` (timestamped).
+/// Best-effort: any failure is logged and ignored so a finished run stays done.
+fn archive_backlog(cfg: &Config, state: &State, repo: &Path) {
+    if !cfg.backlog.exists() {
+        return;
+    }
+    let archive_dir = cfg.dir.join("archive");
+    if let Err(e) = std::fs::create_dir_all(&archive_dir) {
+        state.log(&format!("  ⚠ could not create archive dir: {e}"));
+        return;
+    }
+    let dest = archive_dir.join(format!("BACKLOG-{}.md", crate::state::timestamp()));
+    let moved = if git::is_repo(repo) && git::is_tracked(repo, &cfg.backlog) {
+        git::mv_and_commit(repo, &cfg.backlog, &dest, "chore(ralph): archive completed backlog")
+    } else {
+        std::fs::rename(&cfg.backlog, &dest).is_ok()
+    };
+    if moved {
+        state.log(&format!("  archived backlog → {}", dest.display()));
+    } else {
+        state.log(&format!("  ⚠ could not archive backlog {}", cfg.backlog.display()));
+    }
 }
 
 /// Apply a verdict to the tracker, logging escalation and returning `true` if the
@@ -464,5 +489,60 @@ mod tests {
         // Already at opus; escalation can't go higher.
         assert_eq!(t.record(Verdict::NoProgress, "opus"), Action::Escalate("opus".into()));
         assert_eq!(t.record(Verdict::NoProgress, "opus"), Action::Escalate("opus".into()));
+    }
+
+    #[test]
+    fn archive_moves_tracked_backlog() {
+        use std::fs;
+        use std::path::PathBuf;
+        use std::process::Command;
+        let repo = std::env::temp_dir().join(format!("ralph-arch-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&repo);
+        fs::create_dir_all(repo.join(".ralph")).unwrap();
+        for a in [vec!["init", "-q"], vec!["config", "user.email", "t@t"], vec!["config", "user.name", "t"]] {
+            Command::new("git").arg("-C").arg(&repo).args(&a).output().unwrap();
+        }
+        fs::write(repo.join(".ralph/BACKLOG.md"), "items").unwrap();
+        Command::new("git").arg("-C").arg(&repo).args(["add", ".ralph/BACKLOG.md"]).output().unwrap();
+        Command::new("git").arg("-C").arg(&repo).args(["commit", "-qm", "seed"]).output().unwrap();
+
+        let cfg = Config {
+            dir: repo.join(".ralph"),
+            backlog: repo.join(".ralph/BACKLOG.md"),
+            ..Config::default()
+        };
+        let state = State::open(&cfg.dir).unwrap();
+        archive_backlog(&cfg, &state, &repo);
+
+        assert!(!cfg.backlog.exists(), "backlog should be moved");
+        let archive = repo.join(".ralph/archive");
+        let moved: Vec<PathBuf> = fs::read_dir(&archive).unwrap().map(|e| e.unwrap().path()).collect();
+        assert_eq!(moved.len(), 1);
+        assert!(moved[0].file_name().unwrap().to_string_lossy().starts_with("BACKLOG-"));
+    }
+
+    #[test]
+    fn archive_moves_untracked_backlog_by_rename() {
+        use std::fs;
+        use std::path::PathBuf;
+        let repo = std::env::temp_dir().join(format!("ralph-arch-untracked-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&repo);
+        fs::create_dir_all(repo.join(".ralph")).unwrap();
+        // Not a git repo, and backlog is untracked → archive_backlog must fall back to fs::rename.
+        fs::write(repo.join(".ralph/BACKLOG.md"), "items").unwrap();
+
+        let cfg = Config {
+            dir: repo.join(".ralph"),
+            backlog: repo.join(".ralph/BACKLOG.md"),
+            ..Config::default()
+        };
+        let state = State::open(&cfg.dir).unwrap();
+        archive_backlog(&cfg, &state, &repo);
+
+        assert!(!cfg.backlog.exists(), "backlog should be moved even without git");
+        let moved: Vec<PathBuf> = fs::read_dir(repo.join(".ralph/archive")).unwrap()
+            .map(|e| e.unwrap().path()).collect();
+        assert_eq!(moved.len(), 1);
+        assert!(moved[0].file_name().unwrap().to_string_lossy().starts_with("BACKLOG-"));
     }
 }

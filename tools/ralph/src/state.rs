@@ -137,7 +137,7 @@ fn clock() -> String {
 }
 
 /// `YYYYMMDDTHHMMSSZ` UTC stamp for log filenames.
-fn timestamp() -> String {
+pub(crate) fn timestamp() -> String {
     let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let (y, mo, d) = civil_from_days((secs / 86_400) as i64);
     let tod = secs % 86_400;
