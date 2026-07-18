@@ -17,6 +17,8 @@ pub struct Config {
     pub marker: String,
     pub prompt: PathBuf,
     pub dir: PathBuf,
+    /// Backlog file to archive on completion.
+    pub backlog: PathBuf,
     pub yolo: bool,
     pub output_format: String,
     pub limit_wait: u64,
@@ -49,6 +51,7 @@ impl Default for Config {
             marker: "RALPH_COMPLETE".into(),
             prompt: PathBuf::from("tools/ralph/PROMPT.md"),
             dir: PathBuf::from(".ralph"),
+            backlog: PathBuf::from(".ralph/BACKLOG.md"),
             yolo: true,
             output_format: "stream-json".into(),
             limit_wait: 300,
@@ -78,6 +81,7 @@ pub struct FileConfig {
     pub marker: Option<String>,
     pub prompt: Option<String>,
     pub dir: Option<String>,
+    pub backlog: Option<String>,
     pub yolo: Option<bool>,
     pub output_format: Option<String>,
     pub limit_wait: Option<u64>,
@@ -176,6 +180,9 @@ pub fn apply_file(cfg: &mut Config, f: FileConfig) -> Result<(), String> {
     if let Some(v) = f.dir {
         cfg.dir = PathBuf::from(v);
     }
+    if let Some(v) = f.backlog {
+        cfg.backlog = PathBuf::from(v);
+    }
     if let Some(v) = f.yolo {
         cfg.yolo = v;
     }
@@ -248,6 +255,9 @@ pub fn apply_env<F: Fn(&str) -> Option<String>>(cfg: &mut Config, get: F) -> Res
     if let Some(v) = get("RALPH_DIR") {
         cfg.dir = PathBuf::from(v);
     }
+    if let Some(v) = get("RALPH_BACKLOG") {
+        cfg.backlog = PathBuf::from(v);
+    }
     if let Some(v) = get("RALPH_YOLO") {
         cfg.yolo = v != "0" && !v.eq_ignore_ascii_case("false");
     }
@@ -286,6 +296,7 @@ pub fn apply_args(cfg: &mut Config, args: &[String]) -> Result<bool, String> {
             }
             "--marker" => cfg.marker = next()?,
             "--dir" => cfg.dir = PathBuf::from(next()?),
+            "--backlog" => cfg.backlog = PathBuf::from(next()?),
             "--max-cost" => cfg.max_cost_usd = next()?.parse().map_err(|_| "bad --max-cost")?,
             "--max-duration" => cfg.max_duration = parse_duration(&next()?)?,
             "--iteration-timeout" => cfg.iteration_timeout = parse_duration(&next()?)?,
@@ -468,5 +479,17 @@ mod tests {
         assert!(validate(&c).is_err());
         c.abort_after = 6;
         assert!(validate(&c).is_ok());
+    }
+
+    #[test]
+    fn backlog_precedence() {
+        let mut c = Config::default();
+        assert_eq!(c.backlog, PathBuf::from(".ralph/BACKLOG.md"));
+        apply_file(&mut c, toml::from_str(r#"backlog = "a/B.md""#).unwrap()).unwrap();
+        assert_eq!(c.backlog, PathBuf::from("a/B.md"));
+        apply_env(&mut c, |k| (k == "RALPH_BACKLOG").then(|| "b/B.md".to_string())).unwrap();
+        assert_eq!(c.backlog, PathBuf::from("b/B.md"));
+        apply_args(&mut c, &["--backlog".into(), "c/B.md".into()]).unwrap();
+        assert_eq!(c.backlog, PathBuf::from("c/B.md"));
     }
 }
