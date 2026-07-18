@@ -11,6 +11,7 @@ mod classify;
 mod config;
 mod control;
 mod git;
+mod init;
 mod state;
 mod stream;
 
@@ -21,6 +22,7 @@ const USAGE: &str = "\
 ralph — external autonomous loop for Claude Code (run from the repo root)
 
 Usage: ralph [options]
+       ralph init                Scaffold .ralph/ in the current repo
   --prompt <file>          Prompt fed each iteration (default .ralph/PROMPT.md)
   --backlog <file>         Backlog archived on completion (default .ralph/BACKLOG.md)
   --model <name>           Default model tier (default sonnet)
@@ -56,6 +58,10 @@ fn main() {
 
 fn run() -> R<i32> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
+
+    if argv.first().map(String::as_str) == Some("init") {
+        return init::run();
+    }
 
     // Resolve the config path first (from flags/env), load the file, then apply
     // the full precedence chain: defaults ← file ← env ← flags.
