@@ -21,7 +21,8 @@ const USAGE: &str = "\
 ralph — external autonomous loop for Claude Code (run from the repo root)
 
 Usage: ralph [options]
-  --prompt <file>          Prompt fed each iteration (default tools/ralph/PROMPT.md)
+  --prompt <file>          Prompt fed each iteration (default .ralph/PROMPT.md)
+  --backlog <file>         Backlog archived on completion (default .ralph/BACKLOG.md)
   --model <name>           Default model tier (default sonnet)
   --fallback-model <name>  Overloaded-fallback model (\"\" disables)
   --max-iterations <n>     Stop after n iterations (0 = unlimited)
@@ -32,7 +33,7 @@ Usage: ralph [options]
   --abort-after <n>        No-progress streak before aborting (default 4)
   --marker <text>          Completion token (default RALPH_COMPLETE)
   --dir <path>             Runtime/log dir (default .ralph)
-  --config <file>          Config file (default tools/ralph/ralph.toml)
+  --config <file>          Config file (default .ralph/ralph.toml)
   --once                   Run a single iteration then exit (testing)
   --no-yolo                Do NOT pass --dangerously-skip-permissions
   -h, --help               This help

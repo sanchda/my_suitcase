@@ -1,4 +1,4 @@
-//! Configuration: defaults ← `tools/ralph/ralph.toml` ← env (`RALPH_*`) ← flags.
+//! Configuration: defaults ← `.ralph/ralph.toml` ← env (`RALPH_*`) ← flags.
 //!
 //! The file is optional (absent → all defaults). Env and flags override it in
 //! that order. Env access and argv are injected into the merge helpers so the
@@ -49,7 +49,7 @@ impl Default for Config {
             fallback_model: "sonnet".into(),
             max_iterations: 0,
             marker: "RALPH_COMPLETE".into(),
-            prompt: PathBuf::from("tools/ralph/PROMPT.md"),
+            prompt: PathBuf::from(".ralph/PROMPT.md"),
             dir: PathBuf::from(".ralph"),
             backlog: PathBuf::from(".ralph/BACKLOG.md"),
             yolo: true,
@@ -321,7 +321,7 @@ pub fn apply_args(cfg: &mut Config, args: &[String]) -> Result<bool, String> {
 
 /// Resolve the config-file path from argv/env before the full merge (so the
 /// file can be loaded first and then overridden). Default
-/// `tools/ralph/ralph.toml`.
+/// `.ralph/ralph.toml`.
 pub fn config_path<F: Fn(&str) -> Option<String>>(args: &[String], get: F) -> PathBuf {
     // Flag wins over env.
     let mut i = 0;
@@ -336,7 +336,7 @@ pub fn config_path<F: Fn(&str) -> Option<String>>(args: &[String], get: F) -> Pa
     if let Some(p) = get("RALPH_CONFIG") {
         return PathBuf::from(p);
     }
-    PathBuf::from("tools/ralph/ralph.toml")
+    PathBuf::from(".ralph/ralph.toml")
 }
 
 /// Validate cross-field invariants after the full merge.
@@ -377,6 +377,7 @@ mod tests {
         assert_eq!(c.abort_after, 4);
         assert!(c.yolo);
         assert_eq!(c.escalation_ladder, vec!["haiku", "sonnet", "opus"]);
+        assert_eq!(c.prompt, PathBuf::from(".ralph/PROMPT.md"));
     }
 
     #[test]
@@ -470,7 +471,7 @@ mod tests {
             config_path(&[], |k| (k == "RALPH_CONFIG").then(|| "/env.toml".to_string())),
             PathBuf::from("/env.toml")
         );
-        assert_eq!(config_path(&[], |_| None), PathBuf::from("tools/ralph/ralph.toml"));
+        assert_eq!(config_path(&[], |_| None), PathBuf::from(".ralph/ralph.toml"));
     }
 
     #[test]
