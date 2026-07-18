@@ -75,6 +75,22 @@ pub fn newly_dirty(dir: &Path, baseline: &Path) -> usize {
     tracked_dirt(dir).into_iter().filter(|l| !base.contains(l)).count()
 }
 
+/// Is `path` tracked by git in the work tree at `dir`?
+pub fn is_tracked(dir: &Path, path: &Path) -> bool {
+    git(dir, &["ls-files", "--error-unmatch", &path.to_string_lossy()]).is_some()
+}
+
+/// `git mv from to` then commit only that move with `msg`. Best-effort: returns
+/// whether both steps succeeded; leaves the tree as git left it on failure.
+pub fn mv_and_commit(dir: &Path, from: &Path, to: &Path, msg: &str) -> bool {
+    let from = from.to_string_lossy();
+    let to = to.to_string_lossy();
+    if git(dir, &["mv", &from, &to]).is_none() {
+        return false;
+    }
+    git(dir, &["commit", "-m", msg, "--", &to, &from]).is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,7 +110,12 @@ mod tests {
     }
 
     fn temp_repo() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("ralph-git-{}", std::process::id()));
+        // Unique per call (not just per process): cargo runs tests in parallel
+        // threads within one process, and std::process::id() alone would let
+        // concurrent tests collide on the same directory.
+        static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("ralph-git-{}-{n}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         run(&dir, &["init", "-q"]);
@@ -139,5 +160,26 @@ mod tests {
         run(&dir, &["add", "a.txt"]);
         run(&dir, &["commit", "-qm", "two"]);
         assert!(advanced_since(&dir, &before));
+    }
+
+    #[test]
+    fn track_check_and_move_commit() {
+        let dir = temp_repo();
+        fs::create_dir_all(dir.join("archive")).unwrap();
+        fs::write(dir.join("BACKLOG.md"), "work").unwrap();
+        // Untracked yet.
+        assert!(!is_tracked(&dir, &dir.join("BACKLOG.md")));
+        run(&dir, &["add", "BACKLOG.md"]);
+        run(&dir, &["commit", "-qm", "add backlog"]);
+        assert!(is_tracked(&dir, &dir.join("BACKLOG.md")));
+
+        let before = head(&dir);
+        let dest = dir.join("archive/BACKLOG-x.md");
+        assert!(mv_and_commit(&dir, &dir.join("BACKLOG.md"), &dest, "archive"));
+        // File moved, HEAD advanced, tracked tree clean.
+        assert!(!dir.join("BACKLOG.md").exists());
+        assert!(dest.exists());
+        assert!(advanced_since(&dir, &before));
+        assert!(tracked_dirt(&dir).is_empty());
     }
 }
