@@ -277,13 +277,21 @@ fn archive_backlog(cfg: &Config, state: &State, repo: &Path) {
     let moved = if git::is_repo(repo) && git::is_tracked(repo, &cfg.backlog) {
         git::mv_and_commit(repo, &cfg.backlog, &dest, "chore(ralph): archive completed backlog")
     } else {
-        std::fs::rename(&cfg.backlog, &dest).is_ok()
+        rename_or_copy(&cfg.backlog, &dest)
     };
     if moved {
         state.log(&format!("  archived backlog → {}", dest.display()));
     } else {
         state.log(&format!("  ⚠ could not archive backlog {}", cfg.backlog.display()));
     }
+}
+
+/// Move a file, falling back to copy+remove when `rename` crosses filesystems.
+fn rename_or_copy(from: &Path, to: &Path) -> bool {
+    if std::fs::rename(from, to).is_ok() {
+        return true;
+    }
+    std::fs::copy(from, to).is_ok() && std::fs::remove_file(from).is_ok()
 }
 
 /// Apply a verdict to the tracker, logging escalation and returning `true` if the

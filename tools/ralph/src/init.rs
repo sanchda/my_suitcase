@@ -62,6 +62,7 @@ Next: {{the first concrete step}}
 pub struct Report {
     pub created: Vec<String>,
     pub skipped: Vec<String>,
+    pub warnings: Vec<String>,
 }
 
 /// Entry point for the `init` subcommand: scaffold under the current dir, print
@@ -74,13 +75,16 @@ pub fn run() -> R<i32> {
     for p in &report.skipped {
         println!("  exists   {p}");
     }
+    for w in &report.warnings {
+        eprintln!("  ⚠ {w}");
+    }
     println!("\n.ralph/ ready. Fill in .ralph/PROMPT.md, then run `ralph`.");
     Ok(0)
 }
 
 /// Scaffold `.ralph/` under `root`. Idempotent — never overwrites.
 pub fn run_in(root: &Path) -> R<Report> {
-    let mut report = Report { created: Vec::new(), skipped: Vec::new() };
+    let mut report = Report { created: Vec::new(), skipped: Vec::new(), warnings: Vec::new() };
     fs::create_dir_all(root.join(".ralph/archive"))?;
 
     let files: [(&str, &str); 6] = [
@@ -112,11 +116,31 @@ fn write_if_absent(root: &Path, rel: &str, contents: &str, report: &mut Report) 
     Ok(())
 }
 
+/// Does this .gitignore line ignore the whole `.ralph` directory (which would
+/// shadow the whitelist's `!/.ralph/...` re-includes)?
+fn ignores_ralph_dir(line: &str) -> bool {
+    let l = line.trim();
+    if l.is_empty() || l.starts_with('#') || l.starts_with('!') {
+        return false;
+    }
+    let l = l.strip_prefix('/').unwrap_or(l);
+    let l = l.strip_suffix('/').unwrap_or(l);
+    l == ".ralph"
+}
+
 fn ensure_gitignore(path: &Path, report: &mut Report) -> R<()> {
     let existing = fs::read_to_string(path).unwrap_or_default();
     if existing.contains(GITIGNORE_SENTINEL) {
         report.skipped.push(".gitignore (ralph block present)".to_string());
         return Ok(());
+    }
+    if existing.lines().any(ignores_ralph_dir) {
+        report.warnings.push(
+            "existing .gitignore ignores the whole .ralph/ directory; remove that \
+             line so ralph's committed files (.ralph/PROMPT.md, ralph.toml, BACKLOG.md, …) \
+             are trackable"
+                .to_string(),
+        );
     }
     let mut out = existing;
     if !out.is_empty() && !out.ends_with('\n') {
@@ -176,5 +200,39 @@ mod tests {
         let gi = fs::read_to_string(root.join(".gitignore")).unwrap();
         assert!(gi.starts_with("target/\n"));
         assert!(gi.contains(GITIGNORE_SENTINEL));
+    }
+
+    #[test]
+    fn warns_when_gitignore_already_ignores_ralph_dir() {
+        let root = tmp();
+        fs::write(root.join(".gitignore"), ".ralph/\n").unwrap();
+        let r = run_in(&root).unwrap();
+        assert!(r.warnings.iter().any(|w| w.contains(".ralph/")));
+        // Block is still appended, effective once the user removes the shadowing line.
+        let gi = fs::read_to_string(root.join(".gitignore")).unwrap();
+        assert!(gi.contains(GITIGNORE_SENTINEL));
+    }
+
+    #[test]
+    fn whitelist_tracks_config_ignores_runtime() {
+        use std::process::Command;
+        let root = tmp();
+        Command::new("git").arg("-C").arg(&root).args(["init", "-q"]).output().unwrap();
+        run_in(&root).unwrap();
+        let ignored = |rel: &str| {
+            Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(["check-ignore", "-q", rel])
+                .status()
+                .unwrap()
+                .success()
+        };
+        // Committed config is NOT ignored; generated runtime state IS ignored.
+        assert!(!ignored(".ralph/PROMPT.md"));
+        assert!(!ignored(".ralph/ralph.toml"));
+        assert!(!ignored(".ralph/archive/.gitkeep"));
+        assert!(ignored(".ralph/live"));
+        assert!(ignored(".ralph/logs/x.log"));
     }
 }
