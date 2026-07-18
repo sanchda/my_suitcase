@@ -23,15 +23,20 @@ Everything that *drives* a run is **local to the repo you run it in**:
 | Kind | File (default path) | Global or local? |
 |------|---------------------|------------------|
 | Runner | `ralph` (this tool) | **global** — on PATH |
-| Per-iteration prompt | `tools/ralph/PROMPT.md` | **local** (copy `PROMPT.template.md`) |
-| North star (optional) | `tools/ralph/VISION.md` | **local** |
-| Ordered backlog (optional) | `tools/ralph/BACKLOG.md` | **local** |
-| Durable memory / log | `tools/ralph/PROGRESS.md` | **local** |
-| Config (optional) | `tools/ralph/ralph.toml` | **local**, committed |
+| Per-iteration prompt | `.ralph/PROMPT.md` | **local** (copy `PROMPT.template.md`, or run `ralph init`) |
+| North star (optional) | `.ralph/VISION.md` | **local** |
+| Ordered backlog (optional) | `.ralph/BACKLOG.md` | **local** |
+| Durable memory / log | `.ralph/PROGRESS.md` | **local** |
+| Config (optional) | `.ralph/ralph.toml` | **local**, committed |
 | Runtime (counter, logs, MODEL/STATUS) | `.ralph/` (gitignored) | **local**, generated |
 
 Rule of thumb: **the runner is global; the prompts, config, and record-keeping
 are local.**
+
+`.ralph/` holds both kinds of file: the driving files above (PROMPT.md,
+VISION.md, BACKLOG.md, PROGRESS.md, ralph.toml) are **committed**, while the
+generated runtime state (counters, logs, MODEL/STATUS, etc.) is **gitignored**
+— see the gitignore block below, which `ralph init` writes for you.
 
 ## Install
 
@@ -47,11 +52,14 @@ Rebuild after source changes by re-running that script.
 
 ## Quick start (in the repo you want worked on)
 
-1. `cp "$SUITCASE/tools/ralph/PROMPT.template.md" tools/ralph/PROMPT.md` and fill
-   in every `{{...}}` — the GOAL, the verification command, the commit contract.
-2. Optionally add `tools/ralph/VISION.md` and `tools/ralph/BACKLOG.md`, and seed
-   `tools/ralph/PROGRESS.md` with the goal + a "Next:" line.
-3. Add `.ralph/` to the repo's `.gitignore`.
+1. Run `ralph init` to scaffold `.ralph/` (PROMPT.md, ralph.toml, BACKLOG.md,
+   VISION.md, PROGRESS.md, an `archive/` dir, and the `.gitignore` block
+   below). Then fill in every `{{...}}` in `.ralph/PROMPT.md` — the GOAL, the
+   verification command, the commit contract.
+2. Optionally flesh out `.ralph/VISION.md` and `.ralph/BACKLOG.md`, and seed
+   `.ralph/PROGRESS.md` with the goal + a "Next:" line.
+3. `ralph init` already wrote the `.gitignore` block for you (see below) — no
+   manual step needed.
 4. Run it on a dedicated branch:
 
    ```bash
@@ -61,6 +69,30 @@ Rebuild after source changes by re-running that script.
    Test a single pass first with `ralph --once`.
 
 Run **one `ralph` per worktree** — each loop drives the repo it is launched in.
+
+### `ralph init`
+Scaffolds `.ralph/` in the current repo: writes `PROMPT.md` (from the
+template), stub `ralph.toml` / `BACKLOG.md` / `VISION.md` / `PROGRESS.md`
+files, an `archive/` directory, and appends the ralph `.gitignore` block
+(below) to the repo's `.gitignore`. Idempotent — it never overwrites a file
+that already exists, and running it again just reports what's already there.
+
+The `.gitignore` block `ralph init` writes (idempotent — it won't duplicate
+this if it's already present):
+
+```
+# ralph loop home (managed by `ralph init`)
+/.ralph/*
+!/.ralph/PROMPT.md
+!/.ralph/ralph.toml
+!/.ralph/VISION.md
+!/.ralph/BACKLOG.md
+!/.ralph/PROGRESS.md
+!/.ralph/archive/
+```
+
+This whitelists the committed driving files while leaving everything else
+under `.ralph/` (runtime state) gitignored.
 
 ## Watching / controlling a running loop
 - **Live status of the active iteration** (tool, elapsed, output tokens, last
@@ -77,6 +109,12 @@ The loop ends when the model's **final text** (from the result envelope's
 `.result`, which excludes thinking) contains the marker token on its own line,
 default `RALPH_COMPLETE`. Your `PROMPT.md` must instruct the model to emit it
 only when the whole goal is genuinely done and verified.
+
+### Completion → archive
+On completion, the runner moves the backlog file into
+`.ralph/archive/BACKLOG-<timestamp>.md` — `git mv` + a commit when the backlog
+is tracked, a plain filesystem rename otherwise. This is best-effort: a
+finished run is never turned into a failure by an archive hiccup.
 
 ## Per-iteration hand-offs (the agent writes these)
 Each iteration ends by writing two one-word files that steer the next step:
@@ -139,10 +177,10 @@ path (never `git add -A`), commit only when verification passed, and never
 warning if the tracked tree is still dirty after an iteration.
 
 ## Configuration
-Precedence: **defaults ← `tools/ralph/ralph.toml` ← env (`RALPH_*`) ← flags**.
+Precedence: **defaults ← `.ralph/ralph.toml` ← env (`RALPH_*`) ← flags**.
 `ralph.toml` is optional; absent → all defaults. `ralph --help` lists every flag.
 
-Example `tools/ralph/ralph.toml`:
+Example `.ralph/ralph.toml`:
 
 ```toml
 model = "sonnet"
@@ -166,14 +204,15 @@ abort_after = 4
 | `escalate_after` | `RALPH_ESCALATE_AFTER` | `--escalate-after` | `2` |
 | `abort_after` | `RALPH_ABORT_AFTER` | `--abort-after` | `4` |
 | `marker` | `RALPH_MARKER` | `--marker` | `RALPH_COMPLETE` |
-| `prompt` | `RALPH_PROMPT` | `--prompt` | `tools/ralph/PROMPT.md` |
+| `prompt` | `RALPH_PROMPT` | `--prompt` | `.ralph/PROMPT.md` |
+| `backlog` | `RALPH_BACKLOG` | `--backlog` | `.ralph/BACKLOG.md` |
 | `dir` | `RALPH_DIR` | `--dir` | `.ralph` |
 | `yolo` | `RALPH_YOLO` | `--no-yolo` | `true` |
 | `limit_wait` / `_max` | `RALPH_LIMIT_WAIT[_MAX]` | — | 300 / 3600 |
 | `transient_wait` / `_max` | `RALPH_TRANSIENT_WAIT[_MAX]` | — | 10 / 300 |
 | `extra_args` | `RALPH_EXTRA_ARGS` | — | — |
 | `escalation_ladder` | — | — | `["haiku","sonnet","opus"]` |
-| — | `RALPH_CONFIG` | `--config` | `tools/ralph/ralph.toml` |
+| — | `RALPH_CONFIG` | `--config` | `.ralph/ralph.toml` |
 | — | — | `--once` | run one iteration then exit |
 
 `--dangerously-skip-permissions` is on by default (`--no-yolo` disables) — an
@@ -190,5 +229,6 @@ cargo test          # classify / config / stream / state / git / thrash
 cargo build --release
 ```
 Modules: `config` · `stream` (NDJSON) · `classify` · `control` (loop, thrash,
-budgets, timeout) · `state` (`.ralph/`) · `git`. See
-`docs/superpowers/specs/2026-07-17-ralph-rust-design.md` for the design.
+budgets, timeout) · `state` (`.ralph/`) · `git` · `init` (`ralph init`
+scaffolding). See `docs/superpowers/specs/2026-07-17-ralph-rust-design.md` for
+the design.

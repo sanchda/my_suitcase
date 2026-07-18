@@ -7,7 +7,8 @@
 # - Installs it to ~/.local/bin/ralph.
 #
 # ralph is driven entirely by files LOCAL to whatever repo you run it in
-# (tools/ralph/PROMPT.md, VISION/BACKLOG/PROGRESS, and an optional ralph.toml).
+# (.ralph/PROMPT.md, VISION/BACKLOG/PROGRESS, and an optional ralph.toml — run
+# `ralph init` to scaffold them).
 # See suitcase/tools/ralph/README.md.
 #
 # Requires: cargo (rustup). At runtime: the authenticated `claude` CLI on PATH.
