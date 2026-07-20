@@ -34,6 +34,14 @@ echo "Building ralph (release)..."
 cargo build --release --manifest-path "$PROJECT_DIR/Cargo.toml"
 
 mkdir -p "$BIN_DIR"
-cp "$PROJECT_DIR/target/release/ralph" "$BIN"
+# Replace atomically: Linux may reject overwriting an executable that is
+# currently mapped by a running Ralph loop (`Text file busy`), while rename is
+# safe — the active process keeps its old inode and future launches get this one.
+BIN_TMP="$(mktemp "$BIN_DIR/.ralph.XXXXXX")"
+trap 'rm -f "$BIN_TMP"' EXIT
+cp "$PROJECT_DIR/target/release/ralph" "$BIN_TMP"
+chmod 755 "$BIN_TMP"
+mv -f "$BIN_TMP" "$BIN"
+trap - EXIT
 echo "Installed: $BIN"
 echo "Ensure ~/.local/bin is on your PATH, then run 'ralph --help' from a target repo."
