@@ -14,6 +14,7 @@ mod context;
 mod control;
 mod git;
 mod init;
+mod schema;
 mod state;
 mod stream;
 
@@ -25,6 +26,7 @@ ralph — external autonomous loop for Claude Code (run from the repo root)
 
 Usage: ralph [options]
        ralph init                Scaffold .ralph/ in the current repo
+       ralph schema              Explain the backlog schema and lint workflow
        ralph lint [options]      Validate backlog schema and task routing
        ralph brief [options]     Print the runner-resolved iteration brief
   --prompt <file>          Prompt fed each iteration (default .ralph/PROMPT.md)
@@ -68,6 +70,9 @@ fn run() -> R<i32> {
     if argv.first().map(String::as_str) == Some("init") {
         return init::run();
     }
+    if argv.first().map(String::as_str) == Some("schema") {
+        return schema::run(&argv[1..]);
+    }
 
     let command = argv.first().map(String::as_str);
     let inspect_only = matches!(command, Some("brief" | "lint"));
@@ -79,8 +84,8 @@ fn run() -> R<i32> {
     let mut cfg = config::Config::default();
     if cpath.exists() {
         let text = std::fs::read_to_string(&cpath)?;
-        let file: config::FileConfig = toml::from_str(&text)
-            .map_err(|e| format!("parsing {}: {e}", cpath.display()))?;
+        let file: config::FileConfig =
+            toml::from_str(&text).map_err(|e| format!("parsing {}: {e}", cpath.display()))?;
         config::apply_file(&mut cfg, file)?;
     }
     config::apply_env(&mut cfg, |k| std::env::var(k).ok())?;

@@ -89,7 +89,10 @@ pub fn classify(is_error: bool, status: Option<u16>, text: &str) -> Class {
 /// like "usage limit" match text with newlines/tabs between the words (the
 /// bash version used `[[:space:]]+`).
 fn normalize(s: &str) -> String {
-    s.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ")
+    s.to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn contains_any(haystack: &str, needles: &[&str]) -> bool {
@@ -111,7 +114,11 @@ mod tests {
     fn limit_text_beats_status() {
         // Text limit check runs before the status match.
         assert_eq!(
-            classify(true, Some(500), "You have hit your usage limit; it will reset at 5pm"),
+            classify(
+                true,
+                Some(500),
+                "You have hit your usage limit; it will reset at 5pm"
+            ),
             Class::Limit
         );
     }
@@ -152,7 +159,12 @@ mod tests {
 
     #[test]
     fn transient_text() {
-        for t in ["model overloaded", "connection reset", "network error", "timed out"] {
+        for t in [
+            "model overloaded",
+            "connection reset",
+            "network error",
+            "timed out",
+        ] {
             assert_eq!(classify(true, None, t), Class::Transient, "text: {t}");
         }
     }
@@ -171,7 +183,10 @@ mod tests {
 
     #[test]
     fn unknown_error_defaults_transient() {
-        assert_eq!(classify(true, None, "something weird happened"), Class::Transient);
+        assert_eq!(
+            classify(true, None, "something weird happened"),
+            Class::Transient
+        );
         assert_eq!(classify(true, Some(418), "teapot"), Class::Transient);
     }
 }

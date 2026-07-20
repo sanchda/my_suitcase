@@ -79,7 +79,9 @@ impl Thrash {
             Verdict::NoProgress => {
                 self.streak += 1;
                 if self.streak >= self.abort_after {
-                    let top = self.forced_model().unwrap_or_else(|| resolved_model.to_string());
+                    let top = self
+                        .forced_model()
+                        .unwrap_or_else(|| resolved_model.to_string());
                     return Action::Abort(format!(
                         "no progress after {} iterations (escalated to {top})",
                         self.streak
@@ -102,7 +104,11 @@ impl Thrash {
 
 /// Capped exponential backoff: 0 → base, else min(cur*2, cap).
 pub fn next_backoff(cur: u64, base: u64, cap: u64) -> u64 {
-    let n = if cur == 0 { base } else { cur.saturating_mul(2) };
+    let n = if cur == 0 {
+        base
+    } else {
+        cur.saturating_mul(2)
+    };
     n.min(cap)
 }
 
@@ -152,7 +158,10 @@ pub fn run(cfg: &Config) -> R<i32> {
             break;
         }
         if cfg.max_iterations > 0 && iter >= cfg.max_iterations {
-            state.log(&format!("max iterations ({}) reached → halting", cfg.max_iterations));
+            state.log(&format!(
+                "max iterations ({}) reached → halting",
+                cfg.max_iterations
+            ));
             break;
         }
         if cfg.max_cost_usd > 0.0 && cost_total >= cfg.max_cost_usd {
@@ -163,7 +172,10 @@ pub fn run(cfg: &Config) -> R<i32> {
             break;
         }
         if cfg.max_duration > 0 && start.elapsed().as_secs() >= cfg.max_duration {
-            state.log(&format!("wall-clock budget ({}s) reached → halting", cfg.max_duration));
+            state.log(&format!(
+                "wall-clock budget ({}s) reached → halting",
+                cfg.max_duration
+            ));
             break;
         }
 
@@ -175,7 +187,10 @@ pub fn run(cfg: &Config) -> R<i32> {
         let resolved = context::load(&cfg.backlog, &cfg.progress);
         if resolved.has_errors() {
             let errors = resolved.errors().collect::<Vec<_>>().join("\n  ");
-            return Err(format!("backlog schema is invalid:\n  {errors}\nrun `ralph lint` for details").into());
+            return Err(format!(
+                "backlog schema is invalid:\n  {errors}\nrun `ralph lint` for details"
+            )
+            .into());
         }
         let base_prompt = std::fs::read_to_string(&cfg.prompt)?;
         let iteration_prompt = resolved.compose(&base_prompt);
@@ -228,7 +243,10 @@ pub fn run(cfg: &Config) -> R<i32> {
                 lwait = 0;
                 twait = 0;
                 let snippet: String = text.chars().take(160).collect();
-                state.log(&format!("  ok (${cost:.4}) — {}", snippet.replace('\n', " ")));
+                state.log(&format!(
+                    "  ok (${cost:.4}) — {}",
+                    snippet.replace('\n', " ")
+                ));
 
                 if stream::has_marker(&text, &cfg.marker) {
                     let post_iteration = context::load(&cfg.backlog, &cfg.progress);
@@ -253,14 +271,18 @@ pub fn run(cfg: &Config) -> R<i32> {
                 let status = state.read_status();
                 let verdict = match status.as_deref() {
                     Some(s) if s != "code" => {
-                        state.log(&format!("  · non-code pass ({s}) — excluded from progress streak"));
+                        state.log(&format!(
+                            "  · non-code pass ({s}) — excluded from progress streak"
+                        ));
                         Verdict::Excluded
                     }
                     _ => {
                         if git::advanced_since(repo, &head_before) {
                             Verdict::Made
                         } else {
-                            state.log("  ⚠ code iteration with no new commit — counts as no-progress");
+                            state.log(
+                                "  ⚠ code iteration with no new commit — counts as no-progress",
+                            );
                             Verdict::NoProgress
                         }
                     }
@@ -278,9 +300,14 @@ pub fn run(cfg: &Config) -> R<i32> {
             Class::Limit => {
                 // Pure wait — never feeds thrash; unlimited retries.
                 let snippet: String = text.chars().take(160).collect();
-                state.log(&format!("  USAGE/RATE LIMIT — {}", snippet.replace('\n', " ")));
+                state.log(&format!(
+                    "  USAGE/RATE LIMIT — {}",
+                    snippet.replace('\n', " ")
+                ));
                 lwait = next_backoff(lwait, cfg.limit_wait, cfg.limit_wait_max);
-                state.log(&format!("  limit backoff: sleeping {lwait}s, then retry iter {next}"));
+                state.log(&format!(
+                    "  limit backoff: sleeping {lwait}s, then retry iter {next}"
+                ));
                 thread::sleep(Duration::from_secs(lwait));
             }
             Class::Transient => {
@@ -296,12 +323,17 @@ pub fn run(cfg: &Config) -> R<i32> {
                     return Ok(1);
                 }
                 twait = next_backoff(twait, cfg.transient_wait, cfg.transient_wait_max);
-                state.log(&format!("  transient backoff: sleeping {twait}s, then retry iter {next}"));
+                state.log(&format!(
+                    "  transient backoff: sleeping {twait}s, then retry iter {next}"
+                ));
                 thread::sleep(Duration::from_secs(twait));
             }
             Class::Fatal => {
                 let snippet: String = text.chars().take(200).collect();
-                state.log(&format!("=== ralph ABORTED (fatal) — {} ===", snippet.replace('\n', " ")));
+                state.log(&format!(
+                    "=== ralph ABORTED (fatal) — {} ===",
+                    snippet.replace('\n', " ")
+                ));
                 return Ok(1);
             }
         }
@@ -322,14 +354,22 @@ fn archive_backlog(cfg: &Config, state: &State, repo: &Path) {
     }
     let dest = archive_dir.join(format!("BACKLOG-{}.md", crate::state::timestamp()));
     let moved = if git::is_repo(repo) && git::is_tracked(repo, &cfg.backlog) {
-        git::mv_and_commit(repo, &cfg.backlog, &dest, "chore(ralph): archive completed backlog")
+        git::mv_and_commit(
+            repo,
+            &cfg.backlog,
+            &dest,
+            "chore(ralph): archive completed backlog",
+        )
     } else {
         rename_or_copy(&cfg.backlog, &dest)
     };
     if moved {
         state.log(&format!("  archived backlog → {}", dest.display()));
     } else {
-        state.log(&format!("  ⚠ could not archive backlog {}", cfg.backlog.display()));
+        state.log(&format!(
+            "  ⚠ could not archive backlog {}",
+            cfg.backlog.display()
+        ));
     }
 }
 
@@ -361,7 +401,9 @@ fn apply_verdict(thrash: &mut Thrash, v: Verdict, model: &str, state: &State) ->
 fn newly_dirty_warn(state: &State, repo: &Path) {
     let n = git::newly_dirty(repo, &state.baseline_path());
     if n > 0 {
-        state.log(&format!("  ⚠ {n} newly-dirty tracked file(s) — agent may have skipped its commit"));
+        state.log(&format!(
+            "  ⚠ {n} newly-dirty tracked file(s) — agent may have skipped its commit"
+        ));
     }
 }
 
@@ -511,14 +553,16 @@ fn configured_effort(configured: &str, model: &str) -> Option<String> {
         "inherit" => None,
         "auto" => {
             let model = model.to_ascii_lowercase();
-            Some(if model.contains("haiku") {
-                "low"
-            } else if model.contains("opus") {
-                "high"
-            } else {
-                "medium"
-            }
-            .into())
+            Some(
+                if model.contains("haiku") {
+                    "low"
+                } else if model.contains("opus") {
+                    "high"
+                } else {
+                    "medium"
+                }
+                .into(),
+            )
         }
         other => Some(other.to_string()),
     }
@@ -546,7 +590,8 @@ fn extra_effort(args: &[String]) -> Option<String> {
 }
 
 fn has_extra_flag(args: &[String], flag: &str) -> bool {
-    args.iter().any(|arg| arg == flag || arg.starts_with(&format!("{flag}=")))
+    args.iter()
+        .any(|arg| arg == flag || arg.starts_with(&format!("{flag}=")))
 }
 
 fn context_warning_key(warning: &str) -> String {
@@ -561,7 +606,10 @@ fn context_warning_key(warning: &str) -> String {
 /// its own group leader (see `run_one`), so the negative-pid target reaps
 /// `claude` and every subprocess it started — reclaiming a truly hung iteration.
 fn kill_group(pid: u32) {
-    let _ = Command::new("kill").arg("-9").arg(format!("-{pid}")).status();
+    let _ = Command::new("kill")
+        .arg("-9")
+        .arg(format!("-{pid}"))
+        .status();
 }
 
 /// Minimal PATH lookup for a program (avoids a `which` dependency).
@@ -581,7 +629,11 @@ mod tests {
     use super::*;
 
     fn cfg(escalate: u32, abort: u32) -> Config {
-        Config { escalate_after: escalate, abort_after: abort, ..Config::default() }
+        Config {
+            escalate_after: escalate,
+            abort_after: abort,
+            ..Config::default()
+        }
     }
 
     #[test]
@@ -596,7 +648,10 @@ mod tests {
     fn made_resets_streak_and_escalation() {
         let mut t = Thrash::new(&cfg(2, 4));
         assert_eq!(t.record(Verdict::NoProgress, "sonnet"), Action::Continue); // streak 1
-        assert_eq!(t.record(Verdict::NoProgress, "sonnet"), Action::Escalate("opus".into())); // streak 2
+        assert_eq!(
+            t.record(Verdict::NoProgress, "sonnet"),
+            Action::Escalate("opus".into())
+        ); // streak 2
         assert_eq!(t.forced_model(), Some("opus".into()));
         assert_eq!(t.record(Verdict::Made, "opus"), Action::Continue);
         assert_eq!(t.forced_model(), None);
@@ -607,10 +662,16 @@ mod tests {
     fn escalates_up_the_ladder_then_aborts() {
         let mut t = Thrash::new(&cfg(2, 4));
         assert_eq!(t.record(Verdict::NoProgress, "haiku"), Action::Continue); // 1
-        // streak 2 → escalate one tier above the running model (haiku → sonnet)
-        assert_eq!(t.record(Verdict::NoProgress, "haiku"), Action::Escalate("sonnet".into()));
+                                                                              // streak 2 → escalate one tier above the running model (haiku → sonnet)
+        assert_eq!(
+            t.record(Verdict::NoProgress, "haiku"),
+            Action::Escalate("sonnet".into())
+        );
         // streak 3 → escalate again (sonnet → opus), computed from forced idx
-        assert_eq!(t.record(Verdict::NoProgress, "sonnet"), Action::Escalate("opus".into()));
+        assert_eq!(
+            t.record(Verdict::NoProgress, "sonnet"),
+            Action::Escalate("opus".into())
+        );
         // streak 4 → abort
         match t.record(Verdict::NoProgress, "opus") {
             Action::Abort(msg) => assert!(msg.contains("opus")),
@@ -624,15 +685,24 @@ mod tests {
         assert_eq!(t.record(Verdict::NoProgress, "sonnet"), Action::Continue); // 1
         assert_eq!(t.record(Verdict::Excluded, "sonnet"), Action::Continue); // still 1
         assert_eq!(t.streak, 1);
-        assert_eq!(t.record(Verdict::NoProgress, "sonnet"), Action::Escalate("opus".into())); // 2
+        assert_eq!(
+            t.record(Verdict::NoProgress, "sonnet"),
+            Action::Escalate("opus".into())
+        ); // 2
     }
 
     #[test]
     fn escalation_clamps_at_top() {
         let mut t = Thrash::new(&cfg(1, 9));
         // Already at opus; escalation can't go higher.
-        assert_eq!(t.record(Verdict::NoProgress, "opus"), Action::Escalate("opus".into()));
-        assert_eq!(t.record(Verdict::NoProgress, "opus"), Action::Escalate("opus".into()));
+        assert_eq!(
+            t.record(Verdict::NoProgress, "opus"),
+            Action::Escalate("opus".into())
+        );
+        assert_eq!(
+            t.record(Verdict::NoProgress, "opus"),
+            Action::Escalate("opus".into())
+        );
     }
 
     fn arg_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
@@ -647,23 +717,40 @@ mod tests {
         let cfg = Config::default();
         let args = claude_args(&cfg, "sonnet");
         assert!(args.iter().any(|arg| arg == "--no-session-persistence"));
-        assert!(args.iter().any(|arg| arg == "--exclude-dynamic-system-prompt-sections"));
+        assert!(args
+            .iter()
+            .any(|arg| arg == "--exclude-dynamic-system-prompt-sections"));
         assert_eq!(arg_value(&args, "--effort"), Some("medium"));
-        assert_eq!(arg_value(&claude_args(&cfg, "haiku"), "--effort"), Some("low"));
-        assert_eq!(arg_value(&claude_args(&cfg, "opus"), "--effort"), Some("high"));
+        assert_eq!(
+            arg_value(&claude_args(&cfg, "haiku"), "--effort"),
+            Some("low")
+        );
+        assert_eq!(
+            arg_value(&claude_args(&cfg, "opus"), "--effort"),
+            Some("high")
+        );
     }
 
     #[test]
     fn effort_can_be_inherited_or_supplied_by_legacy_extra_args() {
-        let inherited = Config { effort: "inherit".into(), ..Config::default() };
-        assert_eq!(arg_value(&claude_args(&inherited, "sonnet"), "--effort"), None);
+        let inherited = Config {
+            effort: "inherit".into(),
+            ..Config::default()
+        };
+        assert_eq!(
+            arg_value(&claude_args(&inherited, "sonnet"), "--effort"),
+            None
+        );
 
         let legacy = Config {
             extra_args: vec!["--effort".into(), "xhigh".into()],
             ..Config::default()
         };
         let args = claude_args(&legacy, "sonnet");
-        assert_eq!(args.iter().filter(|arg| arg.as_str() == "--effort").count(), 1);
+        assert_eq!(
+            args.iter().filter(|arg| arg.as_str() == "--effort").count(),
+            1
+        );
         assert_eq!(arg_value(&args, "--effort"), Some("xhigh"));
     }
 
@@ -675,12 +762,31 @@ mod tests {
         let repo = std::env::temp_dir().join(format!("ralph-arch-{}", std::process::id()));
         let _ = fs::remove_dir_all(&repo);
         fs::create_dir_all(repo.join(".ralph")).unwrap();
-        for a in [vec!["init", "-q"], vec!["config", "user.email", "t@t"], vec!["config", "user.name", "t"]] {
-            Command::new("git").arg("-C").arg(&repo).args(&a).output().unwrap();
+        for a in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "t@t"],
+            vec!["config", "user.name", "t"],
+        ] {
+            Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(&a)
+                .output()
+                .unwrap();
         }
         fs::write(repo.join(".ralph/BACKLOG.md"), "items").unwrap();
-        Command::new("git").arg("-C").arg(&repo).args(["add", ".ralph/BACKLOG.md"]).output().unwrap();
-        Command::new("git").arg("-C").arg(&repo).args(["commit", "-qm", "seed"]).output().unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["add", ".ralph/BACKLOG.md"])
+            .output()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["commit", "-qm", "seed"])
+            .output()
+            .unwrap();
 
         let cfg = Config {
             dir: repo.join(".ralph"),
@@ -692,16 +798,24 @@ mod tests {
 
         assert!(!cfg.backlog.exists(), "backlog should be moved");
         let archive = repo.join(".ralph/archive");
-        let moved: Vec<PathBuf> = fs::read_dir(&archive).unwrap().map(|e| e.unwrap().path()).collect();
+        let moved: Vec<PathBuf> = fs::read_dir(&archive)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
         assert_eq!(moved.len(), 1);
-        assert!(moved[0].file_name().unwrap().to_string_lossy().starts_with("BACKLOG-"));
+        assert!(moved[0]
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("BACKLOG-"));
     }
 
     #[test]
     fn archive_moves_untracked_backlog_by_rename() {
         use std::fs;
         use std::path::PathBuf;
-        let repo = std::env::temp_dir().join(format!("ralph-arch-untracked-{}", std::process::id()));
+        let repo =
+            std::env::temp_dir().join(format!("ralph-arch-untracked-{}", std::process::id()));
         let _ = fs::remove_dir_all(&repo);
         fs::create_dir_all(repo.join(".ralph")).unwrap();
         // Not a git repo, and backlog is untracked → archive_backlog must fall back to fs::rename.
@@ -715,10 +829,19 @@ mod tests {
         let state = State::open(&cfg.dir).unwrap();
         archive_backlog(&cfg, &state, &repo);
 
-        assert!(!cfg.backlog.exists(), "backlog should be moved even without git");
-        let moved: Vec<PathBuf> = fs::read_dir(repo.join(".ralph/archive")).unwrap()
-            .map(|e| e.unwrap().path()).collect();
+        assert!(
+            !cfg.backlog.exists(),
+            "backlog should be moved even without git"
+        );
+        let moved: Vec<PathBuf> = fs::read_dir(repo.join(".ralph/archive"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
         assert_eq!(moved.len(), 1);
-        assert!(moved[0].file_name().unwrap().to_string_lossy().starts_with("BACKLOG-"));
+        assert!(moved[0]
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("BACKLOG-"));
     }
 }

@@ -304,7 +304,11 @@ pub fn apply_env<F: Fn(&str) -> Option<String>>(cfg: &mut Config, get: F) -> Res
 pub fn apply_args(cfg: &mut Config, args: &[String]) -> Result<bool, String> {
     let mut it = args.iter();
     while let Some(a) = it.next() {
-        let mut next = || it.next().cloned().ok_or_else(|| format!("{a} needs a value"));
+        let mut next = || {
+            it.next()
+                .cloned()
+                .ok_or_else(|| format!("{a} needs a value"))
+        };
         match a.as_str() {
             "--prompt" => cfg.prompt = PathBuf::from(next()?),
             "--model" => cfg.model = next()?,
@@ -472,7 +476,10 @@ mod tests {
     #[test]
     fn flags_override_env() {
         let mut c = Config::default();
-        apply_env(&mut c, |k| (k == "RALPH_MODEL").then(|| "haiku".to_string())).unwrap();
+        apply_env(&mut c, |k| {
+            (k == "RALPH_MODEL").then(|| "haiku".to_string())
+        })
+        .unwrap();
         let args: Vec<String> = ["--model", "opus", "--max-cost", "20", "--no-yolo", "--once"]
             .iter()
             .map(|s| s.to_string())
@@ -488,7 +495,9 @@ mod tests {
     #[test]
     fn bad_env_number_errors() {
         let mut c = Config::default();
-        let r = apply_env(&mut c, |k| (k == "RALPH_MAX_ITER").then(|| "lots".to_string()));
+        let r = apply_env(&mut c, |k| {
+            (k == "RALPH_MAX_ITER").then(|| "lots".to_string())
+        });
         assert!(r.is_err());
     }
 
@@ -503,15 +512,23 @@ mod tests {
         let args = vec!["--config".to_string(), "/a/b.toml".to_string()];
         assert_eq!(config_path(&args, |_| None), PathBuf::from("/a/b.toml"));
         assert_eq!(
-            config_path(&[], |k| (k == "RALPH_CONFIG").then(|| "/env.toml".to_string())),
+            config_path(&[], |k| (k == "RALPH_CONFIG")
+                .then(|| "/env.toml".to_string())),
             PathBuf::from("/env.toml")
         );
-        assert_eq!(config_path(&[], |_| None), PathBuf::from(".ralph/ralph.toml"));
+        assert_eq!(
+            config_path(&[], |_| None),
+            PathBuf::from(".ralph/ralph.toml")
+        );
     }
 
     #[test]
     fn validate_rejects_bad_thresholds() {
-        let mut c = Config { escalate_after: 5, abort_after: 2, ..Config::default() };
+        let mut c = Config {
+            escalate_after: 5,
+            abort_after: 2,
+            ..Config::default()
+        };
         assert!(validate(&c).is_err());
         c.abort_after = 6;
         assert!(validate(&c).is_ok());
@@ -523,7 +540,10 @@ mod tests {
         assert_eq!(c.backlog, PathBuf::from(".ralph/BACKLOG.md"));
         apply_file(&mut c, toml::from_str(r#"backlog = "a/B.md""#).unwrap()).unwrap();
         assert_eq!(c.backlog, PathBuf::from("a/B.md"));
-        apply_env(&mut c, |k| (k == "RALPH_BACKLOG").then(|| "b/B.md".to_string())).unwrap();
+        apply_env(&mut c, |k| {
+            (k == "RALPH_BACKLOG").then(|| "b/B.md".to_string())
+        })
+        .unwrap();
         assert_eq!(c.backlog, PathBuf::from("b/B.md"));
         apply_args(&mut c, &["--backlog".into(), "c/B.md".into()]).unwrap();
         assert_eq!(c.backlog, PathBuf::from("c/B.md"));
@@ -532,10 +552,7 @@ mod tests {
     #[test]
     fn progress_and_effort_precedence() {
         let mut c = Config::default();
-        let file: FileConfig = toml::from_str(
-            "progress = \"a/P.md\"\neffort = \"low\"\n",
-        )
-        .unwrap();
+        let file: FileConfig = toml::from_str("progress = \"a/P.md\"\neffort = \"low\"\n").unwrap();
         apply_file(&mut c, file).unwrap();
         assert_eq!(c.progress, PathBuf::from("a/P.md"));
         assert_eq!(c.effort, "low");
@@ -562,7 +579,10 @@ mod tests {
 
     #[test]
     fn validate_rejects_unknown_effort() {
-        let c = Config { effort: "heroic".into(), ..Config::default() };
+        let c = Config {
+            effort: "heroic".into(),
+            ..Config::default()
+        };
         assert!(validate(&c).is_err());
     }
 }

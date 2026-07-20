@@ -17,7 +17,9 @@ impl State {
     /// Open (creating `dir` and `dir/logs`) a runtime directory.
     pub fn open(dir: &Path) -> R<State> {
         fs::create_dir_all(dir.join("logs"))?;
-        Ok(State { dir: dir.to_path_buf() })
+        Ok(State {
+            dir: dir.to_path_buf(),
+        })
     }
 
     fn path(&self, name: &str) -> PathBuf {
@@ -123,7 +125,11 @@ impl State {
         let line = format!("{} {}\n", clock(), msg);
         print!("{line}");
         let _ = std::io::stdout().flush();
-        if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(self.path("run.log")) {
+        if let Ok(mut f) = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.path("run.log"))
+        {
             let _ = f.write_all(line.as_bytes());
         }
     }
@@ -131,19 +137,30 @@ impl State {
 
 /// `HH:MM:SS` UTC time-of-day (matches the bash `date -u +%H:%M:%S`).
 fn clock() -> String {
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let tod = secs % 86_400;
     format!("{:02}:{:02}:{:02}", tod / 3600, (tod % 3600) / 60, tod % 60)
 }
 
 /// `YYYYMMDDTHHMMSSZ` UTC stamp for log filenames.
 pub(crate) fn timestamp() -> String {
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let (y, mo, d) = civil_from_days((secs / 86_400) as i64);
     let tod = secs % 86_400;
     format!(
         "{:04}{:02}{:02}T{:02}{:02}{:02}Z",
-        y, mo, d, tod / 3600, (tod % 3600) / 60, tod % 60
+        y,
+        mo,
+        d,
+        tod / 3600,
+        (tod % 3600) / 60,
+        tod % 60
     )
 }
 
@@ -191,7 +208,10 @@ mod tests {
     #[test]
     fn model_validation() {
         let s = State::open(&tmp()).unwrap();
-        let allowed: Vec<String> = ["haiku", "sonnet", "opus"].iter().map(|x| x.to_string()).collect();
+        let allowed: Vec<String> = ["haiku", "sonnet", "opus"]
+            .iter()
+            .map(|x| x.to_string())
+            .collect();
         assert_eq!(s.read_model(&allowed), None); // absent
         fs::write(s.path("MODEL"), "  opus \n").unwrap();
         assert_eq!(s.read_model(&allowed), Some("opus".into()));

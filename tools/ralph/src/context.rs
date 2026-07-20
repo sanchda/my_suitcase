@@ -12,7 +12,12 @@ const PROGRESS_WARN_LINES: usize = 300;
 const PROGRESS_WARN_BYTES: usize = 32 * 1024;
 const TASK_EXCERPT_BYTES: usize = 8 * 1024;
 const PARENT_EXCERPT_BYTES: usize = 2 * 1024;
-const HANDOFF_EXCERPT_BYTES: usize = 4 * 1024;
+const ALL_PARENTS_EXCERPT_BYTES: usize = 4 * 1024;
+const HANDOFF_EXCERPT_BYTES: usize = 1024;
+const RUNNER_CONTRACT: &str = "\
+<!-- ralph-runner-contract: v1 -->
+When a pending leaf exists, work only that leaf; a matching `Next:` may refine it, never reroute. If the leaf is too large, make a plan pass: add ordered child stages with IDs and `Verify:` contracts, run `ralph lint`, and leave product code for the selected child. Trust the excerpts; use only narrow file reads. Verify proportionally and keep PROGRESS/`Next:` concise.
+";
 
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
@@ -56,6 +61,8 @@ impl IterationContext {
     pub fn compose(&self, base_prompt: &str) -> String {
         let mut prompt = base_prompt.trim_end().to_string();
         prompt.push_str("\n\n");
+        prompt.push_str(RUNNER_CONTRACT);
+        prompt.push('\n');
         prompt.push_str(&self.suffix);
         if !prompt.ends_with('\n') {
             prompt.push('\n');
@@ -66,6 +73,8 @@ impl IterationContext {
     /// Human-facing output for `ralph brief`.
     pub fn render(&self) -> String {
         let mut out = self.lint_report();
+        out.push('\n');
+        out.push_str(RUNNER_CONTRACT);
         out.push('\n');
         out.push_str(&self.suffix);
         if !out.ends_with('\n') {
@@ -249,81 +258,73 @@ fn build_suffix(
         "v1 compatibility mode"
     };
     out.push_str("<!-- ralph-resolved-brief: v1 -->\n");
-    out.push_str("## Runner-resolved iteration brief (authoritative)\n\n");
+    out.push_str("## Resolved target (authoritative)\n\n");
     out.push_str(&format!(
-        "Ralph parsed the complete `{}` in {schema_mode}. The executable path is **{}**; the leaf starts on line {}. Do not replace this selection with `head`, `tail`, a partial read, or a historical `Next:`.\n\n",
-        backlog_path.display(),
+        "**{}** at `{}:{}` ({schema_mode}; full backlog parsed).\n\n",
         path_label,
+        backlog_path.display(),
         task.line
     ));
 
+    let parent_count = path.len().saturating_sub(1);
+    let parent_excerpt_bytes = ALL_PARENTS_EXCERPT_BYTES
+        .checked_div(parent_count)
+        .unwrap_or(0)
+        .min(PARENT_EXCERPT_BYTES);
     for (position, index) in path.iter().enumerate() {
         let item = &doc.tasks[*index];
         let kind = if position + 1 == path.len() {
-            "Executable leaf"
+            "Leaf"
         } else {
-            "Parent context"
+            "Parent"
         };
         let max_bytes = if position + 1 == path.len() {
             TASK_EXCERPT_BYTES
         } else {
-            PARENT_EXCERPT_BYTES
+            parent_excerpt_bytes
         };
         out.push_str(&format!(
-            "### {kind}: {} ({} lines {}–{})\n\n",
-            item.id,
-            backlog_path.display(),
-            item.line,
-            item.own_end_line
+            "### {kind} {} (lines {}–{})\n\n",
+            item.id, item.line, item.own_end_line
         ));
-        out.push_str("--- BEGIN BACKLOG EXCERPT ---\n");
+        out.push_str(&format!("--- BEGIN {} ---\n", item.id));
         out.push_str(&doc.own_excerpt(*index, max_bytes));
-        out.push_str("--- END BACKLOG EXCERPT ---\n\n");
+        out.push_str(&format!("--- END {} ---\n\n", item.id));
     }
 
     match chosen_handoff {
         Some(handoff) => {
             out.push_str(&format!(
-                "### Current hand-off ({} line {})\n\n--- BEGIN HAND-OFF ---\n{}--- END HAND-OFF ---\n\n",
+                "### Matching `Next:` ({}:{})\n\n--- BEGIN NEXT ---\n{}--- END NEXT ---\n\n",
                 progress_path.display(),
                 handoff.line,
                 handoff.text
             ));
         }
-        None => out.push_str("No compatible `Next:` hand-off was found; derive the smallest coherent step directly from the executable leaf.\n\n"),
+        None => out.push_str("Matching `Next:`: none; use the leaf directly.\n\n"),
     }
 
     if let (Some(_handoff), Some(key)) = (current, current_key) {
         if key != task.id {
             out.push_str(&format!(
-                "Routing conflict: the first `Next:` names `{key}` and is stale for this iteration. Ignore it; **{} remains authoritative**. Repair the first `Next:` when recording progress.\n\n",
+                "Stale `Next:` targets `{key}`; ignore it, keep **{}**, and repair PROGRESS.\n\n",
                 task.id
             ));
         }
     }
-
-    out.push_str(
-        "### Execution contract\n\n\
-- Work only the executable leaf. A hand-off may refine this leaf; it cannot skip to another task.\n\
-- If the leaf cannot fit one iteration, make this a `plan` pass: add ordered child stages with their own IDs and `Verify:` contracts, run `ralph lint`, and leave product code for the newly selected first stage. Do not create an unnamed slice only in PROGRESS.\n\
-- Trust the excerpts above. Read only narrow referenced ranges when exact surrounding context is genuinely needed; do not dump BACKLOG or PROGRESS wholesale.\n\
-- Batch independent reconnaissance. Use proportional planning effort for the task instead of open-ended analysis.\n\
-- Run targeted verification while editing, then one final relevant verification after the last change. Do not rerun unchanged green commands or unrelated broad suites.\n\
-- Keep the progress entry compact (roughly 12 lines), make the first canonical `Next:` point to this same task or the newly selected leaf, and compact/archive old log detail when warned.\n",
-    );
     out
 }
 
 fn invalid_suffix(backlog_path: &Path) -> String {
     format!(
-        "<!-- ralph-resolved-brief: v1 -->\n## Runner-resolved iteration brief\n\n`{}` is invalid or unreadable. Do not choose work heuristically; repair the backlog schema first.\n",
+        "<!-- ralph-resolved-brief: v1 -->\n## Invalid backlog\n\n`{}` is invalid or unreadable. Repair the backlog schema; do not choose work heuristically.\n",
         backlog_path.display()
     )
 }
 
 fn complete_suffix(backlog_path: &Path, lines: usize) -> String {
     format!(
-        "<!-- ralph-resolved-brief: v1 -->\n## Runner-resolved iteration brief (authoritative)\n\nRalph parsed all {lines} lines of `{}` and found no unchecked schema task. Perform only the prompt's final completion audit; do not resurrect a historical `Next:`.\n",
+        "<!-- ralph-resolved-brief: v1 -->\n## Backlog complete\n\nAll {lines} lines of `{}` were parsed; no pending task remains. Perform only the final completion audit; ignore historical `Next:` entries.\n",
         backlog_path.display()
     )
 }
@@ -356,6 +357,7 @@ fn parse_handoffs(progress: &str) -> Vec<Handoff> {
             continue;
         }
         let start = index;
+        let declared_task_id = handoff_task_id(lines[start]);
         let mut text = String::new();
         while index < lines.len()
             && (index == start
@@ -375,12 +377,13 @@ fn parse_handoffs(progress: &str) -> Vec<Handoff> {
             text.push('\n');
             index += 1;
         }
-        let task_id = handoff_task_id(&text);
+        let task_id = handoff_task_id(&text).or(declared_task_id);
         handoffs.push(Handoff {
             line: start + 1,
             text,
             task_id,
         });
+        break;
     }
     handoffs
 }
@@ -450,8 +453,8 @@ mod tests {
         let ctx = load(&backlog_path, &progress_path);
         assert_eq!(ctx.target.as_deref(), Some("36.8"));
         assert!(!ctx.render().contains("recovered slice"));
-        assert!(ctx.render().contains("No compatible `Next:`"));
-        assert!(ctx.render().contains("Routing conflict"));
+        assert!(ctx.render().contains("Matching `Next:`: none"));
+        assert!(ctx.render().contains("Stale `Next:`"));
         assert!(ctx
             .warnings()
             .any(|warning| warning.contains("will not override backlog order")));
@@ -474,7 +477,7 @@ mod tests {
         let (backlog_path, progress_path) = tmp_files(&backlog, progress);
         let ctx = load(&backlog_path, &progress_path);
         assert!(!ctx.render().contains("real hand-off"));
-        assert!(ctx.render().contains("No compatible `Next:`"));
+        assert!(ctx.render().contains("Matching `Next:`: none"));
         assert!(!ctx.render().contains("this is historical prose"));
         assert!(ctx
             .warnings()
@@ -487,7 +490,10 @@ mod tests {
         let (backlog_path, progress_path) = tmp_files(&backlog, "Next: 2 — do it\n");
         let ctx = load(&backlog_path, &progress_path);
         let prompt = ctx.compose("stable base\n");
-        assert!(prompt.starts_with("stable base\n\n<!-- ralph-resolved-brief"));
+        assert!(prompt.starts_with("stable base\n\n<!-- ralph-runner-contract"));
+        assert!(
+            prompt.find("ralph-runner-contract").unwrap() < prompt.find("Resolved target").unwrap()
+        );
     }
 
     #[test]
@@ -497,7 +503,7 @@ mod tests {
         let ctx = load(&backlog_path, &progress_path);
         assert_eq!(ctx.target, None);
         assert!(ctx.is_complete());
-        assert!(ctx.render().contains("found no unchecked schema task"));
+        assert!(ctx.render().contains("no pending task remains"));
         assert!(!ctx.render().contains("Next: 1"));
     }
 
@@ -507,6 +513,41 @@ mod tests {
         let ctx = load(&backlog_path, &progress_path);
         assert!(ctx.has_errors());
         assert!(!ctx.is_complete());
-        assert!(ctx.render().contains("repair the backlog schema"));
+        assert!(ctx.render().contains("Repair the backlog schema"));
+    }
+
+    #[test]
+    fn long_handoff_is_truncated_and_brief_stays_bounded() {
+        let backlog = format!("{SCHEMA_MARKER}\n- [ ] **2 — Work.**\n  Verify: test\n");
+        let progress = format!("Next: 2 — {}\n", "detail ".repeat(1000));
+        let (backlog_path, progress_path) = tmp_files(&backlog, &progress);
+        let rendered = load(&backlog_path, &progress_path).render();
+        assert!(rendered.contains("hand-off truncated by ralph"));
+        assert!(rendered.len() < 4_000, "brief was {} bytes", rendered.len());
+    }
+
+    #[test]
+    fn deep_parent_chain_shares_one_excerpt_budget() {
+        let mut backlog = format!("{SCHEMA_MARKER}\n");
+        for depth in 1..=32 {
+            let indent = "  ".repeat(depth - 1);
+            let id = (1..=depth)
+                .map(|part| part.to_string())
+                .collect::<Vec<_>>()
+                .join(".");
+            backlog.push_str(&format!(
+                "{indent}- [ ] **{id} — Stage {depth}.** {}\n{indent}  Verify: test\n",
+                "parent detail ".repeat(40)
+            ));
+        }
+        let (backlog_path, progress_path) = tmp_files(&backlog, "");
+        let rendered = load(&backlog_path, &progress_path).render();
+        assert!(rendered.contains("### Parent 1"));
+        assert!(rendered.contains("### Leaf 1.2.3.4.5"));
+        assert!(
+            rendered.len() < 16_000,
+            "deep brief was {} bytes",
+            rendered.len()
+        );
     }
 }

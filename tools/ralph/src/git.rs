@@ -49,8 +49,10 @@ fn tracked_dirt(dir: &Path) -> Vec<String> {
         Some(o) => o,
         None => return Vec::new(),
     };
-    let mut lines: Vec<String> =
-        String::from_utf8_lossy(&out.stdout).lines().map(str::to_string).collect();
+    let mut lines: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect();
     lines.sort();
     lines
 }
@@ -72,12 +74,19 @@ pub fn newly_dirty(dir: &Path, baseline: &Path) -> usize {
         .lines()
         .map(str::to_string)
         .collect();
-    tracked_dirt(dir).into_iter().filter(|l| !base.contains(l)).count()
+    tracked_dirt(dir)
+        .into_iter()
+        .filter(|l| !base.contains(l))
+        .count()
 }
 
 /// Is `path` tracked by git in the work tree at `dir`?
 pub fn is_tracked(dir: &Path, path: &Path) -> bool {
-    git(dir, &["ls-files", "--error-unmatch", &path.to_string_lossy()]).is_some()
+    git(
+        dir,
+        &["ls-files", "--error-unmatch", &path.to_string_lossy()],
+    )
+    .is_some()
 }
 
 /// `git mv from to` then commit only that move with `msg`. Best-effort: returns
@@ -175,7 +184,12 @@ mod tests {
 
         let before = head(&dir);
         let dest = dir.join("archive/BACKLOG-x.md");
-        assert!(mv_and_commit(&dir, &dir.join("BACKLOG.md"), &dest, "archive"));
+        assert!(mv_and_commit(
+            &dir,
+            &dir.join("BACKLOG.md"),
+            &dest,
+            "archive"
+        ));
         // File moved, HEAD advanced, tracked tree clean.
         assert!(!dir.join("BACKLOG.md").exists());
         assert!(dest.exists());

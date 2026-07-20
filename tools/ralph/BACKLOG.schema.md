@@ -1,83 +1,52 @@
 # Ralph backlog schema v1
 
-The schema is intentionally ordinary Markdown. It gives the runner one stable,
-lintable definition of task order while leaving descriptions free-form.
-
-Start the file with the version marker:
+`.ralph/BACKLOG.md` is the ordered source of truth. Start it with:
 
 ```markdown
 <!-- ralph-backlog: v1 -->
+# Backlog
+
+- [ ] **12 — Ship weighted selection.**
+  Describe the outcome and constraints.
+  Verify: cargo test
+  - [x] **12.1 — Emit weights.**
+    Verify: cargo test generator
+  - [ ] **12.2 — Consume weights.**
+    Verify: ./tools/verify_runtime.sh weights
 ```
 
-Every task is a checkbox with a unique machine-friendly ID and a bold label:
+## Task rules
 
-```markdown
-- [ ] **36.8 — Introduce schema v2.**
-  Explain the outcome and important constraints here.
-  Verify: cargo test -p generator
-```
+- Use `- [ ] **ID — Title.**` for pending work and `[x]` for complete work.
+- IDs are unique and contain only letters, digits, `.`, `_`, or `-`; use an em
+  dash between ID and title.
+- Every pending task—including a staged parent—needs a non-placeholder
+  `Verify:` command or success check. The parent's contract is its final closure
+  gate.
+- Put concise shared constraints and the parent `Verify:` before its children;
+  free prose under a heading is not injected into child briefs. Indent each child
+  exactly two spaces and prefix its ID with `<parent-id>.`.
+- Checkboxes route work. Put task-looking examples inside fenced code blocks.
 
-The required pieces are:
+## Selection and staging
 
-- pending (`[ ]`) or complete (`[x]`);
-- a unique ID made from letters, digits, `.`, `_`, or `-`;
-- an em dash (`—`) between the ID and title;
-- a `Verify:` contract in every pending task (including a staged parent, whose
-  contract is its eventual integration/closure gate). Empty values, TODO/TBD,
-  and `{{placeholder}}` values fail lint.
+Ralph selects the first unchecked task with no unchecked descendants, in
+document order. A parent with pending children is a container; after its children
+finish, the parent becomes the integration/closure step.
 
-Text, headings, links, fenced code blocks, and non-checkbox lists remain
-free-form. Checkboxes—including task-looking indented examples—are reserved for
-schema tasks; put checkbox examples inside a fenced code block.
+The first `Next: <id> — <step>` in PROGRESS may refine only the selected ID; it
+cannot reorder the backlog. If a leaf is too large for one iteration, add ordered
+child stages with their own `Verify:` contracts and run `ralph lint`. Do not keep
+routing slices only in PROGRESS.
 
-## Ordered stages
-
-Large tasks can be staged explicitly with two-space-indented child tasks. A
-child ID starts with its parent's ID plus a dot:
-
-```markdown
-- [ ] **36.8 — Ship weighted selection end-to-end.**
-  This parent becomes the final integration/closure step after its children.
-  Verify: cargo test && ./tools/verify_runtime.sh
-  - [x] **36.8.1 — Define and emit the schema.**
-    Verify: cargo test -p generator schema
-  - [ ] **36.8.2 — Consume weights at runtime.**
-    Verify: ./tools/verify_runtime.sh weighted_selection
-  - [ ] **36.8.3 — Add cross-runtime distribution gates.**
-    Verify: cargo test -p generator distribution && ./tools/verify_runtime.sh distribution
-```
-
-Resolution is deterministic and depth-first:
-
-1. Ralph walks tasks in document order.
-2. A pending parent with pending descendants is a container, not executable.
-3. The first pending task with no pending descendants is selected.
-4. Once every child is complete, the still-pending parent is selected for its
-   integration verification and closure.
-5. `PROGRESS.md`'s first `Next:` may refine the selected task only when it names
-   that exact ID; it can never skip to another task, and later historical
-   hand-offs are not searched as fallbacks.
-
-If an executable leaf proves too large for one iteration, the iteration should
-be a planning pass that adds its ordered child stages and runs `ralph lint`.
-Do not maintain a parallel sequence of unnamed “slice 1/2/3” hand-offs only in
-PROGRESS; stages that affect routing belong in the backlog.
-
-Keep parent prose and its `Verify:` line before its first child; prose after a
-child belongs to that child. Any nesting depth is allowed, always at two spaces
-per level.
-
-## Commands
+## Validate before running
 
 ```bash
-ralph lint                 # schema errors, routing conflicts, selected leaf
-ralph brief                # exact bounded context the next iteration receives
+ralph lint                 # diagnostics and selected executable leaf
+ralph brief                # lint plus the bounded context sent next
+ralph                      # validates again before every iteration
 ```
 
-The loop refuses to launch a new Claude iteration when the backlog has schema
-errors. A missing version marker is only a compatibility warning, so existing
-well-formed checkbox backlogs keep running during migration. Compatibility mode
-aggregates missing `Verify:` fields into a warning; add real contracts before
-adding the marker, because marked v1 files enforce them. The linter also warns
-when a checked task appears after a pending sibling: that does not block
-execution, but it exposes that document order was bypassed.
+`ralph lint` exits 0 when there are no errors (warnings are allowed) and 1 for
+schema errors. A marked v1 backlog requires valid `Verify:` contracts. Ralph
+will not launch an iteration while schema errors remain.

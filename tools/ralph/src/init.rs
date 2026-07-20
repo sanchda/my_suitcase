@@ -33,6 +33,8 @@ const RALPH_TOML_STUB: &str = "\
 # progress = \".ralph/PROGRESS.md\"
 # effort = \"auto\" # haiku=low, sonnet=medium, opus=high; or set one level
 # extra_args = [\"--add-dir\", \"/some/path\"]
+# Self-contained prompt only: omit hooks/plugins/MCP/memory and unused tools.
+# extra_args = [\"--safe-mode\", \"--tools\", \"Bash,Edit,Read,Write\"]
 ";
 
 const BACKLOG_STUB: &str = "\
@@ -40,7 +42,8 @@ const BACKLOG_STUB: &str = "\
 # Backlog
 
 Ordered work list — the loop takes the first pending executable leaf. `Next:`
-may refine that leaf but cannot skip it. See `ralph lint` / `ralph brief`.
+may refine that leaf but cannot skip it. See `ralph schema`; validate with
+`ralph lint` and inspect with `ralph brief`.
 
 - [ ] **1 — First item.**
   Describe the bounded outcome.
@@ -83,13 +86,19 @@ pub fn run() -> R<i32> {
     for w in &report.warnings {
         eprintln!("  ⚠ {w}");
     }
-    println!("\n.ralph/ ready. Fill in PROMPT.md and BACKLOG.md, then run `ralph lint`.");
+    println!(
+        "\n.ralph/ ready. Run `ralph schema`, fill in PROMPT.md and BACKLOG.md, then run `ralph lint`."
+    );
     Ok(0)
 }
 
 /// Scaffold `.ralph/` under `root`. Idempotent — never overwrites.
 pub fn run_in(root: &Path) -> R<Report> {
-    let mut report = Report { created: Vec::new(), skipped: Vec::new(), warnings: Vec::new() };
+    let mut report = Report {
+        created: Vec::new(),
+        skipped: Vec::new(),
+        warnings: Vec::new(),
+    };
     fs::create_dir_all(root.join(".ralph/archive"))?;
 
     let files: [(&str, &str); 6] = [
@@ -136,7 +145,9 @@ fn ignores_ralph_dir(line: &str) -> bool {
 fn ensure_gitignore(path: &Path, report: &mut Report) -> R<()> {
     let existing = fs::read_to_string(path).unwrap_or_default();
     if existing.contains(GITIGNORE_SENTINEL) {
-        report.skipped.push(".gitignore (ralph block present)".to_string());
+        report
+            .skipped
+            .push(".gitignore (ralph block present)".to_string());
         return Ok(());
     }
     if existing.lines().any(ignores_ralph_dir) {
@@ -188,10 +199,21 @@ mod tests {
         assert!(root.join(".ralph/PROMPT.md").exists());
         assert!(root.join(".ralph/archive/.gitkeep").exists());
         assert!(root.join(".gitignore").exists());
+        let prompt = fs::read_to_string(root.join(".ralph/PROMPT.md")).unwrap();
+        assert!(prompt.contains("resolved leaf"));
+        assert!(prompt.contains("RALPH_COMPLETE"));
+        assert!(
+            prompt.len() < 4_000,
+            "template grew to {} bytes",
+            prompt.len()
+        );
         let backlog = fs::read_to_string(root.join(".ralph/BACKLOG.md")).unwrap();
         let parsed = crate::backlog::Document::parse(&backlog);
         assert!(parsed.schema_present);
-        assert!(parsed.has_errors(), "placeholder Verify contract should require editing");
+        assert!(
+            parsed.has_errors(),
+            "placeholder Verify contract should require editing"
+        );
         assert!(parsed
             .issues
             .iter()
@@ -199,7 +221,11 @@ mod tests {
 
         // Second run skips existing files and does not duplicate the block.
         let r2 = run_in(&root).unwrap();
-        assert!(r2.created.is_empty(), "second init should create nothing: {:?}", r2.created);
+        assert!(
+            r2.created.is_empty(),
+            "second init should create nothing: {:?}",
+            r2.created
+        );
         assert!(r2.skipped.iter().any(|p| p == ".ralph/PROMPT.md"));
         let gi = fs::read_to_string(root.join(".gitignore")).unwrap();
         assert_eq!(gi.matches(GITIGNORE_SENTINEL).count(), 1);
@@ -230,7 +256,12 @@ mod tests {
     fn whitelist_tracks_config_ignores_runtime() {
         use std::process::Command;
         let root = tmp();
-        Command::new("git").arg("-C").arg(&root).args(["init", "-q"]).output().unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["init", "-q"])
+            .output()
+            .unwrap();
         run_in(&root).unwrap();
         let ignored = |rel: &str| {
             Command::new("git")

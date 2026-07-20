@@ -162,10 +162,20 @@ fn parse_envelope(v: &Value, raw_line: &str) -> ResultEnvelope {
     ResultEnvelope {
         is_error: v.get("is_error").and_then(Value::as_bool).unwrap_or(false),
         api_error_status,
-        result: v.get("result").and_then(Value::as_str).unwrap_or("").to_string(),
-        total_cost_usd: v.get("total_cost_usd").and_then(Value::as_f64).unwrap_or(0.0),
+        result: v
+            .get("result")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        total_cost_usd: v
+            .get("total_cost_usd")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0),
         duration_ms: v.get("duration_ms").and_then(Value::as_u64).unwrap_or(0),
-        duration_api_ms: v.get("duration_api_ms").and_then(Value::as_u64).unwrap_or(0),
+        duration_api_ms: v
+            .get("duration_api_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
         num_turns: v.get("num_turns").and_then(Value::as_u64).unwrap_or(0),
         input_tokens: usage_u64("input_tokens"),
         cache_creation_input_tokens: usage_u64("cache_creation_input_tokens"),
@@ -182,7 +192,10 @@ pub fn has_marker(text: &str, marker: &str) -> bool {
 }
 
 fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -262,6 +275,9 @@ mod tests {
     fn marker_whole_line_only() {
         assert!(has_marker("all done\nRALPH_COMPLETE\n", "RALPH_COMPLETE"));
         assert!(has_marker("  RALPH_COMPLETE  ", "RALPH_COMPLETE"));
-        assert!(!has_marker("do not emit RALPH_COMPLETE inline", "RALPH_COMPLETE"));
+        assert!(!has_marker(
+            "do not emit RALPH_COMPLETE inline",
+            "RALPH_COMPLETE"
+        ));
     }
 }

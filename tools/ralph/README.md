@@ -64,6 +64,7 @@ Rebuild after source changes by re-running that script.
 4. Check routing, then run it on a dedicated branch:
 
    ```bash
+   ralph schema
    ralph lint
    ralph brief
    ralph --max-iterations 30      # from the repo root
@@ -99,44 +100,12 @@ under `.ralph/` (runtime state) gitignored.
 
 ## Deterministic backlog schema and staging
 
-The v1 schema is plain Markdown. A task is a checkbox with a unique ID, a bold
-`ID — title` label, and a verification contract:
-
-```markdown
-<!-- ralph-backlog: v1 -->
-# Backlog
-
-- [ ] **36.8 — Ship weighted selection end-to-end.**
-  Explain the outcome and constraints.
-  Verify: cargo test -p generator
-```
-
-Large work can be staged with two-space-indented child tasks whose IDs extend
-the parent:
-
-```markdown
-- [ ] **36.8 — Ship weighted selection end-to-end.**
-  Verify: cargo test && ./tools/verify_runtime.sh
-  - [x] **36.8.1 — Emit the schema.**
-    Verify: cargo test -p generator schema
-  - [ ] **36.8.2 — Consume it at runtime.**
-    Verify: ./tools/verify_runtime.sh weighted_selection
-```
-
-Ralph selects the first unchecked task with no unchecked descendants. A parent
-with pending children is a container; after all children are checked, the
-parent becomes the final integration/closure step. `Next:` may refine the
-selected leaf but cannot override backlog order.
-
-If a selected leaf is too large for one pass, the agent first adds named child
-stages and runs the linter. Routing state belongs in BACKLOG, not in a growing
-sequence of informal “slice N” hand-offs in PROGRESS.
-
-`ralph lint` validates IDs, nesting, status consistency, and `Verify:` on every
-pending task. `ralph brief` prints the exact bounded task context that would be
-appended to the next Claude prompt. The loop reruns the same validation at every
-iteration boundary and refuses to guess when schema errors exist. See
-[BACKLOG.schema.md](BACKLOG.schema.md) for the complete contract.
+Run `ralph schema` for the complete, version-matched authoring reference. In
+short: tasks are ordered Markdown checkboxes with unique IDs and `Verify:`
+contracts; two-space-indented children are explicit stages. `ralph lint`
+validates and selects the next leaf, while `ralph brief` shows the bounded
+context the model will receive. The same reference lives in
+[BACKLOG.schema.md](BACKLOG.schema.md).
 
 ## Watching / controlling a running loop
 - **Live status of the active iteration** (tool, elapsed, output tokens, last
@@ -281,6 +250,11 @@ are willing to let it modify freely.
 slice high-effort: Haiku maps to low, Sonnet to medium, and Opus to high. Set an
 explicit `low` / `medium` / `high` / `xhigh` / `max`, or use `inherit` to defer
 to Claude settings. A legacy `--effort` in `extra_args` remains authoritative.
+
+For a fully self-contained loop, opt into a lean Claude process with
+`extra_args = ["--safe-mode", "--tools", "Bash,Edit,Read,Write"]`. Safe mode
+omits project instructions, hooks, plugins, MCP servers, skills, and auto-memory,
+so use it only when PROMPT carries every required project/verification rule.
 
 ## Requirements
 - The `claude` CLI on PATH (authenticated).
