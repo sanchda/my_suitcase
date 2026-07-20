@@ -1,14 +1,16 @@
 //! ralph — external autonomous loop for Claude Code.
 //!
-//! Each iteration is a fresh `claude -p` process fed the same prompt; continuity
-//! lives in files, not context. This runner adds live stream parsing, cost and
-//! wall-clock budgets, an opt-in per-iteration timeout, and no-progress/thrash
-//! detection with model escalation. See `docs/superpowers/specs/` for the design
-//! and `README.md` for usage. The driving files (PROMPT/VISION/BACKLOG/PROGRESS)
-//! are local to whatever repo you run this in.
+//! Each iteration is a fresh `claude -p` process fed a stable base prompt plus a
+//! schema-resolved current-task brief; continuity lives in files, not context.
+//! This runner adds live stream parsing, cost and wall-clock budgets, an opt-in
+//! per-iteration timeout, and no-progress/thrash detection with model escalation.
+//! See `docs/superpowers/specs/` for the design and `README.md` for usage. The
+//! driving files (PROMPT/VISION/BACKLOG/PROGRESS) are local to the target repo.
 
+mod backlog;
 mod classify;
 mod config;
+mod context;
 mod control;
 mod git;
 mod init;
@@ -23,9 +25,13 @@ ralph — external autonomous loop for Claude Code (run from the repo root)
 
 Usage: ralph [options]
        ralph init                Scaffold .ralph/ in the current repo
+       ralph lint [options]      Validate backlog schema and task routing
+       ralph brief [options]     Print the runner-resolved iteration brief
   --prompt <file>          Prompt fed each iteration (default .ralph/PROMPT.md)
   --backlog <file>         Backlog archived on completion (default .ralph/BACKLOG.md)
+  --progress <file>        Current hand-off file (default .ralph/PROGRESS.md)
   --model <name>           Default model tier (default sonnet)
+  --effort <level>         auto, inherit, low, medium, high, xhigh, or max
   --fallback-model <name>  Overloaded-fallback model (\"\" disables)
   --max-iterations <n>     Stop after n iterations (0 = unlimited)
   --max-cost <usd>         Stop once cumulative cost reaches this (0 = off)
@@ -63,9 +69,13 @@ fn run() -> R<i32> {
         return init::run();
     }
 
+    let command = argv.first().map(String::as_str);
+    let inspect_only = matches!(command, Some("brief" | "lint"));
+    let args = if inspect_only { &argv[1..] } else { &argv[..] };
+
     // Resolve the config path first (from flags/env), load the file, then apply
     // the full precedence chain: defaults ← file ← env ← flags.
-    let cpath = config::config_path(&argv, |k| std::env::var(k).ok());
+    let cpath = config::config_path(args, |k| std::env::var(k).ok());
     let mut cfg = config::Config::default();
     if cpath.exists() {
         let text = std::fs::read_to_string(&cpath)?;
@@ -74,11 +84,21 @@ fn run() -> R<i32> {
         config::apply_file(&mut cfg, file)?;
     }
     config::apply_env(&mut cfg, |k| std::env::var(k).ok())?;
-    if config::apply_args(&mut cfg, &argv)? {
+    if config::apply_args(&mut cfg, args)? {
         print!("{USAGE}");
         return Ok(0);
     }
     config::validate(&cfg)?;
+
+    if inspect_only {
+        let resolved = context::load(&cfg.backlog, &cfg.progress);
+        if command == Some("brief") {
+            print!("{}", resolved.render());
+        } else {
+            print!("{}", resolved.lint_report());
+        }
+        return Ok(if resolved.has_errors() { 1 } else { 0 });
+    }
 
     control::run(&cfg)
 }

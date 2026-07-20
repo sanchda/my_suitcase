@@ -30,16 +30,21 @@ const RALPH_TOML_STUB: &str = "\
 # escalate_after = 2
 # abort_after = 4
 # backlog = \".ralph/BACKLOG.md\"
+# progress = \".ralph/PROGRESS.md\"
+# effort = \"auto\" # haiku=low, sonnet=medium, opus=high; or set one level
 # extra_args = [\"--add-dir\", \"/some/path\"]
 ";
 
 const BACKLOG_STUB: &str = "\
+<!-- ralph-backlog: v1 -->
 # Backlog
 
-Ordered work list — the loop takes the first unfinished item unless PROGRESS's
-\"Next:\" says otherwise. Check items off as they land.
+Ordered work list — the loop takes the first pending executable leaf. `Next:`
+may refine that leaf but cannot skip it. See `ralph lint` / `ralph brief`.
 
-- [ ] First item
+- [ ] **1 — First item.**
+  Describe the bounded outcome.
+  Verify: {{exact command and success condition}}
 ";
 
 const VISION_STUB: &str = "\
@@ -53,7 +58,7 @@ const PROGRESS_STUB: &str = "\
 
 Goal: {{fill in the one- or two-sentence goal}}
 
-Next: {{the first concrete step}}
+Next: 1 — {{the first concrete step within task 1}}
 
 ## Log
 ";
@@ -78,7 +83,7 @@ pub fn run() -> R<i32> {
     for w in &report.warnings {
         eprintln!("  ⚠ {w}");
     }
-    println!("\n.ralph/ ready. Fill in .ralph/PROMPT.md, then run `ralph`.");
+    println!("\n.ralph/ ready. Fill in PROMPT.md and BACKLOG.md, then run `ralph lint`.");
     Ok(0)
 }
 
@@ -183,6 +188,14 @@ mod tests {
         assert!(root.join(".ralph/PROMPT.md").exists());
         assert!(root.join(".ralph/archive/.gitkeep").exists());
         assert!(root.join(".gitignore").exists());
+        let backlog = fs::read_to_string(root.join(".ralph/BACKLOG.md")).unwrap();
+        let parsed = crate::backlog::Document::parse(&backlog);
+        assert!(parsed.schema_present);
+        assert!(parsed.has_errors(), "placeholder Verify contract should require editing");
+        assert!(parsed
+            .issues
+            .iter()
+            .any(|issue| issue.message.contains("non-placeholder")));
 
         // Second run skips existing files and does not duplicate the block.
         let r2 = run_in(&root).unwrap();

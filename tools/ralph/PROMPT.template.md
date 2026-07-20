@@ -9,10 +9,16 @@ files in this repo. Do not assume anything is "already in context."
 
 ## How this loop works
 - The same prompt is fed to a brand-new you every iteration.
-- Your durable memory is `{{PROGRESS_FILE}}` (e.g. .ralph/PROGRESS.md).
-  Read it first, every time.
+- Ralph appends a generated **Runner-resolved iteration brief** to this prompt.
+  It is built from the complete, linted backlog and the current hand-off; trust
+  its selected executable leaf instead of rediscovering work with partial file
+  reads.
+- Your durable memory is `{{PROGRESS_FILE}}` (e.g. .ralph/PROGRESS.md), but the
+  brief already includes the relevant `Next:` paragraph.
 - Keep each iteration to ONE small, verifiable increment. Small steps survive
-  context resets; giant steps don't.
+  context resets; giant steps don't. If the selected leaf is too large, use the
+  iteration to add ordered schema child stages with their own `Verify:` lines;
+  do not invent an unnamed slice only in PROGRESS.
 
 ## The goal
 GOAL: {{ONE- OR TWO-SENTENCE, VERIFIABLE OBJECTIVE. Define what "done" means and
@@ -23,22 +29,33 @@ here, e.g. "Work {{BACKLOG_FILE}} strictly top-down per {{VISION_FILE}}."}}
 a final self-assessment finds no remaining high-value gap.}}
 
 ## Each iteration, do exactly this
-0. Read {{VISION_FILE (optional north-star)}} then {{BACKLOG_FILE (optional
-   ordered work list)}} — the first unfinished item is your target unless
-   PROGRESS's "Next:" says otherwise.
-1. Read `{{PROGRESS_FILE}}` (status, log, and the "Next" line).
-2. Think about the single most valuable next step toward GOAL. Use extended
-   thinking to plan it — thinking is free-form and is NOT parsed by the harness.
+0. Start from the Runner-resolved brief. Its executable backlog leaf is
+   authoritative. A `Next:` hand-off may refine that same leaf but can never
+   skip to a different task. If the brief reports a conflict, repair the first
+   canonical `Next:` while recording progress.
+1. Read {{VISION_FILE (optional north-star)}} only when its constraints are not
+   already clear. Read only narrow, referenced ranges of {{BACKLOG_FILE}} or
+   `{{PROGRESS_FILE}}` when the bounded excerpts omit necessary detail — never
+   dump either driving file wholesale.
+2. Plan proportionally, then batch independent reconnaissance where possible.
+   Do not spend open-ended analysis on a mechanical or already-decided step. If
+   the leaf is too large, make this a `plan` pass: stage it in BACKLOG, run
+   `ralph lint`, record the new selected child, and leave product work to that
+   child's iteration.
 3. Do that one step.
-4. Verify it. {{PROJECT VERIFICATION CONTRACT — the exact command(s) that prove
-   the step works, and the success string to look for. NEVER claim success
+4. Verify it. Use targeted checks while editing and one final relevant check
+   after the last change; do not rerun unchanged green commands or unrelated
+   broad suites. {{PROJECT VERIFICATION CONTRACT — the exact command(s) that
+   prove the step works, and the success string to look for. NEVER claim success
    without running the check.}}
 5. Append a terse entry to `{{PROGRESS_FILE}}`:
    - what you did, what you verified (with the command + result),
-   - and a one-line "Next:" pointing the next iteration at the following step.
+   - and a one-line `Next: <task-id> — <step>` pointing within the same backlog
+     leaf, or at the next leaf after this one is checked off.
    Check off finished backlog items in the same commit. If the Log section grows
-   past ~200 lines, compact the oldest entries into a short summary (history
-   survives in git).
+   past ~300 lines, compact/archive the oldest entries into a short summary
+   (history survives in git). Keep a normal entry to roughly 12 lines and make
+   the first canonical `Next:` in the file the current one.
 6. Size the next iteration's model: write exactly one of `haiku`, `sonnet`, or
    `opus` (no other text) to `.ralph/MODEL`. Do this EVERY iteration:
    - `haiku` — mechanical follow-up (renames, doc/json edits, an already-decided change).

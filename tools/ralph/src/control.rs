@@ -6,11 +6,12 @@
 
 use crate::classify::{classify, Class};
 use crate::config::Config;
+use crate::context;
 use crate::state::State;
 use crate::stream::{self, IterStatus, ResultEnvelope};
 use crate::{git, R};
-use std::fs::File;
-use std::io::BufReader;
+use std::collections::HashSet;
+use std::io::{BufReader, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -124,8 +125,9 @@ pub fn run(cfg: &Config) -> R<i32> {
     git::write_baseline(repo, &state.baseline_path());
 
     state.log(&format!(
-        "=== ralph start (model={} fallback={} marker={} max_iter={} max_cost={} max_dur={}s yolo={}) ===",
+        "=== ralph start (model={} effort={} fallback={} marker={} max_iter={} max_cost={} max_dur={}s yolo={}) ===",
         cfg.model,
+        cfg.effort,
         if cfg.fallback_model.is_empty() { "none" } else { &cfg.fallback_model },
         cfg.marker,
         cfg.max_iterations,
@@ -139,6 +141,7 @@ pub fn run(cfg: &Config) -> R<i32> {
     let mut lwait = 0u64;
     let mut twait = 0u64;
     let mut cost_total = 0.0f64;
+    let mut seen_context_warnings = HashSet::new();
     let start = Instant::now();
 
     loop {
@@ -169,10 +172,26 @@ pub fn run(cfg: &Config) -> R<i32> {
             .forced_model()
             .or_else(|| state.read_model(&cfg.escalation_ladder))
             .unwrap_or_else(|| cfg.model.clone());
+        let resolved = context::load(&cfg.backlog, &cfg.progress);
+        if resolved.has_errors() {
+            let errors = resolved.errors().collect::<Vec<_>>().join("\n  ");
+            return Err(format!("backlog schema is invalid:\n  {errors}\nrun `ralph lint` for details").into());
+        }
+        let base_prompt = std::fs::read_to_string(&cfg.prompt)?;
+        let iteration_prompt = resolved.compose(&base_prompt);
         let head_before = git::head(repo);
 
-        state.log(&format!("iter {next} → {model}"));
-        let ran = run_one(cfg, &state, next, &model)?;
+        state.log(&format!(
+            "iter {next} → {model} (effort={}, target={})",
+            effort_for(cfg, &model).unwrap_or_else(|| "inherited".into()),
+            resolved.target.as_deref().unwrap_or("completion audit")
+        ));
+        for warning in resolved.warnings() {
+            if seen_context_warnings.insert(context_warning_key(warning)) {
+                state.log(&format!("  ⚠ {warning}"));
+            }
+        }
+        let ran = run_one(cfg, &state, next, &model, &iteration_prompt)?;
 
         // --- interpret outcome ---
         let (class, cost, text) = match &ran.envelope {
@@ -185,6 +204,22 @@ pub fn run(cfg: &Config) -> R<i32> {
             None => (Class::Transient, 0.0, String::new()),
         };
         cost_total += cost;
+        if let Some(env) = &ran.envelope {
+            if env.duration_ms > 0 {
+                let non_api_ms = env.duration_ms.saturating_sub(env.duration_api_ms);
+                state.log(&format!(
+                    "  perf total={:.1}s api={:.1}s non-api={:.1}s turns={} tokens(in/new-cache/read-cache/out)={}/{}/{}/{}",
+                    env.duration_ms as f64 / 1000.0,
+                    env.duration_api_ms as f64 / 1000.0,
+                    non_api_ms as f64 / 1000.0,
+                    env.num_turns,
+                    env.input_tokens,
+                    env.cache_creation_input_tokens,
+                    env.cache_read_input_tokens,
+                    env.output_tokens,
+                ));
+            }
+        }
 
         match class {
             Class::Success => {
@@ -196,10 +231,22 @@ pub fn run(cfg: &Config) -> R<i32> {
                 state.log(&format!("  ok (${cost:.4}) — {}", snippet.replace('\n', " ")));
 
                 if stream::has_marker(&text, &cfg.marker) {
-                    state.log("  marker seen (own line) → COMPLETE");
-                    archive_backlog(cfg, &state, repo);
-                    state.log(&format!("=== ralph COMPLETE after {iter} iterations ==="));
-                    break;
+                    let post_iteration = context::load(&cfg.backlog, &cfg.progress);
+                    if post_iteration.is_complete() {
+                        state.log("  marker seen and backlog has no pending task → COMPLETE");
+                        archive_backlog(cfg, &state, repo);
+                        state.log(&format!("=== ralph COMPLETE after {iter} iterations ==="));
+                        break;
+                    }
+                    let reason = if post_iteration.has_errors() {
+                        "backlog is invalid".to_string()
+                    } else {
+                        format!(
+                            "backlog still selects {}",
+                            post_iteration.target.as_deref().unwrap_or("pending work")
+                        )
+                    };
+                    state.log(&format!("  ⚠ completion marker ignored: {reason}"));
                 }
 
                 // Classify the iteration for thrash tracking.
@@ -319,33 +366,14 @@ fn newly_dirty_warn(state: &State, repo: &Path) {
 }
 
 /// Spawn and drive one `claude` iteration.
-fn run_one(cfg: &Config, state: &State, n: u64, model: &str) -> R<Ran> {
+fn run_one(cfg: &Config, state: &State, n: u64, model: &str, prompt: &str) -> R<Ran> {
     let log_path = state.new_iter_log(n)?;
 
-    let mut args: Vec<String> = vec![
-        "-p".into(),
-        "--output-format".into(),
-        cfg.output_format.clone(),
-    ];
-    if cfg.output_format == "stream-json" {
-        args.push("--verbose".into());
-    }
-    if cfg.yolo {
-        args.push("--dangerously-skip-permissions".into());
-    }
-    args.push("--model".into());
-    args.push(model.to_string());
-    let fb = &cfg.fallback_model;
-    if !fb.is_empty() && fb != model {
-        args.push("--fallback-model".into());
-        args.push(fb.clone());
-    }
-    args.extend(cfg.extra_args.iter().cloned());
+    let args = claude_args(cfg, model);
 
-    let prompt = File::open(&cfg.prompt)?;
     let mut cmd = Command::new("claude");
     cmd.args(&args)
-        .stdin(Stdio::from(prompt))
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     // With a per-iteration timeout, run the child in its own process group so
@@ -361,6 +389,7 @@ fn run_one(cfg: &Config, state: &State, n: u64, model: &str) -> R<Ran> {
     let mut child = cmd.spawn()?;
     let pid = child.id();
 
+    let stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
 
@@ -398,6 +427,14 @@ fn run_one(cfg: &Config, state: &State, n: u64, model: &str) -> R<Ran> {
         None
     };
 
+    // Feed stdin concurrently, after the watchdog is armed. A child that stops
+    // reading a large prompt can no longer block the runner before its timeout.
+    let prompt_bytes = prompt.as_bytes().to_vec();
+    let prompt_thread = thread::spawn(move || {
+        let mut stdin = stdin;
+        stdin.write_all(&prompt_bytes)
+    });
+
     // Consume the stream on this thread (blocks until EOF / child exit / kill).
     let mut raw = std::fs::OpenOptions::new().append(true).open(&log_path)?;
     let mut status = IterStatus::new(n, model);
@@ -410,6 +447,7 @@ fn run_one(cfg: &Config, state: &State, n: u64, model: &str) -> R<Ran> {
     // Signal watchdog to stop, reap the child and the stderr drainer.
     done.store(true, Ordering::SeqCst);
     let _ = child.wait();
+    let prompt_result = prompt_thread.join();
     let _ = stderr_thread.join();
     if let Some(w) = watchdog {
         let _ = w.join();
@@ -418,7 +456,105 @@ fn run_one(cfg: &Config, state: &State, n: u64, model: &str) -> R<Ran> {
     let killed = killed.load(Ordering::SeqCst);
     let envelope = if killed { None } else { envelope };
     state.write_live_status(&format!("iter {n} finished (killed={killed})\n"));
+    if !killed {
+        match prompt_result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                return Err(format!("writing iteration prompt to claude: {error}").into())
+            }
+            Err(_) => return Err("iteration prompt writer panicked".into()),
+        }
+    }
     Ok(Ran { envelope, killed })
+}
+
+/// Construct the exact Claude CLI arguments. Ralph iterations are intentionally
+/// fresh, so session persistence is wasted; moving dynamic system sections
+/// improves prompt-cache reuse without removing their content.
+fn claude_args(cfg: &Config, model: &str) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "-p".into(),
+        "--output-format".into(),
+        cfg.output_format.clone(),
+    ];
+    if cfg.output_format == "stream-json" {
+        args.push("--verbose".into());
+    }
+    if cfg.yolo {
+        args.push("--dangerously-skip-permissions".into());
+    }
+    args.push("--model".into());
+    args.push(model.to_string());
+    let fb = &cfg.fallback_model;
+    if !fb.is_empty() && fb != model {
+        args.push("--fallback-model".into());
+        args.push(fb.clone());
+    }
+    if !has_extra_flag(&cfg.extra_args, "--no-session-persistence") {
+        args.push("--no-session-persistence".into());
+    }
+    if !has_extra_flag(&cfg.extra_args, "--exclude-dynamic-system-prompt-sections") {
+        args.push("--exclude-dynamic-system-prompt-sections".into());
+    }
+    if extra_effort(&cfg.extra_args).is_none() {
+        if let Some(effort) = configured_effort(&cfg.effort, model) {
+            args.push("--effort".into());
+            args.push(effort);
+        }
+    }
+    args.extend(cfg.extra_args.iter().cloned());
+    args
+}
+
+fn configured_effort(configured: &str, model: &str) -> Option<String> {
+    match configured {
+        "inherit" => None,
+        "auto" => {
+            let model = model.to_ascii_lowercase();
+            Some(if model.contains("haiku") {
+                "low"
+            } else if model.contains("opus") {
+                "high"
+            } else {
+                "medium"
+            }
+            .into())
+        }
+        other => Some(other.to_string()),
+    }
+}
+
+fn effort_for(cfg: &Config, model: &str) -> Option<String> {
+    extra_effort(&cfg.extra_args).or_else(|| configured_effort(&cfg.effort, model))
+}
+
+fn extra_effort(args: &[String]) -> Option<String> {
+    let mut value = None;
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == "--effort" {
+            value = args.get(index + 1).cloned();
+            index += 2;
+        } else if let Some(effort) = args[index].strip_prefix("--effort=") {
+            value = Some(effort.to_string());
+            index += 1;
+        } else {
+            index += 1;
+        }
+    }
+    value
+}
+
+fn has_extra_flag(args: &[String], flag: &str) -> bool {
+    args.iter().any(|arg| arg == flag || arg.starts_with(&format!("{flag}=")))
+}
+
+fn context_warning_key(warning: &str) -> String {
+    if let Some((path, _)) = warning.split_once(": oversized progress log") {
+        format!("{path}: oversized progress log")
+    } else {
+        warning.to_string()
+    }
 }
 
 /// Kill the process group led by `pid` with SIGKILL. The child is spawned as
@@ -497,6 +633,38 @@ mod tests {
         // Already at opus; escalation can't go higher.
         assert_eq!(t.record(Verdict::NoProgress, "opus"), Action::Escalate("opus".into()));
         assert_eq!(t.record(Verdict::NoProgress, "opus"), Action::Escalate("opus".into()));
+    }
+
+    fn arg_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+        args.iter()
+            .position(|arg| arg == flag)
+            .and_then(|index| args.get(index + 1))
+            .map(String::as_str)
+    }
+
+    #[test]
+    fn claude_args_make_fresh_sessions_cache_friendly_and_bound_effort() {
+        let cfg = Config::default();
+        let args = claude_args(&cfg, "sonnet");
+        assert!(args.iter().any(|arg| arg == "--no-session-persistence"));
+        assert!(args.iter().any(|arg| arg == "--exclude-dynamic-system-prompt-sections"));
+        assert_eq!(arg_value(&args, "--effort"), Some("medium"));
+        assert_eq!(arg_value(&claude_args(&cfg, "haiku"), "--effort"), Some("low"));
+        assert_eq!(arg_value(&claude_args(&cfg, "opus"), "--effort"), Some("high"));
+    }
+
+    #[test]
+    fn effort_can_be_inherited_or_supplied_by_legacy_extra_args() {
+        let inherited = Config { effort: "inherit".into(), ..Config::default() };
+        assert_eq!(arg_value(&claude_args(&inherited, "sonnet"), "--effort"), None);
+
+        let legacy = Config {
+            extra_args: vec!["--effort".into(), "xhigh".into()],
+            ..Config::default()
+        };
+        let args = claude_args(&legacy, "sonnet");
+        assert_eq!(args.iter().filter(|arg| arg.as_str() == "--effort").count(), 1);
+        assert_eq!(arg_value(&args, "--effort"), Some("xhigh"));
     }
 
     #[test]

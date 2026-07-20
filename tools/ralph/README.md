@@ -1,15 +1,16 @@
 # ralph — external autonomous loop
 
-Runs `claude -p` in a loop, **fresh context each iteration**, feeding the same
-prompt until a completion marker appears. This is the "pure Ralph" (Geoffrey
-Huntley) external form — each call starts cold and stays cheap, so it suits
-context-expensive / thinking models. Cross-iteration state lives in files, not
-context.
+Runs `claude -p` in a loop, **fresh context each iteration**, feeding a stable
+base prompt plus a bounded current-task brief until a completion marker appears.
+This is the "pure Ralph" (Geoffrey Huntley) external form — each call starts
+cold and stays cheap, so it suits context-expensive / thinking models.
+Cross-iteration state lives in files, not context.
 
 This is the Rust runner (`tools/ralph/`, a cargo crate). Beyond looping it adds
 **live stream parsing**, **cost / wall-clock budgets**, an **opt-in
-per-iteration timeout**, and **no-progress detection** that escalates the model
-tier and then aborts. It replaces the previous `ralph.sh`.
+per-iteration timeout**, **schema-validated backlog routing**, bounded iteration
+briefs, and **no-progress detection** that escalates the model tier and then
+aborts. It replaces the previous `ralph.sh`.
 
 ## Global tool vs. local driving files
 
@@ -56,13 +57,15 @@ Rebuild after source changes by re-running that script.
    VISION.md, PROGRESS.md, an `archive/` dir, and the `.gitignore` block
    below). Then fill in every `{{...}}` in `.ralph/PROMPT.md` — the GOAL, the
    verification command, the commit contract.
-2. Optionally flesh out `.ralph/VISION.md` and `.ralph/BACKLOG.md`, and seed
-   `.ralph/PROGRESS.md` with the goal + a "Next:" line.
+2. Flesh out `.ralph/BACKLOG.md` using the v1 schema, optionally add a VISION,
+   and seed PROGRESS with the goal + `Next: <task-id> — <step>`.
 3. `ralph init` already wrote the `.gitignore` block for you (see below) — no
    manual step needed.
-4. Run it on a dedicated branch:
+4. Check routing, then run it on a dedicated branch:
 
    ```bash
+   ralph lint
+   ralph brief
    ralph --max-iterations 30      # from the repo root
    ```
 
@@ -94,6 +97,47 @@ this if it's already present):
 This whitelists the committed driving files while leaving everything else
 under `.ralph/` (runtime state) gitignored.
 
+## Deterministic backlog schema and staging
+
+The v1 schema is plain Markdown. A task is a checkbox with a unique ID, a bold
+`ID — title` label, and a verification contract:
+
+```markdown
+<!-- ralph-backlog: v1 -->
+# Backlog
+
+- [ ] **36.8 — Ship weighted selection end-to-end.**
+  Explain the outcome and constraints.
+  Verify: cargo test -p generator
+```
+
+Large work can be staged with two-space-indented child tasks whose IDs extend
+the parent:
+
+```markdown
+- [ ] **36.8 — Ship weighted selection end-to-end.**
+  Verify: cargo test && ./tools/verify_runtime.sh
+  - [x] **36.8.1 — Emit the schema.**
+    Verify: cargo test -p generator schema
+  - [ ] **36.8.2 — Consume it at runtime.**
+    Verify: ./tools/verify_runtime.sh weighted_selection
+```
+
+Ralph selects the first unchecked task with no unchecked descendants. A parent
+with pending children is a container; after all children are checked, the
+parent becomes the final integration/closure step. `Next:` may refine the
+selected leaf but cannot override backlog order.
+
+If a selected leaf is too large for one pass, the agent first adds named child
+stages and runs the linter. Routing state belongs in BACKLOG, not in a growing
+sequence of informal “slice N” hand-offs in PROGRESS.
+
+`ralph lint` validates IDs, nesting, status consistency, and `Verify:` on every
+pending task. `ralph brief` prints the exact bounded task context that would be
+appended to the next Claude prompt. The loop reruns the same validation at every
+iteration boundary and refuses to guess when schema errors exist. See
+[BACKLOG.schema.md](BACKLOG.schema.md) for the complete contract.
+
 ## Watching / controlling a running loop
 - **Live status of the active iteration** (tool, elapsed, output tokens, last
   activity): `cat .ralph/live`
@@ -103,6 +147,10 @@ under `.ralph/` (runtime state) gitignored.
 - **Resume** later: just re-run `ralph` — the counter in `.ralph/iteration`
   persists.
 - **Launch detached** for overnight runs: `nohup setsid ralph … &`.
+
+Each completed result adds a `perf` line to `run.log` with total, API, and
+non-API time, turn count, and token/cache totals. This makes model time versus
+local tools/tests visible without mining raw NDJSON.
 
 ## Completion
 The loop ends when the model's **final text** (from the result envelope's
@@ -127,6 +175,13 @@ Each iteration ends by writing two one-word files that steer the next step:
 
 Invalid `MODEL` values are ignored with a warning (never abort). See the PROMPT
 template for the exact instructions given to the model.
+
+Before every process launch the runner parses the complete backlog and appends
+a bounded brief containing the selected task/stage plus the first `Next:` only
+when it names that same task. Later historical hand-offs are never searched as
+fallback routing. The base prompt remains first and stable for caching. Ralph
+also passes `--no-session-persistence` (iterations are deliberately fresh) and
+`--exclude-dynamic-system-prompt-sections` (better prompt-cache reuse).
 
 ## No-progress detection & escalation
 A **progress streak** counts consecutive unproductive iterations. An iteration
@@ -185,6 +240,7 @@ Example `.ralph/ralph.toml`:
 ```toml
 model = "sonnet"
 fallback_model = "sonnet"
+effort = "auto"
 max_cost_usd = 25.0
 max_duration = "8h"
 iteration_timeout = "45m"
@@ -197,6 +253,7 @@ abort_after = 4
 |---|---|---|---|
 | `model` | `RALPH_MODEL` | `--model` | `sonnet` |
 | `fallback_model` | `RALPH_FALLBACK_MODEL` | `--fallback-model` | `sonnet` |
+| `effort` | `RALPH_EFFORT` | `--effort` | `auto` |
 | `max_iterations` | `RALPH_MAX_ITER` | `--max-iterations` | `0` |
 | `max_cost_usd` | `RALPH_MAX_COST` | `--max-cost` | `0` |
 | `max_duration` | `RALPH_MAX_DURATION` | `--max-duration` | `0` |
@@ -206,6 +263,7 @@ abort_after = 4
 | `marker` | `RALPH_MARKER` | `--marker` | `RALPH_COMPLETE` |
 | `prompt` | `RALPH_PROMPT` | `--prompt` | `.ralph/PROMPT.md` |
 | `backlog` | `RALPH_BACKLOG` | `--backlog` | `.ralph/BACKLOG.md` |
+| `progress` | `RALPH_PROGRESS` | `--progress` | `.ralph/PROGRESS.md` |
 | `dir` | `RALPH_DIR` | `--dir` | `.ralph` |
 | `yolo` | `RALPH_YOLO` | `--no-yolo` | `true` |
 | `limit_wait` / `_max` | `RALPH_LIMIT_WAIT[_MAX]` | — | 300 / 3600 |
@@ -219,16 +277,21 @@ abort_after = 4
 unattended loop can't answer permission prompts, so run on a branch/worktree you
 are willing to let it modify freely.
 
+`effort = "auto"` prevents a global Claude setting from silently making every
+slice high-effort: Haiku maps to low, Sonnet to medium, and Opus to high. Set an
+explicit `low` / `medium` / `high` / `xhigh` / `max`, or use `inherit` to defer
+to Claude settings. A legacy `--effort` in `extra_args` remains authoritative.
+
 ## Requirements
 - The `claude` CLI on PATH (authenticated).
 - The Rust toolchain to build (via the personalize script).
 
 ## Development
 ```bash
-cargo test          # classify / config / stream / state / git / thrash
+cargo test          # backlog/context/config/stream/state/git/thrash
 cargo build --release
 ```
-Modules: `config` · `stream` (NDJSON) · `classify` · `control` (loop, thrash,
-budgets, timeout) · `state` (`.ralph/`) · `git` · `init` (`ralph init`
-scaffolding). See `docs/superpowers/specs/2026-07-17-ralph-rust-design.md` for
-the design.
+Modules: `backlog` (schema/lint) · `context` (bounded brief) · `config` ·
+`stream` (NDJSON) · `classify` · `control` (loop, thrash, budgets, timeout) ·
+`state` (`.ralph/`) · `git` · `init` (`ralph init` scaffolding). See
+`docs/superpowers/specs/2026-07-17-ralph-rust-design.md` for the original design.

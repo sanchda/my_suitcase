@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build and install the ralph runner — the external autonomous loop for Claude
 # Code (fresh-context `claude -p` iterations with budgets, an opt-in
-# per-iteration timeout, and no-progress escalation).
+# per-iteration timeout, schema-resolved task briefs, and no-progress escalation).
 #
 # - Builds the Rust binary from suitcase/tools/ralph (cargo).
 # - Installs it to ~/.local/bin/ralph.

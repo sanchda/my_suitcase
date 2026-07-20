@@ -18,6 +18,13 @@ pub struct ResultEnvelope {
     pub api_error_status: Option<u16>,
     pub result: String,
     pub total_cost_usd: f64,
+    pub duration_ms: u64,
+    pub duration_api_ms: u64,
+    pub num_turns: u64,
+    pub input_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub cache_read_input_tokens: u64,
+    pub output_tokens: u64,
     /// The original JSON line, for persisting to `last-result.json`.
     pub raw: String,
 }
@@ -145,11 +152,25 @@ fn parse_envelope(v: &Value, raw_line: &str) -> ResultEnvelope {
         Value::String(s) => s.trim().parse::<u16>().ok(),
         _ => None,
     });
+    let usage = v.get("usage");
+    let usage_u64 = |field: &str| {
+        usage
+            .and_then(|value| value.get(field))
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+    };
     ResultEnvelope {
         is_error: v.get("is_error").and_then(Value::as_bool).unwrap_or(false),
         api_error_status,
         result: v.get("result").and_then(Value::as_str).unwrap_or("").to_string(),
         total_cost_usd: v.get("total_cost_usd").and_then(Value::as_f64).unwrap_or(0.0),
+        duration_ms: v.get("duration_ms").and_then(Value::as_u64).unwrap_or(0),
+        duration_api_ms: v.get("duration_api_ms").and_then(Value::as_u64).unwrap_or(0),
+        num_turns: v.get("num_turns").and_then(Value::as_u64).unwrap_or(0),
+        input_tokens: usage_u64("input_tokens"),
+        cache_creation_input_tokens: usage_u64("cache_creation_input_tokens"),
+        cache_read_input_tokens: usage_u64("cache_read_input_tokens"),
+        output_tokens: usage_u64("output_tokens"),
         raw: raw_line.to_string(),
     }
 }
@@ -185,13 +206,20 @@ mod tests {
 
     #[test]
     fn captures_success_envelope() {
-        let input = r#"{"type":"result","subtype":"success","is_error":false,"result":"done here","total_cost_usd":0.42}"#;
+        let input = r#"{"type":"result","subtype":"success","is_error":false,"result":"done here","total_cost_usd":0.42,"duration_ms":9100,"duration_api_ms":7200,"num_turns":12,"usage":{"input_tokens":5,"cache_creation_input_tokens":100,"cache_read_input_tokens":300,"output_tokens":40}}"#;
         let (env, _, _) = drain(input);
         let env = env.expect("envelope");
         assert!(!env.is_error);
         assert_eq!(env.result, "done here");
         assert_eq!(env.total_cost_usd, 0.42);
         assert_eq!(env.api_error_status, None);
+        assert_eq!(env.duration_ms, 9_100);
+        assert_eq!(env.duration_api_ms, 7_200);
+        assert_eq!(env.num_turns, 12);
+        assert_eq!(env.input_tokens, 5);
+        assert_eq!(env.cache_creation_input_tokens, 100);
+        assert_eq!(env.cache_read_input_tokens, 300);
+        assert_eq!(env.output_tokens, 40);
     }
 
     #[test]

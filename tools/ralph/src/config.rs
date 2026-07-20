@@ -19,6 +19,10 @@ pub struct Config {
     pub dir: PathBuf,
     /// Backlog file to archive on completion.
     pub backlog: PathBuf,
+    /// Durable current hand-off / progress log.
+    pub progress: PathBuf,
+    /// Claude effort: `auto` maps model tiers, `inherit` defers to settings.
+    pub effort: String,
     pub yolo: bool,
     pub output_format: String,
     pub limit_wait: u64,
@@ -52,6 +56,8 @@ impl Default for Config {
             prompt: PathBuf::from(".ralph/PROMPT.md"),
             dir: PathBuf::from(".ralph"),
             backlog: PathBuf::from(".ralph/BACKLOG.md"),
+            progress: PathBuf::from(".ralph/PROGRESS.md"),
+            effort: "auto".into(),
             yolo: true,
             output_format: "stream-json".into(),
             limit_wait: 300,
@@ -82,6 +88,8 @@ pub struct FileConfig {
     pub prompt: Option<String>,
     pub dir: Option<String>,
     pub backlog: Option<String>,
+    pub progress: Option<String>,
+    pub effort: Option<String>,
     pub yolo: Option<bool>,
     pub output_format: Option<String>,
     pub limit_wait: Option<u64>,
@@ -183,6 +191,12 @@ pub fn apply_file(cfg: &mut Config, f: FileConfig) -> Result<(), String> {
     if let Some(v) = f.backlog {
         cfg.backlog = PathBuf::from(v);
     }
+    if let Some(v) = f.progress {
+        cfg.progress = PathBuf::from(v);
+    }
+    if let Some(v) = f.effort {
+        cfg.effort = v;
+    }
     if let Some(v) = f.yolo {
         cfg.yolo = v;
     }
@@ -258,6 +272,10 @@ pub fn apply_env<F: Fn(&str) -> Option<String>>(cfg: &mut Config, get: F) -> Res
     if let Some(v) = get("RALPH_BACKLOG") {
         cfg.backlog = PathBuf::from(v);
     }
+    if let Some(v) = get("RALPH_PROGRESS") {
+        cfg.progress = PathBuf::from(v);
+    }
+    set_str!("RALPH_EFFORT", cfg.effort);
     if let Some(v) = get("RALPH_YOLO") {
         cfg.yolo = v != "0" && !v.eq_ignore_ascii_case("false");
     }
@@ -297,6 +315,8 @@ pub fn apply_args(cfg: &mut Config, args: &[String]) -> Result<bool, String> {
             "--marker" => cfg.marker = next()?,
             "--dir" => cfg.dir = PathBuf::from(next()?),
             "--backlog" => cfg.backlog = PathBuf::from(next()?),
+            "--progress" => cfg.progress = PathBuf::from(next()?),
+            "--effort" => cfg.effort = next()?,
             "--max-cost" => cfg.max_cost_usd = next()?.parse().map_err(|_| "bad --max-cost")?,
             "--max-duration" => cfg.max_duration = parse_duration(&next()?)?,
             "--iteration-timeout" => cfg.iteration_timeout = parse_duration(&next()?)?,
@@ -350,6 +370,15 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
     if cfg.escalation_ladder.is_empty() {
         return Err("escalation_ladder must not be empty".into());
     }
+    if !matches!(
+        cfg.effort.as_str(),
+        "auto" | "inherit" | "low" | "medium" | "high" | "xhigh" | "max"
+    ) {
+        return Err(format!(
+            "invalid effort '{}': expected auto, inherit, low, medium, high, xhigh, or max",
+            cfg.effort
+        ));
+    }
     Ok(())
 }
 
@@ -378,6 +407,8 @@ mod tests {
         assert!(c.yolo);
         assert_eq!(c.escalation_ladder, vec!["haiku", "sonnet", "opus"]);
         assert_eq!(c.prompt, PathBuf::from(".ralph/PROMPT.md"));
+        assert_eq!(c.progress, PathBuf::from(".ralph/PROGRESS.md"));
+        assert_eq!(c.effort, "auto");
     }
 
     #[test]
@@ -387,6 +418,8 @@ mod tests {
             max_cost_usd = 12.5
             max_duration = "8h"
             iteration_timeout = 600
+            progress = "notes/NOW.md"
+            effort = "medium"
             extra_args = ["--add-dir", "/tmp"]
             escalate_after = 3
             abort_after = 5
@@ -398,6 +431,8 @@ mod tests {
         assert_eq!(c.max_cost_usd, 12.5);
         assert_eq!(c.max_duration, 28_800);
         assert_eq!(c.iteration_timeout, 600);
+        assert_eq!(c.progress, PathBuf::from("notes/NOW.md"));
+        assert_eq!(c.effort, "medium");
         assert_eq!(c.extra_args, vec!["--add-dir", "/tmp"]);
         assert_eq!(c.escalate_after, 3);
         assert_eq!(c.abort_after, 5);
@@ -492,5 +527,42 @@ mod tests {
         assert_eq!(c.backlog, PathBuf::from("b/B.md"));
         apply_args(&mut c, &["--backlog".into(), "c/B.md".into()]).unwrap();
         assert_eq!(c.backlog, PathBuf::from("c/B.md"));
+    }
+
+    #[test]
+    fn progress_and_effort_precedence() {
+        let mut c = Config::default();
+        let file: FileConfig = toml::from_str(
+            "progress = \"a/P.md\"\neffort = \"low\"\n",
+        )
+        .unwrap();
+        apply_file(&mut c, file).unwrap();
+        assert_eq!(c.progress, PathBuf::from("a/P.md"));
+        assert_eq!(c.effort, "low");
+
+        apply_env(&mut c, |k| match k {
+            "RALPH_PROGRESS" => Some("b/P.md".into()),
+            "RALPH_EFFORT" => Some("medium".into()),
+            _ => None,
+        })
+        .unwrap();
+        apply_args(
+            &mut c,
+            &[
+                "--progress".into(),
+                "c/P.md".into(),
+                "--effort".into(),
+                "high".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(c.progress, PathBuf::from("c/P.md"));
+        assert_eq!(c.effort, "high");
+    }
+
+    #[test]
+    fn validate_rejects_unknown_effort() {
+        let c = Config { effort: "heroic".into(), ..Config::default() };
+        assert!(validate(&c).is_err());
     }
 }
