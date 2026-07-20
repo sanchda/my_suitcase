@@ -207,6 +207,8 @@ mod tests {
             "template grew to {} bytes",
             prompt.len()
         );
+        let config = fs::read_to_string(root.join(".ralph/ralph.toml")).unwrap();
+        assert!(config.contains("--safe-mode"));
         let backlog = fs::read_to_string(root.join(".ralph/BACKLOG.md")).unwrap();
         let parsed = crate::backlog::Document::parse(&backlog);
         assert!(parsed.schema_present);
