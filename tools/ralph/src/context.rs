@@ -1,22 +1,20 @@
 //! Resolve a bounded, schema-backed iteration brief from BACKLOG + PROGRESS.
 //!
-//! The backlog parser owns task selection. PROGRESS is advisory only: its first
-//! `Next:` paragraph may refine the selected task, but can never select a later
-//! task. This is intentionally recomputed before every fresh Claude process.
+//! The backlog parser owns task selection. PROGRESS is a plain carry-forward
+//! note the runner writes and we inject verbatim (no id parsing): it may clarify
+//! the resolved leaf but can never reroute to a later task. This is intentionally
+//! recomputed before every fresh Claude process.
 
 use crate::backlog::{Document, Severity};
 use std::fs;
 use std::path::Path;
 
-const PROGRESS_WARN_LINES: usize = 300;
-const PROGRESS_WARN_BYTES: usize = 32 * 1024;
 const TASK_EXCERPT_BYTES: usize = 8 * 1024;
 const PARENT_EXCERPT_BYTES: usize = 2 * 1024;
 const ALL_PARENTS_EXCERPT_BYTES: usize = 4 * 1024;
-const HANDOFF_EXCERPT_BYTES: usize = 1024;
 const RUNNER_CONTRACT: &str = "\
 <!-- ralph-runner-contract: v1 -->
-When a pending leaf exists, work only that leaf; a matching `Next:` may refine it, never reroute. If the leaf is too large, make a plan pass: add ordered child stages with IDs and `Verify:` contracts, run `ralph lint`, and leave product code for the selected child. Trust the excerpts; use only narrow file reads. Verify proportionally and keep PROGRESS/`Next:` concise.
+When a pending leaf exists, work only that leaf; a carry-forward note may clarify it, never reroute. If the leaf is too large, make a plan pass: add ordered child stages with IDs and `Verify:` contracts, run `ralph lint`, and leave product code for the selected child. Trust the excerpts; use only narrow file reads. Verify proportionally. Do not write PROGRESS or a `Next:` line; the runner owns the hand-off.
 ";
 
 #[derive(Debug, Clone)]
@@ -150,7 +148,7 @@ pub fn load(backlog_path: &Path, progress_path: &Path) -> IterationContext {
             diagnostics.push(Diagnostic {
                 severity: Severity::Warning,
                 text: format!(
-                    "{}: progress file is absent; no hand-off was injected",
+                    "{}: progress file is absent; no carry-forward was injected",
                     progress_path.display()
                 ),
             });
@@ -165,21 +163,6 @@ pub fn load(backlog_path: &Path, progress_path: &Path) -> IterationContext {
         }
     };
 
-    if let Some(progress) = &progress_text {
-        let line_count = progress.lines().count();
-        if line_count > PROGRESS_WARN_LINES || progress.len() > PROGRESS_WARN_BYTES {
-            diagnostics.push(Diagnostic {
-                severity: Severity::Warning,
-                text: format!(
-                    "{}: oversized progress log ({} lines, {} bytes); keep current state near the top and compact/archive history",
-                    progress_path.display(),
-                    line_count,
-                    progress.len()
-                ),
-            });
-        }
-    }
-
     let selected = doc.selected_index();
     let target = selected.map(|index| {
         task_path_indices(&doc, index)
@@ -189,14 +172,7 @@ pub fn load(backlog_path: &Path, progress_path: &Path) -> IterationContext {
             .join(" > ")
     });
     let suffix = match selected {
-        Some(index) => build_suffix(
-            backlog_path,
-            progress_path,
-            &doc,
-            index,
-            progress_text.as_deref(),
-            &mut diagnostics,
-        ),
+        Some(index) => build_suffix(backlog_path, &doc, index, progress_text.as_deref()),
         None if doc.has_errors() => invalid_suffix(backlog_path),
         None => complete_suffix(backlog_path, doc.line_count()),
     };
@@ -212,11 +188,9 @@ pub fn load(backlog_path: &Path, progress_path: &Path) -> IterationContext {
 
 fn build_suffix(
     backlog_path: &Path,
-    progress_path: &Path,
     doc: &Document,
     selected: usize,
     progress: Option<&str>,
-    diagnostics: &mut Vec<Diagnostic>,
 ) -> String {
     let task = &doc.tasks[selected];
     let path = task_path_indices(doc, selected);
@@ -225,35 +199,6 @@ fn build_suffix(
         .map(|index| doc.tasks[*index].id.as_str())
         .collect::<Vec<_>>()
         .join(" > ");
-
-    let handoffs = progress.map(parse_handoffs).unwrap_or_default();
-    let current = handoffs.first();
-    let current_key = current.and_then(|handoff| handoff.task_id.as_deref());
-    let current_matches = current_key == Some(task.id.as_str());
-    let chosen_handoff = if current_matches {
-        current
-    } else {
-        if let Some(handoff) = current {
-            let message = match current_key {
-                Some(key) => format!(
-                    "{}: line {} hand-off targets `{key}` but backlog requires `{}`; the hand-off will not override backlog order",
-                    progress_path.display(),
-                    handoff.line,
-                    task.id
-                ),
-                None => format!(
-                    "{}: line {} is not a canonical `Next: <task-id> — <step>` hand-off and was ignored",
-                    progress_path.display(),
-                    handoff.line
-                ),
-            };
-            diagnostics.push(Diagnostic {
-                severity: Severity::Warning,
-                text: message,
-            });
-        }
-        None
-    };
 
     let mut out = String::new();
     let schema_mode = if doc.schema_present {
@@ -296,25 +241,14 @@ fn build_suffix(
         out.push_str(&format!("--- END {} ---\n\n", item.id));
     }
 
-    match chosen_handoff {
-        Some(handoff) => {
-            out.push_str(&format!(
-                "### Matching `Next:` ({}:{})\n\n--- BEGIN NEXT ---\n{}--- END NEXT ---\n\n",
-                progress_path.display(),
-                handoff.line,
-                handoff.text
-            ));
+    match progress {
+        Some(text) if !text.trim().is_empty() => {
+            out.push_str("### Carry-forward (from the previous iteration)\n\n");
+            out.push_str("--- BEGIN CARRY-FORWARD ---\n");
+            out.push_str(text.trim_end());
+            out.push_str("\n--- END CARRY-FORWARD ---\n\n");
         }
-        None => out.push_str("Matching `Next:`: none; use the leaf directly.\n\n"),
-    }
-
-    if let (Some(_handoff), Some(key)) = (current, current_key) {
-        if key != task.id {
-            out.push_str(&format!(
-                "Stale `Next:` targets `{key}`; ignore it, keep **{}**, and repair PROGRESS.\n\n",
-                task.id
-            ));
-        }
+        _ => out.push_str("Carry-forward: none; use the leaf directly.\n\n"),
     }
     out
 }
@@ -328,7 +262,7 @@ fn invalid_suffix(backlog_path: &Path) -> String {
 
 fn complete_suffix(backlog_path: &Path, lines: usize) -> String {
     format!(
-        "<!-- ralph-resolved-brief: v1 -->\n## Backlog complete\n\nAll {lines} lines of `{}` were parsed; no pending task remains. Perform only the final completion audit; ignore historical `Next:` entries.\n",
+        "<!-- ralph-resolved-brief: v1 -->\n## Backlog complete\n\nAll {lines} lines of `{}` were parsed; no pending task remains. Perform only the final completion audit.\n",
         backlog_path.display()
     )
 }
@@ -342,87 +276,6 @@ fn task_path_indices(doc: &Document, selected: usize) -> Vec<usize> {
     }
     path.reverse();
     path
-}
-
-#[derive(Debug, Clone)]
-struct Handoff {
-    line: usize,
-    text: String,
-    task_id: Option<String>,
-}
-
-fn parse_handoffs(progress: &str) -> Vec<Handoff> {
-    let lines: Vec<&str> = progress.lines().collect();
-    let mut handoffs = Vec::new();
-    let mut index = 0;
-    while index < lines.len() {
-        if !lines[index].starts_with("Next:") {
-            index += 1;
-            continue;
-        }
-        let start = index;
-        let declared_task_id = handoff_task_id(lines[start]);
-        let mut text = String::new();
-        while index < lines.len()
-            && (index == start
-                || (!lines[index].trim().is_empty()
-                    && !lines[index].starts_with("Next:")
-                    && !lines[index].starts_with("## ")
-                    && !lines[index].starts_with("**")))
-        {
-            if text.len() + lines[index].len() + 1 > HANDOFF_EXCERPT_BYTES {
-                text.push_str("[… hand-off truncated by ralph …]\n");
-                while index < lines.len() && !lines[index].trim().is_empty() {
-                    index += 1;
-                }
-                break;
-            }
-            text.push_str(lines[index]);
-            text.push('\n');
-            index += 1;
-        }
-        let task_id = handoff_task_id(&text).or(declared_task_id);
-        handoffs.push(Handoff {
-            line: start + 1,
-            text,
-            task_id,
-        });
-        break;
-    }
-    handoffs
-}
-
-fn handoff_task_id(text: &str) -> Option<String> {
-    if let Some(start) = text.find("**") {
-        let rest = &text[start + 2..];
-        if let Some(end) = rest.find("**") {
-            let label = &rest[..end];
-            let candidate = label.split(" — ").next().unwrap_or(label);
-            if let Some(id) = first_id_token(candidate) {
-                return Some(id);
-            }
-        }
-    }
-    let rest = text.strip_prefix("Next:")?.trim_start();
-    first_id_token(rest)
-}
-
-fn first_id_token(text: &str) -> Option<String> {
-    let token = text
-        .split_whitespace()
-        .next()?
-        .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && !matches!(ch, '.' | '_' | '-'));
-    if token.is_empty()
-        || !token
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
-        || token.eq_ignore_ascii_case("backlog")
-        || token.eq_ignore_ascii_case("line")
-    {
-        None
-    } else {
-        Some(token.to_string())
-    }
 }
 
 #[cfg(test)]
@@ -448,50 +301,48 @@ mod tests {
     }
 
     #[test]
-    fn stale_next_cannot_override_first_unchecked_task() {
-        let backlog = format!(
-            "{SCHEMA_MARKER}\n- [ ] **36.8 — Current.**\n  Verify: test\n- [ ] **37.3 — Later.**\n  Verify: test\n"
+    fn carry_forward_is_injected_verbatim_without_warnings() {
+        let backlog = format!("{SCHEMA_MARKER}\n# Backlog\n\n- [ ] **1 — Do it.** Verify: yes\n");
+        let (backlog_path, progress_path) = tmp_files(
+            &backlog,
+            "- watch the null-guard in foo.rs\n- 2 is coprime\n",
         );
-        let progress = "Next: BACKLOG **37.3 — stale**\n\nNext: line, prose not a hand-off\n\nNext: BACKLOG **36.8 — recovered slice**\n";
-        let (backlog_path, progress_path) = tmp_files(&backlog, progress);
         let ctx = load(&backlog_path, &progress_path);
-        assert_eq!(ctx.target.as_deref(), Some("36.8"));
-        assert!(!ctx.render().contains("recovered slice"));
-        assert!(ctx.render().contains("Matching `Next:`: none"));
-        assert!(ctx.render().contains("Stale `Next:`"));
-        assert!(ctx
-            .warnings()
-            .any(|warning| warning.contains("will not override backlog order")));
+        let brief = ctx.render();
+        assert!(brief.contains("Carry-forward"));
+        assert!(brief.contains("watch the null-guard in foo.rs"));
+        // No handoff-format or oversize warnings exist anymore.
+        assert_eq!(ctx.warnings().count(), 0);
     }
 
     #[test]
-    fn current_matching_next_is_used() {
+    fn absent_carry_forward_reads_none() {
+        let backlog = format!("{SCHEMA_MARKER}\n# Backlog\n\n- [ ] **1 — Do it.** Verify: yes\n");
+        let root = std::env::temp_dir().join(format!("ralph-ctx-none-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let backlog_path = root.join("BACKLOG.md");
+        fs::write(&backlog_path, &backlog).unwrap();
+        let progress_path = root.join("PROGRESS.md"); // does not exist
+        let ctx = load(&backlog_path, &progress_path);
+        assert!(ctx.render().contains("Carry-forward: none"));
+    }
+
+    #[test]
+    fn carry_forward_note_clarifies_the_leaf() {
         let backlog = format!("{SCHEMA_MARKER}\n- [ ] **2 — Work.**\n  Verify: test\n");
-        let (backlog_path, progress_path) = tmp_files(&backlog, "Next: 2 — implement parser\n");
+        let (backlog_path, progress_path) =
+            tmp_files(&backlog, "- leaf 2 still needs the parser wired up\n");
         let ctx = load(&backlog_path, &progress_path);
         assert!(!ctx.has_errors());
         assert!(!ctx.is_complete());
-        assert!(ctx.render().contains("implement parser"));
-    }
-
-    #[test]
-    fn noncanonical_next_prose_is_ignored() {
-        let backlog = format!("{SCHEMA_MARKER}\n- [ ] **2 — Work.**\n  Verify: test\n");
-        let progress = "Next: line, this is historical prose\n\nNext: 2 — real hand-off\n";
-        let (backlog_path, progress_path) = tmp_files(&backlog, progress);
-        let ctx = load(&backlog_path, &progress_path);
-        assert!(!ctx.render().contains("real hand-off"));
-        assert!(ctx.render().contains("Matching `Next:`: none"));
-        assert!(!ctx.render().contains("this is historical prose"));
-        assert!(ctx
-            .warnings()
-            .any(|warning| warning.contains("not a canonical")));
+        assert!(ctx.render().contains("needs the parser wired up"));
     }
 
     #[test]
     fn composed_prompt_preserves_stable_base_first() {
         let backlog = format!("{SCHEMA_MARKER}\n- [ ] **2 — Work.**\n  Verify: test\n");
-        let (backlog_path, progress_path) = tmp_files(&backlog, "Next: 2 — do it\n");
+        let (backlog_path, progress_path) = tmp_files(&backlog, "- do it\n");
         let ctx = load(&backlog_path, &progress_path);
         let prompt = ctx.compose("stable base\n");
         assert!(prompt.starts_with("stable base\n\n<!-- ralph-runner-contract"));
@@ -518,16 +369,6 @@ mod tests {
         assert!(ctx.has_errors());
         assert!(!ctx.is_complete());
         assert!(ctx.render().contains("Repair the backlog schema"));
-    }
-
-    #[test]
-    fn long_handoff_is_truncated_and_brief_stays_bounded() {
-        let backlog = format!("{SCHEMA_MARKER}\n- [ ] **2 — Work.**\n  Verify: test\n");
-        let progress = format!("Next: 2 — {}\n", "detail ".repeat(1000));
-        let (backlog_path, progress_path) = tmp_files(&backlog, &progress);
-        let rendered = load(&backlog_path, &progress_path).render();
-        assert!(rendered.contains("hand-off truncated by ralph"));
-        assert!(rendered.len() < 4_000, "brief was {} bytes", rendered.len());
     }
 
     #[test]

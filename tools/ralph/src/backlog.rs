@@ -62,6 +62,14 @@ pub struct Document {
     pub schema_present: bool,
 }
 
+/// The line span of the fully-completed leading run of top-level sections.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrefixSpan {
+    pub section_count: usize,
+    pub first_line: usize, // 1-based line of the first top-level task
+    pub last_line: usize,  // 1-based subtree-end line of the last swept section
+}
+
 impl Document {
     pub fn parse(text: &str) -> Self {
         let lines: Vec<String> = text.lines().map(String::from).collect();
@@ -312,6 +320,39 @@ impl Document {
         self.lines.len()
     }
 
+    /// The maximal leading run of top-level sections that are fully complete
+    /// (own box `[x]` and no unchecked descendant). `None` when the first
+    /// top-level section is not fully complete, i.e. nothing safe to sweep.
+    pub fn completed_leading_prefix(&self) -> Option<PrefixSpan> {
+        let tops: Vec<usize> = self
+            .tasks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.parent.is_none())
+            .map(|(i, _)| i)
+            .collect();
+        let first_line = self.tasks.get(*tops.first()?)?.line;
+        let mut count = 0;
+        let mut last_line = 0;
+        for &idx in &tops {
+            let sweepable = self.tasks[idx].checked && !has_unchecked_descendant(&self.tasks, idx);
+            if !sweepable {
+                break;
+            }
+            count += 1;
+            last_line = self.tasks[idx].end_line;
+        }
+        if count == 0 {
+            None
+        } else {
+            Some(PrefixSpan {
+                section_count: count,
+                first_line,
+                last_line,
+            })
+        }
+    }
+
     /// The model tier declared in a task's own `(tier/…)` decoration
     /// (e.g. `(opus/pedagogy.)` → `opus`), or `None`. Advisory routing, not a
     /// spec field: scans only the task's own body (never a child's), takes the
@@ -362,6 +403,18 @@ impl Document {
         }
         path.reverse();
         path
+    }
+
+    /// Up to `n` upcoming executable-leaf labels ("id — title"), in document
+    /// order from the current frontier. Feeds the handoff synthesizer.
+    pub fn upcoming_leaf_labels(&self, n: usize) -> Vec<String> {
+        self.tasks
+            .iter()
+            .enumerate()
+            .filter(|(i, t)| !t.checked && !has_unchecked_descendant(&self.tasks, *i))
+            .take(n)
+            .map(|(_, t)| format!("{} — {}", t.id, t.title))
+            .collect()
     }
 
     /// The task's own prose, excluding child stages, with a hard byte bound.
@@ -740,6 +793,54 @@ mod tests {
             .issues
             .iter()
             .any(|issue| issue.message.contains("unsupported")));
+    }
+
+    #[test]
+    fn completed_leading_prefix_stops_at_first_pending_section() {
+        let mut text = String::from(SCHEMA_MARKER);
+        text.push('\n');
+        text.push_str("# Backlog\n\n");
+        text.push_str("- [x] **1 — Done.** Verify: yes\n");
+        text.push_str("  - [x] **1.1 — Sub.** Verify: yes\n");
+        text.push_str("- [x] **2 — Also done.** Verify: yes\n");
+        text.push_str("- [ ] **3 — Pending.** Verify: yes\n");
+        text.push_str("- [x] **4 — Later done.** Verify: yes\n");
+        let doc = Document::parse(&text);
+        let prefix = doc.completed_leading_prefix().expect("has a prefix");
+        assert_eq!(prefix.section_count, 2); // 1 and 2, not 4 (after pending 3)
+        let two = doc.tasks.iter().find(|t| t.id == "2").unwrap();
+        assert_eq!(prefix.last_line, two.end_line);
+        assert_eq!(prefix.first_line, doc.tasks[0].line);
+    }
+
+    #[test]
+    fn no_prefix_when_first_section_pending() {
+        let mut text = String::from(SCHEMA_MARKER);
+        text.push_str("\n# Backlog\n\n- [ ] **1 — Pending.** Verify: yes\n");
+        let doc = Document::parse(&text);
+        assert!(doc.completed_leading_prefix().is_none());
+    }
+
+    #[test]
+    fn no_prefix_when_parent_closure_leaf_unchecked() {
+        // Children done but the parent's own box is not → not sweepable.
+        let mut text = String::from(SCHEMA_MARKER);
+        text.push_str("\n# Backlog\n\n");
+        text.push_str("- [ ] **1 — Parent closure pending.** Verify: yes\n");
+        text.push_str("  - [x] **1.1 — Sub.** Verify: yes\n");
+        let doc = Document::parse(&text);
+        assert!(doc.completed_leading_prefix().is_none());
+    }
+
+    #[test]
+    fn upcoming_leaf_labels_are_leaves_in_order() {
+        let doc = Document::parse(&format!(
+            "{SCHEMA_MARKER}\n# B\n\n- [ ] **1 — One.** Verify: y\n- [ ] **2 — Two.** Verify: y\n- [ ] **3 — Three.** Verify: y\n"
+        ));
+        assert_eq!(
+            doc.upcoming_leaf_labels(2),
+            vec!["1 — One.".to_string(), "2 — Two.".to_string()]
+        );
     }
 
     #[test]

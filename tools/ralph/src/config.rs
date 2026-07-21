@@ -13,6 +13,8 @@ use std::path::PathBuf;
 pub struct Config {
     pub model: String,
     pub fallback_model: String,
+    /// Model used by the handoff synthesizer (distills carry-forward notes).
+    pub synth_model: String,
     pub max_iterations: u64,
     pub marker: String,
     pub prompt: PathBuf,
@@ -53,6 +55,7 @@ impl Default for Config {
         Config {
             model: "sonnet".into(),
             fallback_model: "sonnet".into(),
+            synth_model: "sonnet".into(),
             max_iterations: 0,
             marker: "RALPH_COMPLETE".into(),
             prompt: PathBuf::from(".ralph/PROMPT.md"),
@@ -86,6 +89,7 @@ impl Default for Config {
 pub struct FileConfig {
     pub model: Option<String>,
     pub fallback_model: Option<String>,
+    pub synth_model: Option<String>,
     pub max_iterations: Option<u64>,
     pub marker: Option<String>,
     pub prompt: Option<String>,
@@ -178,6 +182,9 @@ pub fn apply_file(cfg: &mut Config, f: FileConfig) -> Result<(), String> {
     }
     if let Some(v) = f.fallback_model {
         cfg.fallback_model = v;
+    }
+    if let Some(v) = f.synth_model {
+        cfg.synth_model = v;
     }
     if let Some(v) = f.max_iterations {
         cfg.max_iterations = v;

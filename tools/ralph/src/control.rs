@@ -10,7 +10,7 @@ use crate::context;
 use crate::notify;
 use crate::state::State;
 use crate::stream::{self, IterStatus, ResultEnvelope};
-use crate::{git, R};
+use crate::{curate, git, synth, R};
 use std::collections::HashSet;
 use std::io::{BufReader, Write};
 use std::path::Path;
@@ -180,7 +180,10 @@ pub fn run(cfg: &Config) -> R<i32> {
     let notifier = notify::Notifier::new(&cfg.discord_webhook);
     notify::notify(
         &notifier,
-        &format!("🟢 **ralph started** — model `{}`, from iter {}", cfg.model, iter),
+        &format!(
+            "🟢 **ralph started** — model `{}`, from iter {}",
+            cfg.model, iter
+        ),
     );
 
     loop {
@@ -198,7 +201,10 @@ pub fn run(cfg: &Config) -> R<i32> {
             ));
             notify::notify(
                 &notifier,
-                &format!("⏹️ **ralph halted** — max iterations ({}) reached", cfg.max_iterations),
+                &format!(
+                    "⏹️ **ralph halted** — max iterations ({}) reached",
+                    cfg.max_iterations
+                ),
             );
             break;
         }
@@ -209,7 +215,10 @@ pub fn run(cfg: &Config) -> R<i32> {
             ));
             notify::notify(
                 &notifier,
-                &format!("⏹️ **ralph halted** — cost budget ${:.2} reached", cfg.max_cost_usd),
+                &format!(
+                    "⏹️ **ralph halted** — cost budget ${:.2} reached",
+                    cfg.max_cost_usd
+                ),
             );
             break;
         }
@@ -220,7 +229,10 @@ pub fn run(cfg: &Config) -> R<i32> {
             ));
             notify::notify(
                 &notifier,
-                &format!("⏹️ **ralph halted** — wall-clock budget ({}s) reached", cfg.max_duration),
+                &format!(
+                    "⏹️ **ralph halted** — wall-clock budget ({}s) reached",
+                    cfg.max_duration
+                ),
             );
             break;
         }
@@ -306,11 +318,13 @@ pub fn run(cfg: &Config) -> R<i32> {
                     let post_iteration = context::load(&cfg.backlog, &cfg.progress);
                     if post_iteration.is_complete() {
                         state.log("  marker seen and backlog has no pending task → COMPLETE");
-                        archive_backlog(cfg, &state, repo);
+                        archive_backlog(cfg, &state);
                         state.log(&format!("=== ralph COMPLETE after {iter} iterations ==="));
                         notify::notify(
                             &notifier,
-                            &format!("✅ **ralph COMPLETE** — backlog done after {iter} iterations"),
+                            &format!(
+                                "✅ **ralph COMPLETE** — backlog done after {iter} iterations"
+                            ),
                         );
                         break;
                     }
@@ -353,6 +367,33 @@ pub fn run(cfg: &Config) -> R<i32> {
                 };
                 newly_dirty_warn(&state, repo);
                 state.clear_status();
+
+                // Orchestrator owns the handoff: distill this turn's summary into
+                // the next carry-forward, then sweep completed backlog sections.
+                {
+                    let doc = crate::backlog::Document::parse(
+                        &std::fs::read_to_string(&cfg.backlog).unwrap_or_default(),
+                    );
+                    let upcoming = doc.upcoming_leaf_labels(3);
+                    let prev = std::fs::read_to_string(&cfg.progress).unwrap_or_default();
+                    // Synth is a small second model call per successful turn; its cost is
+                    // deemed negligible and is not counted toward max_cost_usd, and it can
+                    // block up to SYNTH_TIMEOUT_SECS.
+                    let carry = synth::synthesize_with(&text, &upcoming, &prev, |p| {
+                        synth::run_claude(cfg, p)
+                    });
+                    if std::fs::write(&cfg.progress, carry).is_err() {
+                        state.log("  ⚠ could not write carry-forward to PROGRESS");
+                    }
+
+                    let swept = curate::sweep(&cfg.backlog, &cfg.dir.join("archive"));
+                    if swept > 0 {
+                        state.log(&format!(
+                            "  ✂ curated {swept} completed section(s) → archive"
+                        ));
+                    }
+                }
+
                 if apply_verdict(&mut thrash, verdict, &model, &state, &notifier) {
                     return Ok(1);
                 }
@@ -405,9 +446,9 @@ pub fn run(cfg: &Config) -> R<i32> {
     Ok(0)
 }
 
-/// On completion, move the backlog file into `<dir>/archive/` (timestamped).
-/// Best-effort: any failure is logged and ignored so a finished run stays done.
-fn archive_backlog(cfg: &Config, state: &State, repo: &Path) {
+/// On completion, archive whatever backlog remains. With incremental curation the
+/// live file is usually just its header by now. Best-effort; never touches git.
+fn archive_backlog(cfg: &Config, state: &State) {
     if !cfg.backlog.exists() {
         return;
     }
@@ -417,17 +458,7 @@ fn archive_backlog(cfg: &Config, state: &State, repo: &Path) {
         return;
     }
     let dest = archive_dir.join(format!("BACKLOG-{}.md", crate::state::timestamp()));
-    let moved = if git::is_repo(repo) && git::is_tracked(repo, &cfg.backlog) {
-        git::mv_and_commit(
-            repo,
-            &cfg.backlog,
-            &dest,
-            "chore(ralph): archive completed backlog",
-        )
-    } else {
-        rename_or_copy(&cfg.backlog, &dest)
-    };
-    if moved {
+    if rename_or_copy(&cfg.backlog, &dest) {
         state.log(&format!("  archived backlog → {}", dest.display()));
     } else {
         state.log(&format!(
@@ -458,7 +489,10 @@ fn apply_verdict(
         Action::Continue => false,
         Action::Escalate(m) => {
             state.log(&format!("  ↑ no-progress streak → escalating model to {m}"));
-            notify::notify(notifier, &format!("⚠️ **ralph** — no progress, escalating model to `{m}`"));
+            notify::notify(
+                notifier,
+                &format!("⚠️ **ralph** — no progress, escalating model to `{m}`"),
+            );
             false
         }
         Action::Abort(reason) => {
@@ -851,70 +885,14 @@ mod tests {
     }
 
     #[test]
-    fn archive_moves_tracked_backlog() {
-        use std::fs;
-        use std::path::PathBuf;
-        use std::process::Command;
-        let repo = std::env::temp_dir().join(format!("ralph-arch-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&repo);
-        fs::create_dir_all(repo.join(".ralph")).unwrap();
-        for a in [
-            vec!["init", "-q"],
-            vec!["config", "user.email", "t@t"],
-            vec!["config", "user.name", "t"],
-        ] {
-            Command::new("git")
-                .arg("-C")
-                .arg(&repo)
-                .args(&a)
-                .output()
-                .unwrap();
-        }
-        fs::write(repo.join(".ralph/BACKLOG.md"), "items").unwrap();
-        Command::new("git")
-            .arg("-C")
-            .arg(&repo)
-            .args(["add", ".ralph/BACKLOG.md"])
-            .output()
-            .unwrap();
-        Command::new("git")
-            .arg("-C")
-            .arg(&repo)
-            .args(["commit", "-qm", "seed"])
-            .output()
-            .unwrap();
-
-        let cfg = Config {
-            dir: repo.join(".ralph"),
-            backlog: repo.join(".ralph/BACKLOG.md"),
-            ..Config::default()
-        };
-        let state = State::open(&cfg.dir).unwrap();
-        archive_backlog(&cfg, &state, &repo);
-
-        assert!(!cfg.backlog.exists(), "backlog should be moved");
-        let archive = repo.join(".ralph/archive");
-        let moved: Vec<PathBuf> = fs::read_dir(&archive)
-            .unwrap()
-            .map(|e| e.unwrap().path())
-            .collect();
-        assert_eq!(moved.len(), 1);
-        assert!(moved[0]
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .starts_with("BACKLOG-"));
-    }
-
-    #[test]
-    fn archive_moves_untracked_backlog_by_rename() {
+    fn archive_backlog_moves_the_file() {
         use std::fs;
         use std::path::PathBuf;
         let repo =
             std::env::temp_dir().join(format!("ralph-arch-untracked-{}", std::process::id()));
         let _ = fs::remove_dir_all(&repo);
         fs::create_dir_all(repo.join(".ralph")).unwrap();
-        // Not a git repo, and backlog is untracked → archive_backlog must fall back to fs::rename.
+        // archive_backlog no longer branches on git; it always fs::renames the file.
         fs::write(repo.join(".ralph/BACKLOG.md"), "items").unwrap();
 
         let cfg = Config {
@@ -923,7 +901,7 @@ mod tests {
             ..Config::default()
         };
         let state = State::open(&cfg.dir).unwrap();
-        archive_backlog(&cfg, &state, &repo);
+        archive_backlog(&cfg, &state);
 
         assert!(
             !cfg.backlog.exists(),

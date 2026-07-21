@@ -12,12 +12,14 @@ mod classify;
 mod config;
 mod context;
 mod control;
+mod curate;
 mod git;
 mod init;
 mod notify;
 mod schema;
 mod state;
 mod stream;
+mod synth;
 mod watchdog;
 
 /// Shared fallible-result alias.

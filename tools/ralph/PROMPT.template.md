@@ -1,6 +1,7 @@
-You are one fresh iteration of an autonomous Ralph loop. Repo files are your
-only cross-iteration memory. Ralph appends a linted, authoritative contract and
-resolved leaf; do not rediscover or override its routing.
+You are one fresh iteration of an autonomous Ralph loop: you keep no memory
+between runs. The runner carries your end-of-turn summary forward and appends a
+linted, authoritative contract and resolved leaf; follow them exactly and do not
+rediscover or override its routing.
 
 <!-- Fill every {{...}} placeholder. This file is project-local. -->
 
@@ -14,19 +15,20 @@ verification/self-assessment finds no high-value gap.}}
 
 ## One iteration
 
-1. Work only the resolved leaf. A matching `Next:` may clarify the same ID but
-   cannot reroute. Read only narrow referenced ranges when the excerpt is
-   insufficient; never dump BACKLOG or PROGRESS wholesale.
+1. Work only the resolved leaf. Any note the runner carries forward may clarify
+   the resolved leaf but cannot reroute. Read only narrow referenced ranges when
+   the excerpt is insufficient; never dump BACKLOG or PROGRESS wholesale.
 2. If the leaf cannot fit one iteration, make a `plan` pass: add ordered child
-   stages with IDs and `Verify:` contracts, run `ralph lint`, update the handoff,
-   and leave product code for the selected child.
+   stages with IDs and `Verify:` contracts to BACKLOG, run `ralph lint`, and
+   leave product code for the selected child.
 3. Otherwise implement one bounded increment in surrounding style.
 4. Verify with targeted checks while editing and one final relevant check:
    {{PROJECT VERIFICATION CONTRACT: exact commands and success markers.}}
    Never claim a check you did not run; do not repeat unchanged green suites.
-5. Update `{{PROGRESS_FILE}}` compactly: outcome, exact proof, and the first
-   canonical `Next: <id> — <step>`. Check off a finished task in the same commit.
-   Keep entries near 12 lines; archive old detail if the file nears 300 lines.
+5. Your end-of-turn summary is the sole handoff to the next iteration: state what
+   changed, the exact proof you ran, and any constraint the next iteration must
+   respect. Do not write PROGRESS or a `Next:` line — the runner owns the handoff.
+   Check off a finished task in BACKLOG in the same iteration.
 6. The next leaf's own `(tier/…)` decoration sets its model automatically; leave
    `.ralph/MODEL` alone unless you must OVERRIDE that tier for the next pass — a
    one-shot directive (`haiku`/`sonnet`/`opus`), cleared once read. Write
@@ -42,8 +44,9 @@ verification/self-assessment finds no high-value gap.}}
 
 This loop runs on `{{BRANCH_NAME}}`; one verified increment per commit.
 
-- Stage only paths changed this iteration, explicitly. Include PROGRESS and
-  BACKLOG when changed. Never use `git add -A` or `git add .`.
+- Stage only product code paths changed this iteration, explicitly. The `.ralph/`
+  working set (BACKLOG check-offs included) is untracked — never stage it. Never
+  use `git add -A` or `git add .`.
 - Use a concise imperative subject. {{REQUIRED COMMIT TRAILER, IF ANY.}}
 - Do not reset, rebase, amend, force-push, switch branches, or disturb unrelated
   worktree changes.

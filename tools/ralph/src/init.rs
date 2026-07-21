@@ -10,13 +10,8 @@ const PROMPT_TEMPLATE: &str = include_str!("../PROMPT.template.md");
 const GITIGNORE_SENTINEL: &str = "# ralph loop home (managed by `ralph init`)";
 const GITIGNORE_BLOCK: &str = "\
 # ralph loop home (managed by `ralph init`)
-/.ralph/*
-!/.ralph/PROMPT.md
-!/.ralph/ralph.toml
-!/.ralph/VISION.md
-!/.ralph/BACKLOG.md
-!/.ralph/PROGRESS.md
-!/.ralph/archive/
+# The entire loop working set is runtime state, never product — commit code only.
+/.ralph/
 ";
 
 const RALPH_TOML_STUB: &str = "\
@@ -24,6 +19,7 @@ const RALPH_TOML_STUB: &str = "\
 # See `ralph --help` and tools/ralph/README.md.
 # model = \"sonnet\"
 # fallback_model = \"sonnet\"
+# synth_model = \"sonnet\" # handoff summarizer; its cost is NOT counted toward max_cost_usd
 # max_cost_usd = 25.0
 # max_duration = \"8h\"
 # iteration_timeout = \"45m\"
@@ -41,9 +37,10 @@ const BACKLOG_STUB: &str = "\
 <!-- ralph-backlog: v1 -->
 # Backlog
 
-Ordered work list — the loop takes the first pending executable leaf. `Next:`
-may refine that leaf but cannot skip it. See `ralph schema`; validate with
-`ralph lint` and inspect with `ralph brief`.
+Ordered work list — the loop takes the first pending executable leaf. The
+runner injects a carry-forward note from the previous iteration; it may
+clarify the selected leaf but cannot reorder work. See `ralph schema`;
+validate with `ralph lint` and inspect with `ralph brief`.
 
 - [ ] **1 — First item.**
   Describe the bounded outcome.
@@ -59,11 +56,8 @@ The north star for this loop — what \"done\" looks like and why. Keep it short
 const PROGRESS_STUB: &str = "\
 # Progress
 
-Goal: {{fill in the one- or two-sentence goal}}
-
-Next: 1 — {{the first concrete step within task 1}}
-
-## Log
+The runner owns this file: it writes a carry-forward note here after each
+iteration and injects it into the next prompt. No need to edit it by hand.
 ";
 
 /// Result of scaffolding: which paths were created vs already present.
@@ -130,18 +124,6 @@ fn write_if_absent(root: &Path, rel: &str, contents: &str, report: &mut Report) 
     Ok(())
 }
 
-/// Does this .gitignore line ignore the whole `.ralph` directory (which would
-/// shadow the whitelist's `!/.ralph/...` re-includes)?
-fn ignores_ralph_dir(line: &str) -> bool {
-    let l = line.trim();
-    if l.is_empty() || l.starts_with('#') || l.starts_with('!') {
-        return false;
-    }
-    let l = l.strip_prefix('/').unwrap_or(l);
-    let l = l.strip_suffix('/').unwrap_or(l);
-    l == ".ralph"
-}
-
 fn ensure_gitignore(path: &Path, report: &mut Report) -> R<()> {
     let existing = fs::read_to_string(path).unwrap_or_default();
     if existing.contains(GITIGNORE_SENTINEL) {
@@ -149,14 +131,6 @@ fn ensure_gitignore(path: &Path, report: &mut Report) -> R<()> {
             .skipped
             .push(".gitignore (ralph block present)".to_string());
         return Ok(());
-    }
-    if existing.lines().any(ignores_ralph_dir) {
-        report.warnings.push(
-            "existing .gitignore ignores the whole .ralph/ directory; remove that \
-             line so ralph's committed files (.ralph/PROMPT.md, ralph.toml, BACKLOG.md, …) \
-             are trackable"
-                .to_string(),
-        );
     }
     let mut out = existing;
     if !out.is_empty() && !out.ends_with('\n') {
@@ -202,6 +176,12 @@ mod tests {
         let prompt = fs::read_to_string(root.join(".ralph/PROMPT.md")).unwrap();
         assert!(prompt.contains("resolved leaf"));
         assert!(prompt.contains("RALPH_COMPLETE"));
+        // The agent no longer maintains PROGRESS; its summary is the handoff.
+        assert!(prompt.contains("end-of-turn summary is the sole handoff"));
+        assert!(!prompt.contains("Update `{{PROGRESS_FILE}}` compactly"));
+        // Staging bullet forbids staging the untracked .ralph/ working set.
+        assert!(prompt.contains("working set (BACKLOG check-offs included) is untracked"));
+        assert!(!prompt.contains("Include PROGRESS and BACKLOG"));
         assert!(
             prompt.len() < 4_000,
             "template grew to {} bytes",
@@ -244,18 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn warns_when_gitignore_already_ignores_ralph_dir() {
-        let root = tmp();
-        fs::write(root.join(".gitignore"), ".ralph/\n").unwrap();
-        let r = run_in(&root).unwrap();
-        assert!(r.warnings.iter().any(|w| w.contains(".ralph/")));
-        // Block is still appended, effective once the user removes the shadowing line.
-        let gi = fs::read_to_string(root.join(".gitignore")).unwrap();
-        assert!(gi.contains(GITIGNORE_SENTINEL));
-    }
-
-    #[test]
-    fn whitelist_tracks_config_ignores_runtime() {
+    fn gitignore_ignores_entire_ralph_dir() {
         use std::process::Command;
         let root = tmp();
         Command::new("git")
@@ -274,10 +243,11 @@ mod tests {
                 .unwrap()
                 .success()
         };
-        // Committed config is NOT ignored; generated runtime state IS ignored.
-        assert!(!ignored(".ralph/PROMPT.md"));
-        assert!(!ignored(".ralph/ralph.toml"));
-        assert!(!ignored(".ralph/archive/.gitkeep"));
+        // Nothing under .ralph/ is tracked — config and runtime alike are ignored.
+        assert!(ignored(".ralph/PROMPT.md"));
+        assert!(ignored(".ralph/ralph.toml"));
+        assert!(ignored(".ralph/BACKLOG.md"));
+        assert!(ignored(".ralph/archive/BACKLOG-completed.md"));
         assert!(ignored(".ralph/live"));
         assert!(ignored(".ralph/logs/x.log"));
     }

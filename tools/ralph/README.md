@@ -28,16 +28,16 @@ Everything that *drives* a run is **local to the repo you run it in**:
 | North star (optional) | `.ralph/VISION.md` | **local** |
 | Ordered backlog (optional) | `.ralph/BACKLOG.md` | **local** |
 | Durable memory / log | `.ralph/PROGRESS.md` | **local** |
-| Config (optional) | `.ralph/ralph.toml` | **local**, committed |
+| Config (optional) | `.ralph/ralph.toml` | **local** |
 | Runtime (counter, logs, MODEL/STATUS) | `.ralph/` (gitignored) | **local**, generated |
 
 Rule of thumb: **the runner is global; the prompts, config, and record-keeping
 are local.**
 
-`.ralph/` holds both kinds of file: the driving files above (PROMPT.md,
-VISION.md, BACKLOG.md, PROGRESS.md, ralph.toml) are **committed**, while the
-generated runtime state (counters, logs, MODEL/STATUS, etc.) is **gitignored**
-— see the gitignore block below, which `ralph init` writes for you.
+The **entire** `.ralph/` working set — config, backlog, progress, logs, archive
+— is gitignored runtime state, never product. Product commits carry only code.
+`ralph init` writes a single `/.ralph/` ignore for you (see the block below), so
+nothing under `.ralph/` is tracked.
 
 ## Install
 
@@ -57,8 +57,9 @@ Rebuild after source changes by re-running that script.
    VISION.md, PROGRESS.md, an `archive/` dir, and the `.gitignore` block
    below). Then fill in every `{{...}}` in `.ralph/PROMPT.md` — the GOAL, the
    verification command, the commit contract.
-2. Flesh out `.ralph/BACKLOG.md` using the v1 schema, optionally add a VISION,
-   and seed PROGRESS with the goal + `Next: <task-id> — <step>`.
+2. Flesh out `.ralph/BACKLOG.md` using the v1 schema, optionally add a VISION.
+   PROGRESS is runner-owned — no need to seed it; the orchestrator writes a
+   carry-forward note there after each iteration.
 3. `ralph init` already wrote the `.gitignore` block for you (see below) — no
    manual step needed.
 4. Check routing, then run it on a dedicated branch:
@@ -86,17 +87,12 @@ this if it's already present):
 
 ```
 # ralph loop home (managed by `ralph init`)
-/.ralph/*
-!/.ralph/PROMPT.md
-!/.ralph/ralph.toml
-!/.ralph/VISION.md
-!/.ralph/BACKLOG.md
-!/.ralph/PROGRESS.md
-!/.ralph/archive/
+# The entire loop working set is runtime state, never product — commit code only.
+/.ralph/
 ```
 
-This whitelists the committed driving files while leaving everything else
-under `.ralph/` (runtime state) gitignored.
+This ignores the entire `.ralph/` working set — config, backlog, progress,
+logs, archive alike — so product commits carry only code.
 
 ## Deterministic backlog schema and staging
 
@@ -152,12 +148,13 @@ template for the exact instructions given to the model.
 first token of the trailing tag, `haiku`/`sonnet`/`opus` only) → the run default.
 So model tier lives with the task in the backlog; the agent need not restate it.
 
-Before every process launch the runner parses the complete backlog and appends
-a bounded brief containing the selected task/stage plus the first `Next:` only
-when it names that same task. Later historical hand-offs are never searched as
-fallback routing. The base prompt remains first and stable for caching. Ralph
-also passes `--no-session-persistence` (iterations are deliberately fresh) and
-`--exclude-dynamic-system-prompt-sections` (better prompt-cache reuse).
+Before every process launch the runner parses the complete backlog, selects the
+next leaf by document order, and appends a bounded brief containing that
+leaf plus PROGRESS's carry-forward note injected verbatim — no `Next:`
+parsing, no id matching. The base prompt remains first and stable for caching.
+Ralph also passes `--no-session-persistence` (iterations are deliberately
+fresh) and `--exclude-dynamic-system-prompt-sections` (better prompt-cache
+reuse).
 
 ## No-progress detection & escalation
 A **progress streak** counts consecutive unproductive iterations. An iteration
