@@ -136,14 +136,21 @@ finished run is never turned into a failure by an archive hiccup.
 ## Per-iteration hand-offs (the agent writes these)
 Each iteration ends by writing two one-word files that steer the next step:
 
-- `.ralph/MODEL` — `haiku` / `sonnet` / `opus`, sizing the NEXT iteration
-  (mechanical → haiku, normal → sonnet, hard/repeatedly-failing → opus).
+- `.ralph/MODEL` — `haiku` / `sonnet` / `opus`, a **one-shot override** sizing
+  the NEXT iteration; cleared once read. Normally unset: a task's own `(tier/…)`
+  decoration is the baseline (see below), and `MODEL` only overrides it for a
+  single pass.
 - `.ralph/STATUS` — this iteration's type: `code` (a normal committing
   iteration), or `review`/`plan`/`blocked` for an intentional non-code pass.
   Absent is treated as `code`.
 
 Invalid `MODEL` values are ignored with a warning (never abort). See the PROMPT
 template for the exact instructions given to the model.
+
+**Model precedence** (highest first): escalation override → one-shot `.ralph/MODEL`
+→ the resolved leaf's own `(tier/…)` decoration (e.g. `(opus/pedagogy.)` → `opus`;
+first token of the trailing tag, `haiku`/`sonnet`/`opus` only) → the run default.
+So model tier lives with the task in the backlog; the agent need not restate it.
 
 Before every process launch the runner parses the complete backlog and appends
 a bounded brief containing the selected task/stage plus the first `Next:` only
@@ -155,14 +162,20 @@ also passes `--no-session-persistence` (iterations are deliberately fresh) and
 ## No-progress detection & escalation
 A **progress streak** counts consecutive unproductive iterations. An iteration
 is **no-progress** when it is a `code` iteration that made no new commit, or it
-was a transient/timeout retry. A declared non-`code` pass (`review`/`blocked`/…)
-is **excluded** and logged as such. On the streak reaching:
+was a transient/timeout retry. A declared productive non-`code` pass
+(`review`/`plan`) is **excluded** and logged as such. On the streak reaching:
 
 - `--escalate-after` (default 2): the model escalates one tier up the ladder
   `haiku → sonnet → opus` for the next attempt;
 - `--abort-after` (default 4): the loop aborts with a clear reason.
 
 A productive `code` iteration resets the streak.
+
+A `blocked` pass is different: it means the agent has declared a dead-end only a
+human can clear (a stop gate, missing authority, unresolvable ambiguity). It does
+**not** escalate — a fresh identical iteration would just re-block — and the loop
+**aborts after 2 consecutive** `blocked` passes rather than spinning. (Needing a
+bigger model is not `blocked`; that's what the tier decoration / `MODEL` are for.)
 
 ## Budgets
 Checked at iteration boundaries; each halts the loop when hit:

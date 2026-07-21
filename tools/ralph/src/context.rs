@@ -29,6 +29,8 @@ pub struct Diagnostic {
 pub struct IterationContext {
     suffix: String,
     pub target: Option<String>,
+    /// The resolved leaf's own `(tier/…)` model decoration, if any.
+    pub model_hint: Option<String>,
     pub diagnostics: Vec<Diagnostic>,
     backlog_label: String,
 }
@@ -120,6 +122,7 @@ pub fn load(backlog_path: &Path, progress_path: &Path) -> IterationContext {
             return IterationContext {
                 suffix: invalid_suffix(backlog_path),
                 target: None,
+                model_hint: None,
                 diagnostics,
                 backlog_label,
             };
@@ -201,6 +204,7 @@ pub fn load(backlog_path: &Path, progress_path: &Path) -> IterationContext {
     IterationContext {
         suffix,
         target,
+        model_hint: selected.and_then(|index| doc.model_hint(index)),
         diagnostics,
         backlog_label,
     }

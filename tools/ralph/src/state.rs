@@ -57,6 +57,15 @@ impl State {
         }
     }
 
+    /// Read `.ralph/MODEL` and clear it. The agent's directive is a one-shot
+    /// override for the *next* pass only, so a stale value never sticks and the
+    /// resolved leaf's own `(tier/…)` decoration governs by default.
+    pub fn take_model(&self, allowed: &[String]) -> Option<String> {
+        let picked = self.read_model(allowed);
+        let _ = fs::remove_file(self.path("MODEL"));
+        picked
+    }
+
     /// The agent's declared iteration type from `.ralph/STATUS` (lowercased,
     /// trimmed). `None` if absent/empty — the caller treats that as `code`.
     pub fn read_status(&self) -> Option<String> {
@@ -71,9 +80,8 @@ impl State {
 
     /// Clear the per-iteration `STATUS` descriptor after reading it, so an
     /// iteration that doesn't declare a type defaults to `code` rather than
-    /// inheriting the previous iteration's value. `MODEL` is intentionally left
-    /// in place — it is the agent's directive for the *next* iteration and must
-    /// persist until that iteration reads it.
+    /// inheriting the previous iteration's value. (`MODEL` is cleared the same
+    /// way at read time by [`Self::take_model`] — it directs only the next pass.)
     pub fn clear_status(&self) {
         let _ = fs::remove_file(self.path("STATUS"));
     }

@@ -206,10 +206,6 @@ pub fn run(cfg: &Config) -> R<i32> {
         }
 
         let next = iter + 1;
-        let model = thrash
-            .forced_model()
-            .or_else(|| state.read_model(&cfg.escalation_ladder))
-            .unwrap_or_else(|| cfg.model.clone());
         let resolved = context::load(&cfg.backlog, &cfg.progress);
         if resolved.has_errors() {
             let errors = resolved.errors().collect::<Vec<_>>().join("\n  ");
@@ -218,6 +214,18 @@ pub fn run(cfg: &Config) -> R<i32> {
             )
             .into());
         }
+        // Model precedence: escalation > a one-shot `.ralph/MODEL` override the
+        // agent wrote > the resolved leaf's own `(tier/…)` decoration > default.
+        let model = thrash
+            .forced_model()
+            .or_else(|| state.take_model(&cfg.escalation_ladder))
+            .or_else(|| {
+                resolved
+                    .model_hint
+                    .clone()
+                    .filter(|m| cfg.escalation_ladder.iter().any(|t| t == m))
+            })
+            .unwrap_or_else(|| cfg.model.clone());
         let base_prompt = std::fs::read_to_string(&cfg.prompt)?;
         let iteration_prompt = resolved.compose(&base_prompt);
         let head_before = git::head(repo);

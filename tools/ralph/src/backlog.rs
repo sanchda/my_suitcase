@@ -8,6 +8,9 @@ use std::collections::{HashMap, HashSet};
 
 pub const SCHEMA_MARKER: &str = "<!-- ralph-backlog: v1 -->";
 
+/// Model tiers recognized in a task's `(tier/…)` decoration.
+const MODEL_TIERS: [&str; 3] = ["haiku", "sonnet", "opus"];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
     Error,
@@ -309,6 +312,46 @@ impl Document {
         self.lines.len()
     }
 
+    /// The model tier declared in a task's own `(tier/…)` decoration
+    /// (e.g. `(opus/pedagogy.)` → `opus`), or `None`. Advisory routing, not a
+    /// spec field: scans only the task's own body (never a child's), takes the
+    /// first alphanumeric token of each `(...)` group, and lets the last group
+    /// whose token is a known tier win, since decorations sit at the body's end.
+    pub fn model_hint(&self, index: usize) -> Option<String> {
+        fn paren_groups(line: &str) -> Vec<&str> {
+            let mut out = Vec::new();
+            let mut rest = line;
+            while let Some(open) = rest.find('(') {
+                rest = &rest[open + 1..];
+                match rest.find(')') {
+                    Some(close) => {
+                        out.push(&rest[..close]);
+                        rest = &rest[close + 1..];
+                    }
+                    None => break,
+                }
+            }
+            out
+        }
+        let task = self.tasks.get(index)?;
+        let start = task.line.saturating_sub(1);
+        let end = task.own_end_line.min(self.lines.len());
+        let mut hint = None;
+        for line in &self.lines[start..end] {
+            for group in paren_groups(line) {
+                if let Some(word) = group
+                    .split(|c: char| !c.is_ascii_alphanumeric())
+                    .find(|token| !token.is_empty())
+                {
+                    if MODEL_TIERS.contains(&word) {
+                        hint = Some(word.to_string());
+                    }
+                }
+            }
+        }
+        hint
+    }
+
     #[cfg(test)]
     pub fn selected_path(&self, index: usize) -> Vec<&Task> {
         let mut path = vec![&self.tasks[index]];
@@ -496,6 +539,31 @@ mod tests {
         let doc = Document::parse(&text);
         assert!(!doc.has_errors(), "{:?}", doc.issues);
         assert_eq!(doc.tasks[doc.selected_index().unwrap()].id, "2");
+    }
+
+    #[test]
+    fn model_hint_reads_tier_decoration() {
+        let text = format!(
+            "{SCHEMA_MARKER}\n# H\n- [ ] **1 — A.** do a thing. (opus/pedagogy.)\n- [ ] **2 — B.** cleanup. (haiku)\n- [ ] **3 — C.** review. (code.)\n- [ ] **4 — D.** big. (opus — shared-base refactor.)\n"
+        );
+        let doc = Document::parse(&text);
+        let idx = |id: &str| doc.tasks.iter().position(|t| t.id == id).unwrap();
+        assert_eq!(doc.model_hint(idx("1")).as_deref(), Some("opus"));
+        assert_eq!(doc.model_hint(idx("2")).as_deref(), Some("haiku"));
+        assert_eq!(doc.model_hint(idx("3")), None); // (code.) is not a tier
+        assert_eq!(doc.model_hint(idx("4")).as_deref(), Some("opus"));
+    }
+
+    #[test]
+    fn model_hint_scopes_to_own_body_and_ignores_prose_parens() {
+        let text = format!(
+            "{SCHEMA_MARKER}\n- [ ] **1 — Parent.** covers (unchanged) and (new).\n  Verify: broad suite\n  - [ ] **1.1 — Child.** stuff. (opus.)\n    Verify: focused\n"
+        );
+        let doc = Document::parse(&text);
+        let idx = |id: &str| doc.tasks.iter().position(|t| t.id == id).unwrap();
+        // Parent's own body has only non-tier parens; the child's (opus.) must not leak up.
+        assert_eq!(doc.model_hint(idx("1")), None);
+        assert_eq!(doc.model_hint(idx("1.1")).as_deref(), Some("opus"));
     }
 
     #[test]

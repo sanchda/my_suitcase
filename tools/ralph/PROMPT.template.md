@@ -27,9 +27,15 @@ verification/self-assessment finds no high-value gap.}}
 5. Update `{{PROGRESS_FILE}}` compactly: outcome, exact proof, and the first
    canonical `Next: <id> — <step>`. Check off a finished task in the same commit.
    Keep entries near 12 lines; archive old detail if the file nears 300 lines.
-6. Write `.ralph/MODEL` for the next pass (`haiku` mechanical, `sonnet` normal,
-   `opus` genuinely hard/repeated failure) and `.ralph/STATUS` for this pass
-   (`code`, `plan`/`review`, or `blocked`). A `code` pass must commit.
+6. The next leaf's own `(tier/…)` decoration sets its model automatically; leave
+   `.ralph/MODEL` alone unless you must OVERRIDE that tier for the next pass — a
+   one-shot directive (`haiku`/`sonnet`/`opus`), cleared once read. Write
+   `.ralph/STATUS` for this pass: `code` (committed work), `plan`/`review`
+   (non-code progress), or `blocked`. A `code` pass must commit. Reserve
+   `blocked` for a genuine dead-end only a human can clear (a stop gate awaiting
+   approval, missing authority/credentials, or the same failure unresolved after
+   escalation) — consecutive blocked passes halt the loop. Needing a bigger model
+   is never `blocked`: the decoration (or a one-off `MODEL` override) does it.
 7. Commit only after verification succeeds.
 
 ## Commit and safety contract
@@ -41,8 +47,8 @@ This loop runs on `{{BRANCH_NAME}}`; one verified increment per commit.
 - Use a concise imperative subject. {{REQUIRED COMMIT TRAILER, IF ANY.}}
 - Do not reset, rebase, amend, force-push, switch branches, or disturb unrelated
   worktree changes.
-- On ambiguity, missing authority, or repeated failure, record `Blocked:` and
-  stop; do not thrash or commit a failing change.
+- When a genuine dead-end needs a human (see `blocked` above), record `Blocked:`
+  and stop; do not thrash or commit a failing change.
 
 Only after the entire goal is complete and verified in this iteration, end the
 final response with this token on its own line:
