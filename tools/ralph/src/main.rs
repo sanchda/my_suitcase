@@ -14,6 +14,7 @@ mod context;
 mod control;
 mod git;
 mod init;
+mod notify;
 mod schema;
 mod state;
 mod stream;

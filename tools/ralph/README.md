@@ -186,6 +186,16 @@ Checked at iteration boundaries; each halts the loop when hit:
 | Wall-clock | `--max-duration` / `RALPH_MAX_DURATION` (`8h`/`30m`/`300s`) | 0 (off) |
 | Iterations | `--max-iterations` / `RALPH_MAX_ITER` | 0 (off) |
 
+## Discord notifications
+Set `DISCORD_WEBHOOK` to a Discord **webhook URL** (from a channel's
+*Integrations → Webhooks* — it already targets that channel, so no channel id is
+needed) and the loop posts lifecycle events to it: start, model escalation,
+abort (no-progress **or** a hard `blocked` gate — the "come look" signal),
+completion, and any budget/STOP halt. Unset = disabled. Posts go out via `curl`
+with a 10s timeout and all errors swallowed, so a slow or down webhook never
+stalls or fails the loop. Per-iteration results are **not** posted (they'd be
+noisy); watch `.ralph/current.log` for that.
+
 ## Per-iteration timeout
 Off by default. With `--iteration-timeout <dur>` (or `RALPH_ITER_TIMEOUT`), an
 iteration running longer than the deadline is killed (its whole process group,

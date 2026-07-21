@@ -44,6 +44,8 @@ pub struct Config {
     pub escalation_ladder: Vec<String>,
     /// Single iteration then exit (testing); flag-only.
     pub once: bool,
+    /// Discord webhook URL for lifecycle notifications; empty = disabled.
+    pub discord_webhook: String,
 }
 
 impl Default for Config {
@@ -72,6 +74,7 @@ impl Default for Config {
             abort_after: 4,
             escalation_ladder: vec!["haiku".into(), "sonnet".into(), "opus".into()],
             once: false,
+            discord_webhook: String::new(),
         }
     }
 }
@@ -296,6 +299,8 @@ pub fn apply_env<F: Fn(&str) -> Option<String>>(cfg: &mut Config, get: F) -> Res
     }
     set_parse!("RALPH_ESCALATE_AFTER", cfg.escalate_after, u32);
     set_parse!("RALPH_ABORT_AFTER", cfg.abort_after, u32);
+    // Conventionally-named (no RALPH_ prefix) so an existing webhook var is reused.
+    set_str!("DISCORD_WEBHOOK", cfg.discord_webhook);
     Ok(())
 }
 

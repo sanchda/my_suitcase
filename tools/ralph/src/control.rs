@@ -7,6 +7,7 @@
 use crate::classify::{classify, Class};
 use crate::config::Config;
 use crate::context;
+use crate::notify;
 use crate::state::State;
 use crate::stream::{self, IterStatus, ResultEnvelope};
 use crate::{git, R};
@@ -176,10 +177,17 @@ pub fn run(cfg: &Config) -> R<i32> {
     let mut seen_context_warnings = HashSet::new();
     let start = Instant::now();
 
+    let notifier = notify::Notifier::new(&cfg.discord_webhook);
+    notify::notify(
+        &notifier,
+        &format!("🟢 **ralph started** — model `{}`, from iter {}", cfg.model, iter),
+    );
+
     loop {
         // --- boundary checks ---
         if state.stop_requested() {
             state.log("STOP file present → halting");
+            notify::notify(&notifier, "⏹️ **ralph halted** — STOP file present");
             state.clear_stop();
             break;
         }
@@ -188,6 +196,10 @@ pub fn run(cfg: &Config) -> R<i32> {
                 "max iterations ({}) reached → halting",
                 cfg.max_iterations
             ));
+            notify::notify(
+                &notifier,
+                &format!("⏹️ **ralph halted** — max iterations ({}) reached", cfg.max_iterations),
+            );
             break;
         }
         if cfg.max_cost_usd > 0.0 && cost_total >= cfg.max_cost_usd {
@@ -195,6 +207,10 @@ pub fn run(cfg: &Config) -> R<i32> {
                 "cost budget reached (${:.4} ≥ ${:.4}) → halting",
                 cost_total, cfg.max_cost_usd
             ));
+            notify::notify(
+                &notifier,
+                &format!("⏹️ **ralph halted** — cost budget ${:.2} reached", cfg.max_cost_usd),
+            );
             break;
         }
         if cfg.max_duration > 0 && start.elapsed().as_secs() >= cfg.max_duration {
@@ -202,6 +218,10 @@ pub fn run(cfg: &Config) -> R<i32> {
                 "wall-clock budget ({}s) reached → halting",
                 cfg.max_duration
             ));
+            notify::notify(
+                &notifier,
+                &format!("⏹️ **ralph halted** — wall-clock budget ({}s) reached", cfg.max_duration),
+            );
             break;
         }
 
@@ -288,6 +308,10 @@ pub fn run(cfg: &Config) -> R<i32> {
                         state.log("  marker seen and backlog has no pending task → COMPLETE");
                         archive_backlog(cfg, &state, repo);
                         state.log(&format!("=== ralph COMPLETE after {iter} iterations ==="));
+                        notify::notify(
+                            &notifier,
+                            &format!("✅ **ralph COMPLETE** — backlog done after {iter} iterations"),
+                        );
                         break;
                     }
                     let reason = if post_iteration.has_errors() {
@@ -329,7 +353,7 @@ pub fn run(cfg: &Config) -> R<i32> {
                 };
                 newly_dirty_warn(&state, repo);
                 state.clear_status();
-                if apply_verdict(&mut thrash, verdict, &model, &state) {
+                if apply_verdict(&mut thrash, verdict, &model, &state, &notifier) {
                     return Ok(1);
                 }
                 if cfg.once {
@@ -359,7 +383,7 @@ pub fn run(cfg: &Config) -> R<i32> {
                 };
                 state.log(&format!("  {reason}"));
                 // A transient (including a timeout strike) is no-progress.
-                if apply_verdict(&mut thrash, Verdict::NoProgress, &model, &state) {
+                if apply_verdict(&mut thrash, Verdict::NoProgress, &model, &state, &notifier) {
                     return Ok(1);
                 }
                 twait = next_backoff(twait, cfg.transient_wait, cfg.transient_wait_max);
@@ -423,15 +447,23 @@ fn rename_or_copy(from: &Path, to: &Path) -> bool {
 
 /// Apply a verdict to the tracker, logging escalation and returning `true` if the
 /// loop should abort.
-fn apply_verdict(thrash: &mut Thrash, v: Verdict, model: &str, state: &State) -> bool {
+fn apply_verdict(
+    thrash: &mut Thrash,
+    v: Verdict,
+    model: &str,
+    state: &State,
+    notifier: &Option<notify::Notifier>,
+) -> bool {
     match thrash.record(v, model) {
         Action::Continue => false,
         Action::Escalate(m) => {
             state.log(&format!("  ↑ no-progress streak → escalating model to {m}"));
+            notify::notify(notifier, &format!("⚠️ **ralph** — no progress, escalating model to `{m}`"));
             false
         }
         Action::Abort(reason) => {
             state.log(&format!("=== ralph ABORTED — {reason} ==="));
+            notify::notify(notifier, &format!("🔴 **ralph ABORTED** — {reason}"));
             true
         }
     }
