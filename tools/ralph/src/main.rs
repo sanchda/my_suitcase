@@ -18,6 +18,7 @@ mod notify;
 mod schema;
 mod state;
 mod stream;
+mod watchdog;
 
 /// Shared fallible-result alias.
 pub type R<T> = Result<T, Box<dyn std::error::Error>>;
@@ -106,5 +107,9 @@ fn run() -> R<i32> {
         return Ok(if resolved.has_errors() { 1 } else { 0 });
     }
 
+    // Arm the death-watchdog while still single-threaded (control::run spawns the
+    // stream-reader thread), so its double-fork is safe. Guard drops → sentinel
+    // removed → watchdog stands down on any graceful return from control::run.
+    let _watchdog = watchdog::arm(&cfg.dir, &cfg.discord_webhook);
     control::run(&cfg)
 }

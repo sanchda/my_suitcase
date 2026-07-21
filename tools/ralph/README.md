@@ -196,6 +196,14 @@ with a 10s timeout and all errors swallowed, so a slow or down webhook never
 stalls or fails the loop. Per-iteration results are **not** posted (they'd be
 noisy); watch `.ralph/current.log` for that.
 
+A `SIGKILL` (e.g. the OOM killer) gives ralph no chance to post its own outcome,
+so at startup it also double-forks a tiny detached **watchdog** (only when a
+webhook is set). The watchdog polls ralph and, if ralph vanishes without a
+graceful shutdown, posts `💀 ralph terminated …` — so an overnight OOM/crash
+reaches you instead of just leaving a dead terminal. A clean exit stands the
+watchdog down (via a sentinel file removed on ralph's normal shutdown), so it
+only ever fires for a genuine kill/crash.
+
 ## Per-iteration timeout
 Off by default. With `--iteration-timeout <dur>` (or `RALPH_ITER_TIMEOUT`), an
 iteration running longer than the deadline is killed (its whole process group,
