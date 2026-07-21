@@ -24,10 +24,14 @@ use std::time::{Duration, Instant};
 pub enum Verdict {
     /// A code iteration that advanced HEAD — real progress.
     Made,
-    /// A declared non-code pass (review/blocked/…): excluded from the streak.
+    /// A declared productive non-code pass (plan/review): excluded from the streak.
     Excluded,
     /// No progress: code iteration with no commit, or a transient/timeout retry.
     NoProgress,
+    /// The iteration declared itself hard-blocked (STATUS=blocked): it needs a
+    /// human and a fresh identical iteration will re-block, so escalating is
+    /// pointless. Halt after a couple of these instead of spinning.
+    Blocked,
 }
 
 /// What the loop should do next, after recording a verdict.
@@ -47,8 +51,14 @@ pub struct Thrash {
     abort_after: u32,
     ladder: Vec<String>,
     streak: u32,
+    blocked_streak: u32,
     escalation_idx: Option<usize>,
 }
+
+/// Consecutive self-declared `blocked` passes before the loop gives up. A hard
+/// block needs a human, so we only wait one iteration to confirm it wasn't a
+/// fluke rather than burning the full no-progress budget (and never escalate).
+const BLOCKED_ABORT_AFTER: u32 = 2;
 
 impl Thrash {
     pub fn new(cfg: &Config) -> Self {
@@ -57,6 +67,7 @@ impl Thrash {
             abort_after: cfg.abort_after,
             ladder: cfg.escalation_ladder.clone(),
             streak: 0,
+            blocked_streak: 0,
             escalation_idx: None,
         }
     }
@@ -72,11 +83,26 @@ impl Thrash {
         match v {
             Verdict::Made => {
                 self.streak = 0;
+                self.blocked_streak = 0;
                 self.escalation_idx = None;
                 Action::Continue
             }
-            Verdict::Excluded => Action::Continue,
+            Verdict::Excluded => {
+                self.blocked_streak = 0;
+                Action::Continue
+            }
+            Verdict::Blocked => {
+                self.blocked_streak += 1;
+                if self.blocked_streak >= BLOCKED_ABORT_AFTER {
+                    return Action::Abort(format!(
+                        "hard-blocked for {} consecutive iterations — needs human intervention",
+                        self.blocked_streak
+                    ));
+                }
+                Action::Continue
+            }
             Verdict::NoProgress => {
+                self.blocked_streak = 0;
                 self.streak += 1;
                 if self.streak >= self.abort_after {
                     let top = self
@@ -270,6 +296,12 @@ pub fn run(cfg: &Config) -> R<i32> {
                 // Classify the iteration for thrash tracking.
                 let status = state.read_status();
                 let verdict = match status.as_deref() {
+                    Some("blocked") => {
+                        state.log(
+                            "  ⛔ iteration declared itself blocked — needs human intervention",
+                        );
+                        Verdict::Blocked
+                    }
                     Some(s) if s != "code" => {
                         state.log(&format!(
                             "  · non-code pass ({s}) — excluded from progress streak"
@@ -689,6 +721,30 @@ mod tests {
             t.record(Verdict::NoProgress, "sonnet"),
             Action::Escalate("opus".into())
         ); // 2
+    }
+
+    #[test]
+    fn blocked_aborts_without_escalating() {
+        let mut t = Thrash::new(&cfg(2, 4));
+        // First block: wait one iteration to confirm it wasn't a fluke.
+        assert_eq!(t.record(Verdict::Blocked, "sonnet"), Action::Continue);
+        // Never escalates the model on a hard block.
+        assert_eq!(t.forced_model(), None);
+        // Second consecutive block: give up (well before the abort_after=4 budget).
+        match t.record(Verdict::Blocked, "sonnet") {
+            Action::Abort(msg) => assert!(msg.contains("hard-blocked")),
+            other => panic!("expected abort, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn progress_resets_blocked_streak() {
+        let mut t = Thrash::new(&cfg(2, 4));
+        assert_eq!(t.record(Verdict::Blocked, "sonnet"), Action::Continue);
+        // An intervening productive pass clears the block; it's not "consecutive".
+        assert_eq!(t.record(Verdict::Made, "sonnet"), Action::Continue);
+        assert_eq!(t.record(Verdict::Blocked, "sonnet"), Action::Continue);
+        assert_eq!(t.blocked_streak, 1);
     }
 
     #[test]
