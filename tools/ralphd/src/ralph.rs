@@ -125,6 +125,7 @@ mod tests {
             working_dir: PathBuf::from("/repo"),
             state_dir: PathBuf::from("/repo/.ralph"),
             ralph_args: vec!["--model".into(), "opus".into()],
+            autostart: false,
         };
         let r = Ralph::new(&cfg);
         assert_eq!(r.working_dir, PathBuf::from("/repo"));
@@ -147,6 +148,7 @@ mod tests {
             working_dir: dir.clone(),
             state_dir: dir.clone(),
             ralph_args: vec![],
+            autostart: false,
         };
         Ralph::new(&cfg).write_model("opus").unwrap();
         let written = std::fs::read_to_string(dir.join("MODEL")).unwrap();

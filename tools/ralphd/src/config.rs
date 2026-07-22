@@ -13,6 +13,9 @@ pub struct BotConfig {
     pub working_dir: PathBuf,
     pub state_dir: PathBuf,
     pub ralph_args: Vec<String>,
+    /// Start the loop automatically once connected (opt-in). Otherwise the loop
+    /// only starts on an explicit `/start`.
+    pub autostart: bool,
 }
 
 /// Parse `(argv, env)` into a `BotConfig`. `argv` excludes the program name.
@@ -31,6 +34,7 @@ pub fn parse(argv: &[String], env: impl Fn(&str) -> Option<String>) -> Result<Bo
             .and_then(|i| mine.get(i + 1))
             .cloned()
     };
+    let has_flag = |name: &str| mine.iter().any(|a| a == name);
 
     let token = env("DISCORD_BOT_TOKEN")
         .filter(|t| !t.trim().is_empty())
@@ -67,6 +71,12 @@ pub fn parse(argv: &[String], env: impl Fn(&str) -> Option<String>) -> Result<Bo
         None => working_dir.join(".ralph"),
     };
 
+    // Opt-in: a bare `--autostart` flag, or a truthy `RALPHD_AUTOSTART` env.
+    let autostart = has_flag("--autostart")
+        || env("RALPHD_AUTOSTART")
+            .map(|v| v.trim() != "0" && !v.trim().eq_ignore_ascii_case("false") && !v.trim().is_empty())
+            .unwrap_or(false);
+
     Ok(BotConfig {
         token,
         guild_id,
@@ -75,6 +85,7 @@ pub fn parse(argv: &[String], env: impl Fn(&str) -> Option<String>) -> Result<Bo
         working_dir,
         state_dir,
         ralph_args: forwarded,
+        autostart,
     })
 }
 
@@ -159,6 +170,34 @@ mod tests {
             .map(|s| s.to_string())
             .collect();
         assert!(parse(&argv, env_map(&[])).is_err());
+    }
+
+    #[test]
+    fn autostart_off_by_default_on_with_flag_or_env() {
+        let base = ["--guild", "1", "--channel", "2", "--user", "3"];
+        let argv: Vec<String> = base.iter().map(|s| s.to_string()).collect();
+        let cfg = parse(&argv, env_map(&[("DISCORD_BOT_TOKEN", "tok")])).unwrap();
+        assert!(!cfg.autostart); // default off
+
+        let mut with_flag = base.to_vec();
+        with_flag.push("--autostart");
+        let argv: Vec<String> = with_flag.iter().map(|s| s.to_string()).collect();
+        let cfg = parse(&argv, env_map(&[("DISCORD_BOT_TOKEN", "tok")])).unwrap();
+        assert!(cfg.autostart); // flag turns it on
+
+        let argv: Vec<String> = base.iter().map(|s| s.to_string()).collect();
+        let cfg = parse(
+            &argv,
+            env_map(&[("DISCORD_BOT_TOKEN", "tok"), ("RALPHD_AUTOSTART", "1")]),
+        )
+        .unwrap();
+        assert!(cfg.autostart); // env turns it on
+        let cfg = parse(
+            &argv,
+            env_map(&[("DISCORD_BOT_TOKEN", "tok"), ("RALPHD_AUTOSTART", "false")]),
+        )
+        .unwrap();
+        assert!(!cfg.autostart); // env 'false' stays off
     }
 
     #[test]

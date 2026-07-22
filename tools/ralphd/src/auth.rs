@@ -22,6 +22,7 @@ mod tests {
             working_dir: PathBuf::from("."),
             state_dir: PathBuf::from(".ralph"),
             ralph_args: vec![],
+            autostart: false,
         }
     }
 

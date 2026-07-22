@@ -8,22 +8,68 @@ use crate::ralph::Ralph;
 use crate::{auth, btw, format, loop_pid, model};
 
 use serenity::all::{
-    CommandOptionType, Context, CreateCommand, CreateCommandOption, CreateInteractionResponse,
-    CreateInteractionResponseMessage, EditInteractionResponse, EventHandler, GuildId, Interaction,
-    Ready,
+    ChannelId, CommandOptionType, Context, CreateCommand, CreateCommandOption,
+    CreateInteractionResponse, CreateInteractionResponseMessage, EditInteractionResponse,
+    EventHandler, GuildId, Interaction, Ready,
 };
 use serenity::async_trait;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub struct Handler {
     pub cfg: BotConfig,
     /// The loop process we spawned this session, kept so we can reap it when it
     /// exits (std Mutex — never held across an `.await`).
     pub loop_child: std::sync::Mutex<Option<std::process::Child>>,
+    /// Set once we've attempted the opt-in auto-start, so a gateway reconnect
+    /// (which re-fires `ready`) never launches a second loop.
+    pub autostarted: AtomicBool,
 }
 
 impl Handler {
     fn ralph(&self) -> Ralph {
         Ralph::new(&self.cfg)
+    }
+
+    /// Spawn the loop, record its pid, and adopt its child handle. The caller is
+    /// responsible for the "already running" check. Returns the new pid.
+    fn launch_loop(&self, extra: &[String]) -> Result<u32, String> {
+        match self.ralph().spawn_loop(extra) {
+            Ok(child) => {
+                let pid = child.id();
+                let _ = loop_pid::write(&self.cfg.state_dir, pid);
+                *self.loop_child.lock().unwrap() = Some(child);
+                Ok(pid)
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// Opt-in auto-start: launch the loop on connect unless one is already
+    /// running, announcing the outcome in the channel. Guarded by `autostarted`
+    /// so a reconnect can't spawn a duplicate.
+    async fn autostart(&self, ctx: &Context) {
+        if self.autostarted.swap(true, Ordering::SeqCst) {
+            return; // a prior `ready` already handled it this process
+        }
+        if let Some(pid) = loop_pid::running(&self.cfg.state_dir) {
+            eprintln!("ralphd: autostart skipped — loop already running (pid {pid})");
+            return;
+        }
+        let channel = ChannelId::new(self.cfg.channel_id);
+        match self.launch_loop(&[]) {
+            Ok(pid) => {
+                eprintln!("ralphd: auto-started ralph (pid {pid})");
+                let _ = channel
+                    .say(&ctx.http, format!("🟢 auto-started ralph (pid {pid})"))
+                    .await;
+            }
+            Err(e) => {
+                eprintln!("ralphd: auto-start failed: {e}");
+                let _ = channel
+                    .say(&ctx.http, format!("⚠️ ralph auto-start failed: {e}"))
+                    .await;
+            }
+        }
     }
 
     /// Reap the loop we spawned this session if it has exited, clearing its
@@ -56,13 +102,8 @@ impl Handler {
                     Some(m) if !m.trim().is_empty() => vec!["--model".into(), m],
                     _ => Vec::new(),
                 };
-                match r.spawn_loop(&extra) {
-                    Ok(child) => {
-                        let pid = child.id();
-                        let _ = loop_pid::write(&self.cfg.state_dir, pid);
-                        *self.loop_child.lock().unwrap() = Some(child);
-                        format!("started ralph (pid {pid})")
-                    }
+                match self.launch_loop(&extra) {
+                    Ok(pid) => format!("started ralph (pid {pid})"),
                     Err(e) => format!("failed to start: {e}"),
                 }
             }
@@ -160,6 +201,9 @@ impl EventHandler for Handler {
                 self.cfg.guild_id
             ),
             Err(e) => eprintln!("ralphd: failed to register guild commands: {e}"),
+        }
+        if self.cfg.autostart {
+            self.autostart(&ctx).await;
         }
     }
 

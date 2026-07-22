@@ -20,6 +20,7 @@ Options (each also settable via the environment):
   --channel <id>        Channel commands are accepted in    [env RALPHD_CHANNEL_ID]
   --user <id>           The one authorized user id          [env RALPHD_USER_ID]
   --working-dir <path>  Repo the loop runs in (default: .)  [env RALPHD_WORKING_DIR]
+  --autostart           Start the loop on connect            [env RALPHD_AUTOSTART]
   -h, --help            Show this help
 
 Required environment:
@@ -59,6 +60,7 @@ async fn main() {
         .event_handler(handler::Handler {
             cfg,
             loop_child: std::sync::Mutex::new(None),
+            autostarted: std::sync::atomic::AtomicBool::new(false),
         })
         .await
     {
