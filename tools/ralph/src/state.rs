@@ -106,7 +106,7 @@ impl State {
         let name = format!("logs/iter-{:04}-{}.log", n, timestamp());
         let full = self.dir.join(&name);
         fs::File::create(&full)?;
-        // Re-point current.log at the active iteration (best-effort symlink).
+        // Best-effort: ignore symlink failures.
         let link = self.path("current.log");
         let _ = fs::remove_file(&link);
         #[cfg(unix)]

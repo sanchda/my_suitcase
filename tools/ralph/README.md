@@ -117,6 +117,51 @@ Each completed result adds a `perf` line to `run.log` with total, API, and
 non-API time, turn count, and token/cache totals. This makes model time versus
 local tools/tests visible without mining raw NDJSON.
 
+## Query & edit from the CLI
+- `ralph status [--json]` — a snapshot of the backlog frontier: iteration,
+  pending-leaf count, the current selected task, and the next few upcoming
+  tasks. `--json` emits one machine-readable line.
+- `ralph backlog add --title "<t>" --verify "<cmd>"` — append a well-formed task
+  (auto-assigned top-level id). Rejected without touching the file if the result
+  would fail schema lint.
+- `ralph backlog edit --id <id> --title "<t>" --verify "<cmd>"` — replace a
+  task's title and verify in place (children preserved). Same lint-or-revert
+  safety. Both writes are atomic, so they never expose a half-written backlog to
+  a running loop.
+
+## ralphd — Discord control bridge
+`ralphd` is a separate, always-on foreground binary that lets one authorized
+Discord user drive the loop from one channel via native slash commands. It shells
+out to `ralph` and reads/writes `.ralph/`; it is single-tenant by design (one
+guild, one channel, one user id — every other channel/user is refused).
+
+```bash
+DISCORD_BOT_TOKEN=… ralphd \
+  --guild <GUILD_ID> --channel <CHANNEL_ID> --user <USER_ID> \
+  [--working-dir <repo>] -- <ralph args forwarded to /start>
+```
+
+Run `ralphd --help` (or `ralphd help`) for the full usage. Every setting below
+takes a flag **or** an environment variable (flag wins); the token is env-only.
+Everything after `--` is forwarded verbatim to `ralph` on `/start`.
+
+| Setting | Flag | Env |
+|---------|------|-----|
+| Bot token | — (env only) | `DISCORD_BOT_TOKEN` |
+| Guild (server) id | `--guild <id>` | `RALPHD_GUILD_ID` |
+| Channel id | `--channel <id>` | `RALPHD_CHANNEL_ID` |
+| Authorized user id | `--user <id>` | `RALPHD_USER_ID` |
+| Working dir (repo, default `.`) | `--working-dir <path>` | `RALPHD_WORKING_DIR` |
+
+Commands: `/start [model]`, `/stop`, `/model <tier>`, `/status`, `/next`,
+`/backlog-add`, `/backlog-edit`, `/btw <message> [model]`. `/start` takes an
+optional model to override the launch default for one run; `/btw` runs a one-off
+yolo `claude` session with your message (optionally on a given model) and posts
+its output back. Loop lifecycle/progress still posts via
+`ralph`'s existing `DISCORD_WEBHOOK` (point it at the same channel); ralphd only
+handles inbound commands and their replies. Invite the bot with the `bot` +
+`applications.commands` scopes.
+
 ## Completion
 The loop ends when the model's **final text** (from the result envelope's
 `.result`, which excludes thinking) contains the marker token on its own line,

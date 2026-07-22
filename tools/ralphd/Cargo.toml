@@ -1,0 +1,18 @@
+[package]
+name = "ralphd"
+version = "0.1.0"
+edition = "2021"
+description = "Single-tenant Discord control bridge for the ralph autonomous loop."
+
+[[bin]]
+name = "ralphd"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+libc = "0.2"
+serenity = "0.12"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process"] }
+
+[profile.release]
+opt-level = "s"

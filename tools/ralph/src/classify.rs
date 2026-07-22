@@ -2,10 +2,9 @@
 //!
 //! The CLI returns exit 0 even on API errors, so the loop never trusts exit
 //! codes — it parses the result envelope (`is_error`, `api_error_status`,
-//! `.result` text) and maps it here. Ported faithfully from the bash
-//! `classify()`: the usage/limit *text* check runs before the status-code
-//! check, the transient/fatal *text* checks run after, and anything
-//! unrecognized defaults to TRANSIENT (retry rather than die).
+//! `.result` text) and maps it here. The usage/limit *text* check runs before
+//! the status-code check, the transient/fatal *text* checks run after, and
+//! anything unrecognized defaults to TRANSIENT (retry rather than die).
 
 /// What the loop should do about an iteration's outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,8 +85,7 @@ pub fn classify(is_error: bool, status: Option<u16>, text: &str) -> Class {
 }
 
 /// Lowercase and collapse all whitespace runs to single spaces, so patterns
-/// like "usage limit" match text with newlines/tabs between the words (the
-/// bash version used `[[:space:]]+`).
+/// like "usage limit" match text with newlines/tabs between the words.
 fn normalize(s: &str) -> String {
     s.to_lowercase()
         .split_whitespace()

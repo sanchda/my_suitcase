@@ -8,6 +8,7 @@
 //! driving files (PROMPT/VISION/BACKLOG/PROGRESS) are local to the target repo.
 
 mod backlog;
+mod backlog_edit;
 mod classify;
 mod config;
 mod context;
@@ -18,6 +19,7 @@ mod init;
 mod notify;
 mod schema;
 mod state;
+mod status;
 mod stream;
 mod supervisor;
 mod synth;
@@ -34,6 +36,8 @@ Usage: ralph [options]
        ralph schema              Explain the backlog schema and lint workflow
        ralph lint [options]      Validate backlog schema and task routing
        ralph brief [options]     Print the runner-resolved iteration brief
+       ralph status [--json]     Print backlog frontier (JSON with --json)
+       ralph backlog <add|edit> ...  Add or edit a backlog task (schema-checked)
   --prompt <file>          Prompt fed each iteration (default .ralph/PROMPT.md)
   --backlog <file>         Backlog archived on completion (default .ralph/BACKLOG.md)
   --progress <file>        Current hand-off file (default .ralph/PROGRESS.md)
@@ -84,6 +88,12 @@ fn run() -> R<i32> {
     if argv.first().map(String::as_str) == Some("schema") {
         return schema::run(&argv[1..]);
     }
+    if argv.first().map(String::as_str) == Some("status") {
+        return status::run(&argv[1..]);
+    }
+    if argv.first().map(String::as_str) == Some("backlog") {
+        return backlog_edit::run(&argv[1..]);
+    }
 
     let command = argv.first().map(String::as_str);
     // `stop` and the inspect-only commands take their flags after the subcommand.
@@ -93,15 +103,7 @@ fn run() -> R<i32> {
 
     // Resolve the config path first (from flags/env), load the file, then apply
     // the full precedence chain: defaults ← file ← env ← flags.
-    let cpath = config::config_path(args, |k| std::env::var(k).ok());
-    let mut cfg = config::Config::default();
-    if cpath.exists() {
-        let text = std::fs::read_to_string(&cpath)?;
-        let file: config::FileConfig =
-            toml::from_str(&text).map_err(|e| format!("parsing {}: {e}", cpath.display()))?;
-        config::apply_file(&mut cfg, file)?;
-    }
-    config::apply_env(&mut cfg, |k| std::env::var(k).ok())?;
+    let mut cfg = config::load_base(args)?;
     if config::apply_args(&mut cfg, args)? {
         print!("{USAGE}");
         return Ok(0);
@@ -129,7 +131,7 @@ fn run() -> R<i32> {
     }
 
     // Hand off to the supervisor: it forks the loop as a child and, when
-    // configured, relaunches it after an ungraceful death (replacing the old
-    // detached watchdog). It runs the loop inline when there's nothing to watch.
+    // configured, relaunches it after an ungraceful death. It runs the loop
+    // inline when there's nothing to watch.
     supervisor::run(&cfg)
 }

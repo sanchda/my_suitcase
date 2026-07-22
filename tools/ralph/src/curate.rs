@@ -73,7 +73,7 @@ pub fn sweep(backlog_path: &Path, archive_dir: &Path) -> usize {
     if fs::write(&archive, acc).is_err() {
         return 0;
     }
-    // Note: reconstruction via `text.lines()`/`join("\n")` normalizes CRLF → LF.
+    // Reconstruction via `text.lines()`/`join("\n")` normalizes CRLF → LF.
     if fs::write(backlog_path, remaining).is_err() {
         return 0;
     }

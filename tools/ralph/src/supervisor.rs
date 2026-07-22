@@ -1,17 +1,17 @@
 //! The supervisor: a non-detached parent that owns the loop's lifecycle.
 //!
-//! Replaces the old detached death-watchdog. `main` hands control here; the
-//! supervisor forks a child that runs [`crate::control::run`] (the real loop) and
-//! `waitpid`s on it. Because all loop state lives in `.ralph/` files, a fresh
-//! child re-opens `State` and resumes at the persisted iteration — so we `fork`
-//! (cheap, inherits the parsed `Config`) rather than re-exec.
+//! `main` hands control here; the supervisor forks a child that runs
+//! [`crate::control::run`] (the real loop) and `waitpid`s on it. Because all loop
+//! state lives in `.ralph/` files, a fresh child re-opens `State` and resumes at
+//! the persisted iteration — so we `fork` (cheap, inherits the parsed `Config`)
+//! rather than re-exec.
 //!
 //! The parent only ever waits, so it stays single-threaded and every `fork`
 //! happens from a single-threaded process. On the child's *ungraceful* death
-//! (killed by a signal — SIGKILL/OOM, SIGSEGV) the parent reports it (the
-//! watchdog's old job) and, when `--restart` is set and no STOP is pending,
-//! relaunches. Graceful exits (and a Rust panic, which unwinds to exit 101) are
-//! `WIFEXITED` and terminal — their code is propagated unchanged.
+//! (killed by a signal — SIGKILL/OOM, SIGSEGV) the parent reports it and, when
+//! `--restart` is set and no STOP is pending, relaunches. Graceful exits (and a
+//! Rust panic, which unwinds to exit 101) are `WIFEXITED` and terminal — their
+//! code is propagated unchanged.
 
 use crate::config::Config;
 use crate::notify;
@@ -121,7 +121,7 @@ fn wait_for(pid: libc::pid_t) -> R<c_int> {
     }
 }
 
-/// Post the ungraceful-death notice (the detached watchdog's former job).
+/// Post the ungraceful-death notice.
 fn report_death(notifier: &Option<notify::Notifier>, pid: libc::pid_t, sig: c_int, iter: u64) {
     let tail = if iter > 0 {
         format!(", last iter {iter}")
@@ -149,8 +149,7 @@ pub fn run(cfg: &Config) -> R<i32> {
     let mut guard = RestartGuard::new();
 
     loop {
-        // Flush before forking so buffered parent output isn't duplicated by the
-        // child (State::log flushes per line, so this is belt-and-suspenders).
+        // Flush before forking so buffered parent output isn't duplicated by the child.
         let _ = io::stdout().flush();
         let start = Instant::now();
 

@@ -311,7 +311,6 @@ mod tests {
         let brief = ctx.render();
         assert!(brief.contains("Carry-forward"));
         assert!(brief.contains("watch the null-guard in foo.rs"));
-        // No handoff-format or oversize warnings exist anymore.
         assert_eq!(ctx.warnings().count(), 0);
     }
 

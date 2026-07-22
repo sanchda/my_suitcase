@@ -351,7 +351,6 @@ pub fn run(cfg: &Config) -> R<i32> {
                     state.log(&format!("  ⚠ completion marker ignored: {reason}"));
                 }
 
-                // Classify the iteration for thrash tracking.
                 let status = state.read_status();
                 let verdict = match status.as_deref() {
                     Some("blocked") => {
@@ -380,17 +379,17 @@ pub fn run(cfg: &Config) -> R<i32> {
                 newly_dirty_warn(&state, repo);
                 state.clear_status();
 
-                // Orchestrator owns the handoff: distill this turn's summary into
-                // the next carry-forward, then sweep completed backlog sections.
+                // Distill this turn's summary into the next carry-forward, then
+                // sweep completed backlog sections.
                 {
                     let doc = crate::backlog::Document::parse(
                         &std::fs::read_to_string(&cfg.backlog).unwrap_or_default(),
                     );
                     let upcoming = doc.upcoming_leaf_labels(3);
                     let prev = std::fs::read_to_string(&cfg.progress).unwrap_or_default();
-                    // Synth is a small second model call per successful turn; its cost is
-                    // deemed negligible and is not counted toward max_cost_usd, and it can
-                    // block up to SYNTH_TIMEOUT_SECS.
+                    // Synth is a small second model call per successful turn; its cost
+                    // isn't counted toward max_cost_usd, and it can block up to
+                    // SYNTH_TIMEOUT_SECS.
                     let carry = synth::synthesize_with(&text, &upcoming, &prev, |p| {
                         synth::run_claude(cfg, p)
                     });
@@ -405,7 +404,6 @@ pub fn run(cfg: &Config) -> R<i32> {
                         ));
                     }
 
-                    // Returning to the loop: post progress + the one-line summary.
                     // Webhook posts are free, so surface every successful turn.
                     let summary = snippet.replace('\n', " ");
                     notify::notify(
@@ -925,7 +923,6 @@ mod tests {
             std::env::temp_dir().join(format!("ralph-arch-untracked-{}", std::process::id()));
         let _ = fs::remove_dir_all(&repo);
         fs::create_dir_all(repo.join(".ralph")).unwrap();
-        // archive_backlog no longer branches on git; it always fs::renames the file.
         fs::write(repo.join(".ralph/BACKLOG.md"), "items").unwrap();
 
         let cfg = Config {

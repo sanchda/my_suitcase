@@ -44,4 +44,20 @@ chmod 755 "$BIN_TMP"
 mv -f "$BIN_TMP" "$BIN"
 trap - EXIT
 echo "Installed: $BIN"
+
+# --- ralphd (optional Discord control bridge) ---
+RALPHD_DIR="$SUITCASE_ROOT/tools/ralphd"
+if [ -f "$RALPHD_DIR/Cargo.toml" ]; then
+  echo "Building ralphd (release)..."
+  cargo build --release --manifest-path "$RALPHD_DIR/Cargo.toml"
+  RALPHD_BIN="$BIN_DIR/ralphd"
+  RALPHD_TMP="$(mktemp "$BIN_DIR/.ralphd.XXXXXX")"
+  trap 'rm -f "$RALPHD_TMP"' EXIT
+  cp "$RALPHD_DIR/target/release/ralphd" "$RALPHD_TMP"
+  chmod 755 "$RALPHD_TMP"
+  mv -f "$RALPHD_TMP" "$RALPHD_BIN"
+  trap - EXIT
+  echo "Installed: $RALPHD_BIN"
+fi
+
 echo "Ensure ~/.local/bin is on your PATH, then run 'ralph --help' from a target repo."

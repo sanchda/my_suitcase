@@ -368,9 +368,9 @@ impl Document {
 
     /// The model tier declared in a task's own `(tier/…)` decoration
     /// (e.g. `(opus/pedagogy.)` → `opus`), or `None`. Advisory routing, not a
-    /// spec field: scans only the task's own body (never a child's), takes the
-    /// first alphanumeric token of each `(...)` group, and lets the last group
-    /// whose token is a known tier win, since decorations sit at the body's end.
+    /// spec field: scans only the task's own body (never a child's), and lets
+    /// the last `(...)` group whose leading token is a known tier win, since
+    /// decorations sit at the body's end.
     pub fn model_hint(&self, index: usize) -> Option<String> {
         fn paren_groups(line: &str) -> Vec<&str> {
             let mut out = Vec::new();

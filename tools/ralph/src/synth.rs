@@ -77,9 +77,6 @@ pub fn synthesize_with(
 ) -> String {
     let prompt = build_synth_prompt(summary, upcoming, prev);
     match run(&prompt) {
-        // A non-empty distillation wins; an explicit NONE means "nothing to
-        // carry" and is honored (empty). Only a failed call (None) falls back
-        // to the baseline summary.
         Some(raw) => bound_output(&raw),
         None => summary.trim().to_string(),
     }

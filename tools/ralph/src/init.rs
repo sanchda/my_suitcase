@@ -67,8 +67,7 @@ pub struct Report {
     pub warnings: Vec<String>,
 }
 
-/// Entry point for the `init` subcommand: scaffold under the current dir, print
-/// a summary, and return the process exit code.
+/// Entry point for the `init` subcommand.
 pub fn run() -> R<i32> {
     let report = run_in(Path::new("."))?;
     for p in &report.created {
@@ -176,7 +175,8 @@ mod tests {
         let prompt = fs::read_to_string(root.join(".ralph/PROMPT.md")).unwrap();
         assert!(prompt.contains("resolved leaf"));
         assert!(prompt.contains("RALPH_COMPLETE"));
-        // The agent no longer maintains PROGRESS; its summary is the handoff.
+        // The end-of-turn summary is the sole handoff; the template does not tell
+        // the agent to maintain PROGRESS.
         assert!(prompt.contains("end-of-turn summary is the sole handoff"));
         assert!(!prompt.contains("Update `{{PROGRESS_FILE}}` compactly"));
         // Staging bullet forbids staging the untracked .ralph/ working set.

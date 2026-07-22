@@ -189,7 +189,6 @@ fn split_args(s: &str) -> Vec<String> {
     s.split_whitespace().map(String::from).collect()
 }
 
-/// Apply file-config Options over a Config.
 pub fn apply_file(cfg: &mut Config, f: FileConfig) -> Result<(), String> {
     if let Some(v) = f.model {
         cfg.model = v;
@@ -394,6 +393,23 @@ pub fn config_path<F: Fn(&str) -> Option<String>>(args: &[String], get: F) -> Pa
         return PathBuf::from(p);
     }
     PathBuf::from(".ralph/ralph.toml")
+}
+
+/// Resolve config with the precedence prefix **defaults ← file ← env**, WITHOUT
+/// applying CLI flags. Subcommands with their own flag grammar (`status`,
+/// `backlog`) use this to get the driving-file paths; `main` layers `apply_args`
+/// on top for the loop itself.
+pub fn load_base(args: &[String]) -> crate::R<Config> {
+    let cpath = config_path(args, |k| std::env::var(k).ok());
+    let mut cfg = Config::default();
+    if cpath.exists() {
+        let text = std::fs::read_to_string(&cpath)?;
+        let file: FileConfig =
+            toml::from_str(&text).map_err(|e| format!("parsing {}: {e}", cpath.display()))?;
+        apply_file(&mut cfg, file)?;
+    }
+    apply_env(&mut cfg, |k| std::env::var(k).ok())?;
+    Ok(cfg)
 }
 
 /// Validate cross-field invariants after the full merge.
@@ -648,5 +664,14 @@ mod tests {
             ..Config::default()
         };
         assert!(validate(&c).is_err());
+    }
+
+    #[test]
+    fn load_base_applies_defaults_without_arg_parsing() {
+        // No config file, no env: pure defaults, and unknown flags are ignored
+        // (load_base does not parse CLI flags — that's apply_args' job).
+        let cfg = load_base(&["--json".to_string()]).unwrap();
+        assert_eq!(cfg.model, "sonnet");
+        assert_eq!(cfg.dir.to_string_lossy(), ".ralph");
     }
 }
