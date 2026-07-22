@@ -82,28 +82,32 @@ impl Ralph {
             .spawn()
     }
 
-    /// Run a one-off yolo `claude` session with `message` as the prompt,
-    /// optionally pinned to `model`. This can take a while, so callers must defer
-    /// the interaction first. Returns claude's final text, or an error string.
-    pub async fn btw(&self, message: &str, model: Option<&str>) -> String {
+    /// Spawn a one-off yolo `claude` session with `message` as the prompt,
+    /// optionally pinned to `model`, emitting `stream-json` so the caller can fold
+    /// live token usage and the final cost from its event stream. stdout is piped;
+    /// stderr is discarded (diagnostics also surface in the result envelope). The
+    /// session can run for many minutes, so callers must defer the interaction and
+    /// drive the stream (see `crate::btw`).
+    pub fn spawn_btw(
+        &self,
+        message: &str,
+        model: Option<&str>,
+    ) -> std::io::Result<tokio::process::Child> {
         let mut cmd = tokio::process::Command::new("claude");
-        cmd.arg("-p").arg("--dangerously-skip-permissions");
+        cmd.arg("-p")
+            .arg("--output-format")
+            .arg("stream-json")
+            .arg("--verbose")
+            .arg("--dangerously-skip-permissions");
         if let Some(m) = model {
             cmd.arg("--model").arg(m);
         }
-        cmd.arg(message).current_dir(&self.working_dir);
-        match cmd.output().await {
-            Ok(o) if o.status.success() => {
-                let text = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                if text.is_empty() {
-                    "(claude produced no output)".to_string()
-                } else {
-                    text
-                }
-            }
-            Ok(o) => format!("claude failed: {}", String::from_utf8_lossy(&o.stderr).trim()),
-            Err(e) => format!("could not start claude: {e}"),
-        }
+        cmd.arg(message)
+            .current_dir(&self.working_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        cmd.spawn()
     }
 }
 
