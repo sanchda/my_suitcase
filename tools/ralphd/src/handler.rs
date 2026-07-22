@@ -8,11 +8,29 @@ use crate::ralph::Ralph;
 use crate::{auth, format, loop_pid, model};
 
 use serenity::all::{
-    CommandOptionType, Context, CreateCommand, CreateCommandOption, CreateInteractionResponse,
-    CreateInteractionResponseMessage, CreateMessage, EditInteractionResponse, EventHandler,
-    GuildId, Interaction, Ready,
+    CommandInteraction, CommandOptionType, Context, CreateCommand, CreateCommandOption,
+    CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage,
+    EditInteractionResponse, EventHandler, GuildId, Interaction, Ready,
 };
 use serenity::async_trait;
+use std::time::Duration;
+
+/// Edit the deferred `/btw` reply before Discord's 15-minute interaction-token
+/// expiry, leaving margin for network latency. Past this the token is dead and
+/// the "thinking…" reply can no longer be touched (it becomes "interaction
+/// failed"), so we resolve it just under the wire and deliver via a channel
+/// message instead.
+const INTERACTION_EDIT_DEADLINE: Duration = Duration::from_secs(14 * 60);
+
+/// Post `content` as a plain channel message (bot token, not the expiring
+/// interaction token), best-effort. Used to deliver a long `/btw` result the
+/// interaction can no longer carry.
+async fn post_channel_message(ctx: &Context, command: &CommandInteraction, content: String) {
+    let msg = CreateMessage::new().content(content);
+    if let Err(e) = command.channel_id.send_message(&ctx.http, msg).await {
+        eprintln!("ralphd: failed to deliver /btw result: {e}");
+    }
+}
 
 /// Discord caps message content at 2000 chars; truncate defensively.
 fn truncate_discord(text: &str) -> String {
@@ -214,19 +232,37 @@ impl EventHandler for Handler {
             if command.defer(&ctx.http).await.is_err() {
                 return;
             }
-            let output = self.ralph().btw(&message, model.as_deref()).await;
-            let content = truncate_discord(&output);
+
             // A claude session can outlive Discord's 15-minute interaction-token
-            // window, after which editing the deferred reply fails with "Invalid
-            // Webhook Token". Fall back to a plain channel message (bot token, not
-            // the expiring interaction token) so a long session's result is never
-            // lost.
-            let edit = EditInteractionResponse::new().content(content.clone());
-            if let Err(e) = command.edit_response(&ctx.http, edit).await {
-                eprintln!("ralphd: /btw edit failed ({e}); posting result as a channel message");
-                let msg = CreateMessage::new().content(content);
-                if let Err(e) = command.channel_id.send_message(&ctx.http, msg).await {
-                    eprintln!("ralphd: failed to deliver /btw result: {e}");
+            // window. Race it against a sub-window deadline: if it finishes in
+            // time, edit the deferred reply with the result (one clean message);
+            // if not, edit the reply to a holding note *while the token is still
+            // valid* (so it never dangles into "interaction failed"), then deliver
+            // the result as a plain channel message once the session completes.
+            let ralph = self.ralph();
+            let btw = ralph.btw(&message, model.as_deref());
+            tokio::pin!(btw);
+            let finished = tokio::select! {
+                out = &mut btw => Some(out),
+                _ = tokio::time::sleep(INTERACTION_EDIT_DEADLINE) => None,
+            };
+
+            match finished {
+                Some(output) => {
+                    let content = truncate_discord(&output);
+                    let edit = EditInteractionResponse::new().content(content.clone());
+                    if let Err(e) = command.edit_response(&ctx.http, edit).await {
+                        // Well inside the window, so rare; still guarantee delivery.
+                        eprintln!("ralphd: /btw edit failed ({e}); posting result as a channel message");
+                        post_channel_message(&ctx, &command, content).await;
+                    }
+                }
+                None => {
+                    let holding = EditInteractionResponse::new()
+                        .content("⏳ still running — I'll post the result here when it's done.");
+                    let _ = command.edit_response(&ctx.http, holding).await;
+                    let output = btw.await;
+                    post_channel_message(&ctx, &command, truncate_discord(&output)).await;
                 }
             }
             return;
