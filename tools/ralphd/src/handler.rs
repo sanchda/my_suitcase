@@ -9,8 +9,8 @@ use crate::{auth, format, loop_pid, model};
 
 use serenity::all::{
     CommandOptionType, Context, CreateCommand, CreateCommandOption, CreateInteractionResponse,
-    CreateInteractionResponseMessage, EditInteractionResponse, EventHandler, GuildId, Interaction,
-    Ready,
+    CreateInteractionResponseMessage, CreateMessage, EditInteractionResponse, EventHandler,
+    GuildId, Interaction, Ready,
 };
 use serenity::async_trait;
 
@@ -215,9 +215,19 @@ impl EventHandler for Handler {
                 return;
             }
             let output = self.ralph().btw(&message, model.as_deref()).await;
-            let edit = EditInteractionResponse::new().content(truncate_discord(&output));
+            let content = truncate_discord(&output);
+            // A claude session can outlive Discord's 15-minute interaction-token
+            // window, after which editing the deferred reply fails with "Invalid
+            // Webhook Token". Fall back to a plain channel message (bot token, not
+            // the expiring interaction token) so a long session's result is never
+            // lost.
+            let edit = EditInteractionResponse::new().content(content.clone());
             if let Err(e) = command.edit_response(&ctx.http, edit).await {
-                eprintln!("ralphd: failed to edit /btw response: {e}");
+                eprintln!("ralphd: /btw edit failed ({e}); posting result as a channel message");
+                let msg = CreateMessage::new().content(content);
+                if let Err(e) = command.channel_id.send_message(&ctx.http, msg).await {
+                    eprintln!("ralphd: failed to deliver /btw result: {e}");
+                }
             }
             return;
         }
