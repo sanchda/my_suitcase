@@ -19,8 +19,8 @@ mod notify;
 mod schema;
 mod state;
 mod stream;
+mod supervisor;
 mod synth;
-mod watchdog;
 
 /// Shared fallible-result alias.
 pub type R<T> = Result<T, Box<dyn std::error::Error>>;
@@ -30,6 +30,7 @@ ralph — external autonomous loop for Claude Code (run from the repo root)
 
 Usage: ralph [options]
        ralph init                Scaffold .ralph/ in the current repo
+       ralph stop [options]      Ask a running loop to halt after the current task
        ralph schema              Explain the backlog schema and lint workflow
        ralph lint [options]      Validate backlog schema and task routing
        ralph brief [options]     Print the runner-resolved iteration brief
@@ -48,14 +49,20 @@ Usage: ralph [options]
   --marker <text>          Completion token (default RALPH_COMPLETE)
   --dir <path>             Runtime/log dir (default .ralph)
   --config <file>          Config file (default .ralph/ralph.toml)
+  --restart <bool>         Relaunch the loop after an ungraceful death (default false)
   --once                   Run a single iteration then exit (testing)
   --no-yolo                Do NOT pass --dangerously-skip-permissions
   -h, --help               This help
 
 Control while running:
-  touch .ralph/STOP            Halt gracefully after the current iteration
+  ralph stop                   Halt gracefully after the current iteration
+  touch .ralph/STOP            Same, by hand (also suppresses --restart)
   cat .ralph/live              Live status of the active iteration
   tail -f .ralph/current.log   Watch the active iteration's raw stream
+
+With --restart, only an ungraceful death (killed by a signal: OOM, kill, crash)
+relaunches the loop; graceful halts, completion, and abort are terminal, and a
+pending STOP suppresses the restart.
 ";
 
 fn main() {
@@ -79,8 +86,10 @@ fn run() -> R<i32> {
     }
 
     let command = argv.first().map(String::as_str);
+    // `stop` and the inspect-only commands take their flags after the subcommand.
+    let subcommand = matches!(command, Some("brief" | "lint" | "stop"));
     let inspect_only = matches!(command, Some("brief" | "lint"));
-    let args = if inspect_only { &argv[1..] } else { &argv[..] };
+    let args = if subcommand { &argv[1..] } else { &argv[..] };
 
     // Resolve the config path first (from flags/env), load the file, then apply
     // the full precedence chain: defaults ← file ← env ← flags.
@@ -99,6 +108,16 @@ fn run() -> R<i32> {
     }
     config::validate(&cfg)?;
 
+    if command == Some("stop") {
+        let state = state::State::open(&cfg.dir)?;
+        state.request_stop()?;
+        println!(
+            "ralph: stop requested → {} (loop halts after the current task; suppresses --restart)",
+            cfg.dir.join("STOP").display()
+        );
+        return Ok(0);
+    }
+
     if inspect_only {
         let resolved = context::load(&cfg.backlog, &cfg.progress);
         if command == Some("brief") {
@@ -109,9 +128,8 @@ fn run() -> R<i32> {
         return Ok(if resolved.has_errors() { 1 } else { 0 });
     }
 
-    // Arm the death-watchdog while still single-threaded (control::run spawns the
-    // stream-reader thread), so its double-fork is safe. Guard drops → sentinel
-    // removed → watchdog stands down on any graceful return from control::run.
-    let _watchdog = watchdog::arm(&cfg.dir, &cfg.discord_webhook);
-    control::run(&cfg)
+    // Hand off to the supervisor: it forks the loop as a child and, when
+    // configured, relaunches it after an ungraceful death (replacing the old
+    // detached watchdog). It runs the loop inline when there's nothing to watch.
+    supervisor::run(&cfg)
 }

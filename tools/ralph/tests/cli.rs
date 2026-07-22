@@ -37,5 +37,25 @@ fn help_lists_schema_command() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("ralph schema"));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("ralph schema"));
+    assert!(stdout.contains("ralph stop"));
+    assert!(stdout.contains("--restart"));
+}
+
+#[test]
+fn stop_subcommand_writes_marker() {
+    let root = scratch();
+    let stop = root.join(".ralph/STOP");
+    assert!(!stop.exists());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .arg("stop")
+        .current_dir(&root)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    assert!(stop.exists(), "ralph stop should create .ralph/STOP");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("stop requested"));
 }

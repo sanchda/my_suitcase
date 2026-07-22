@@ -320,6 +320,19 @@ impl Document {
         self.lines.len()
     }
 
+    /// Count of pending executable leaves — a point-in-time proxy for remaining
+    /// work, used for the `iter N/M` progress estimate. Same predicate as
+    /// [`Self::selected_index`]: an unchecked task with no unchecked descendant.
+    pub fn pending_leaf_count(&self) -> usize {
+        self.tasks
+            .iter()
+            .enumerate()
+            .filter(|(index, task)| {
+                !task.checked && !has_unchecked_descendant(&self.tasks, *index)
+            })
+            .count()
+    }
+
     /// The maximal leading run of top-level sections that are fully complete
     /// (own box `[x]` and no unchecked descendant). `None` when the first
     /// top-level section is not fully complete, i.e. nothing safe to sweep.
@@ -841,6 +854,33 @@ mod tests {
             doc.upcoming_leaf_labels(2),
             vec!["1 — One.".to_string(), "2 — Two.".to_string()]
         );
+    }
+
+    #[test]
+    fn pending_leaf_count_counts_executable_leaves() {
+        // Three top-level pending leaves.
+        let flat = Document::parse(&format!(
+            "{SCHEMA_MARKER}\n- [ ] **1 — One.** Verify: y\n- [ ] **2 — Two.** Verify: y\n- [ ] **3 — Three.** Verify: y\n"
+        ));
+        assert_eq!(flat.pending_leaf_count(), 3);
+
+        // A parent with pending children counts its children (leaves), not itself.
+        let nested = Document::parse(&format!(
+            "{SCHEMA_MARKER}\n- [ ] **1 — Parent.** Verify: broad\n  - [ ] **1.1 — A.** Verify: y\n  - [ ] **1.2 — B.** Verify: y\n"
+        ));
+        assert_eq!(nested.pending_leaf_count(), 2);
+
+        // All children done → parent becomes its own closure leaf (count 1).
+        let closure = Document::parse(&format!(
+            "{SCHEMA_MARKER}\n- [ ] **1 — Parent.** Verify: broad\n  - [x] **1.1 — A.** Verify: y\n"
+        ));
+        assert_eq!(closure.pending_leaf_count(), 1);
+
+        // Fully complete → nothing pending.
+        let done = Document::parse(&format!(
+            "{SCHEMA_MARKER}\n- [x] **1 — Done.** Verify: y\n"
+        ));
+        assert_eq!(done.pending_leaf_count(), 0);
     }
 
     #[test]

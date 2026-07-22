@@ -124,6 +124,13 @@ impl State {
         let _ = fs::remove_file(self.path("STOP"));
     }
 
+    /// Write the STOP marker (used by `ralph stop`). The running loop halts
+    /// gracefully after the current task, and the supervisor suppresses restart.
+    pub fn request_stop(&self) -> R<()> {
+        fs::write(self.path("STOP"), "stop requested\n")?;
+        Ok(())
+    }
+
     pub fn baseline_path(&self) -> PathBuf {
         self.path("git-baseline")
     }
@@ -235,6 +242,16 @@ mod tests {
         assert_eq!(s.read_status(), Some("review".into()));
         fs::write(s.path("STATUS"), "   ").unwrap();
         assert_eq!(s.read_status(), None);
+    }
+
+    #[test]
+    fn request_stop_writes_marker() {
+        let s = State::open(&tmp()).unwrap();
+        assert!(!s.stop_requested());
+        s.request_stop().unwrap();
+        assert!(s.stop_requested());
+        s.clear_stop();
+        assert!(!s.stop_requested());
     }
 
     #[test]

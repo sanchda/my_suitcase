@@ -48,6 +48,9 @@ pub struct Config {
     pub once: bool,
     /// Discord webhook URL for lifecycle notifications; empty = disabled.
     pub discord_webhook: String,
+    /// Restart the loop after an ungraceful death (killed by a signal). The
+    /// supervisor owns this; graceful exits and STOP are always terminal.
+    pub restart: bool,
 }
 
 impl Default for Config {
@@ -78,6 +81,7 @@ impl Default for Config {
             escalation_ladder: vec!["haiku".into(), "sonnet".into(), "opus".into()],
             once: false,
             discord_webhook: String::new(),
+            restart: false,
         }
     }
 }
@@ -111,6 +115,7 @@ pub struct FileConfig {
     pub escalate_after: Option<u32>,
     pub abort_after: Option<u32>,
     pub escalation_ladder: Option<Vec<String>>,
+    pub restart: Option<bool>,
 }
 
 /// `extra_args` may be a single string ("--foo --bar") or an array of strings.
@@ -167,6 +172,15 @@ pub fn parse_duration(s: &str) -> Result<u64, String> {
         .parse()
         .map_err(|_| format!("invalid duration number in '{s}'"))?;
     Ok(n * mult)
+}
+
+/// Parse a boolean flag value. Accepts `true`/`false`/`1`/`0` case-insensitively.
+pub fn parse_bool(s: &str) -> Result<bool, String> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" => Ok(true),
+        "false" | "0" | "no" => Ok(false),
+        other => Err(format!("invalid boolean '{other}': expected true or false")),
+    }
 }
 
 /// Split a shell-ish argument line on whitespace (no quote handling — matches
@@ -246,6 +260,9 @@ pub fn apply_file(cfg: &mut Config, f: FileConfig) -> Result<(), String> {
     if let Some(v) = f.escalation_ladder {
         cfg.escalation_ladder = v;
     }
+    if let Some(v) = f.restart {
+        cfg.restart = v;
+    }
     Ok(())
 }
 
@@ -308,6 +325,9 @@ pub fn apply_env<F: Fn(&str) -> Option<String>>(cfg: &mut Config, get: F) -> Res
     set_parse!("RALPH_ABORT_AFTER", cfg.abort_after, u32);
     // Conventionally-named (no RALPH_ prefix) so an existing webhook var is reused.
     set_str!("DISCORD_WEBHOOK", cfg.discord_webhook);
+    if let Some(v) = get("RALPH_RESTART") {
+        cfg.restart = v != "0" && !v.eq_ignore_ascii_case("false");
+    }
     Ok(())
 }
 
@@ -343,6 +363,7 @@ pub fn apply_args(cfg: &mut Config, args: &[String]) -> Result<bool, String> {
                 cfg.abort_after = next()?.parse().map_err(|_| "bad --abort-after")?
             }
             "--once" => cfg.once = true,
+            "--restart" => cfg.restart = parse_bool(&next()?)?,
             "--no-yolo" => cfg.yolo = false,
             // --config is consumed earlier (see config_path); skip its value here.
             "--config" => {
@@ -587,6 +608,37 @@ mod tests {
         .unwrap();
         assert_eq!(c.progress, PathBuf::from("c/P.md"));
         assert_eq!(c.effort, "high");
+    }
+
+    #[test]
+    fn parse_bool_accepts_common_spellings() {
+        assert_eq!(parse_bool("true"), Ok(true));
+        assert_eq!(parse_bool("True"), Ok(true));
+        assert_eq!(parse_bool(" 1 "), Ok(true));
+        assert_eq!(parse_bool("false"), Ok(false));
+        assert_eq!(parse_bool("0"), Ok(false));
+        assert!(parse_bool("maybe").is_err());
+    }
+
+    #[test]
+    fn restart_precedence() {
+        let mut c = Config::default();
+        assert!(!c.restart); // default off
+        apply_file(&mut c, toml::from_str("restart = true").unwrap()).unwrap();
+        assert!(c.restart); // file sets it
+        apply_env(&mut c, |k| {
+            (k == "RALPH_RESTART").then(|| "0".to_string())
+        })
+        .unwrap();
+        assert!(!c.restart); // env beat file
+        apply_args(&mut c, &["--restart".into(), "true".into()]).unwrap();
+        assert!(c.restart); // flag beat env
+    }
+
+    #[test]
+    fn restart_flag_rejects_bad_value() {
+        let mut c = Config::default();
+        assert!(apply_args(&mut c, &["--restart".into(), "please".into()]).is_err());
     }
 
     #[test]

@@ -129,6 +129,18 @@ impl Thrash {
     }
 }
 
+/// Format the per-iteration progress webhook line. A bounded run shows a fixed
+/// denominator (`iter N/M`); an unlimited run shows a point-in-time estimate of
+/// remaining work (`iter N (~P pending)`). Both carry the one-line turn summary.
+fn progress_line(iter: u64, max_iterations: u64, pending: usize, cost: f64, summary: &str) -> String {
+    let head = if max_iterations > 0 {
+        format!("iter {iter}/{max_iterations}")
+    } else {
+        format!("iter {iter} (~{pending} pending)")
+    };
+    format!("🔄 **{head}** — ok (${cost:.4}) — {summary}")
+}
+
 /// Capped exponential backoff: 0 → base, else min(cur*2, cap).
 pub fn next_backoff(cur: u64, base: u64, cap: u64) -> u64 {
     let n = if cur == 0 {
@@ -392,6 +404,14 @@ pub fn run(cfg: &Config) -> R<i32> {
                             "  ✂ curated {swept} completed section(s) → archive"
                         ));
                     }
+
+                    // Returning to the loop: post progress + the one-line summary.
+                    // Webhook posts are free, so surface every successful turn.
+                    let summary = snippet.replace('\n', " ");
+                    notify::notify(
+                        &notifier,
+                        &progress_line(iter, cfg.max_iterations, doc.pending_leaf_count(), cost, &summary),
+                    );
                 }
 
                 if apply_verdict(&mut thrash, verdict, &model, &state, &notifier) {
@@ -740,6 +760,19 @@ mod tests {
             abort_after: abort,
             ..Config::default()
         }
+    }
+
+    #[test]
+    fn progress_line_bounded_vs_unlimited() {
+        // Bounded run: fixed denominator from max_iterations.
+        let bounded = progress_line(12, 200, 35, 0.0431, "did a thing");
+        assert!(bounded.contains("iter 12/200"), "{bounded}");
+        assert!(bounded.contains("($0.0431)"), "{bounded}");
+        assert!(bounded.contains("did a thing"), "{bounded}");
+        // Unlimited run: pending-work estimate instead of a denominator.
+        let unlimited = progress_line(12, 0, 35, 0.5, "more work");
+        assert!(unlimited.contains("iter 12 (~35 pending)"), "{unlimited}");
+        assert!(!unlimited.contains('/'), "{unlimited}");
     }
 
     #[test]
