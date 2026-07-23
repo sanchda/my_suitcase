@@ -27,6 +27,8 @@ pub struct Diagnostic {
 pub struct IterationContext {
     suffix: String,
     pub target: Option<String>,
+    /// The selected leaf's title (the bolded one-liner), for human status lines.
+    pub target_title: Option<String>,
     /// The resolved leaf's own `(tier/…)` model decoration, if any.
     pub model_hint: Option<String>,
     pub diagnostics: Vec<Diagnostic>,
@@ -120,6 +122,7 @@ pub fn load(backlog_path: &Path, progress_path: &Path) -> IterationContext {
             return IterationContext {
                 suffix: invalid_suffix(backlog_path),
                 target: None,
+                target_title: None,
                 model_hint: None,
                 diagnostics,
                 backlog_label,
@@ -171,6 +174,7 @@ pub fn load(backlog_path: &Path, progress_path: &Path) -> IterationContext {
             .collect::<Vec<_>>()
             .join(" > ")
     });
+    let target_title = selected.map(|index| doc.tasks[index].title.clone());
     let suffix = match selected {
         Some(index) => build_suffix(backlog_path, &doc, index, progress_text.as_deref()),
         None if doc.has_errors() => invalid_suffix(backlog_path),
@@ -180,6 +184,7 @@ pub fn load(backlog_path: &Path, progress_path: &Path) -> IterationContext {
     IterationContext {
         suffix,
         target,
+        target_title,
         model_hint: selected.and_then(|index| doc.model_hint(index)),
         diagnostics,
         backlog_label,
@@ -348,6 +353,23 @@ mod tests {
         assert!(
             prompt.find("ralph-runner-contract").unwrap() < prompt.find("Resolved target").unwrap()
         );
+    }
+
+    #[test]
+    fn target_title_is_the_selected_leaf_title() {
+        let backlog = format!("{SCHEMA_MARKER}\n- [ ] **37.2 — Deep Field corridor.** Verify: test\n");
+        let (backlog_path, progress_path) = tmp_files(&backlog, "");
+        let ctx = load(&backlog_path, &progress_path);
+        assert_eq!(ctx.target.as_deref(), Some("37.2"));
+        assert_eq!(ctx.target_title.as_deref(), Some("Deep Field corridor."));
+    }
+
+    #[test]
+    fn complete_backlog_has_no_target_title() {
+        let backlog = format!("{SCHEMA_MARKER}\n- [x] **1 — Done.** Verify: test\n");
+        let (backlog_path, progress_path) = tmp_files(&backlog, "");
+        let ctx = load(&backlog_path, &progress_path);
+        assert_eq!(ctx.target_title, None);
     }
 
     #[test]

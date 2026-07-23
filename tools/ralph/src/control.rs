@@ -338,9 +338,14 @@ pub fn run(cfg: &Config) -> R<i32> {
             "iter {next} → {model} (effort={}, target={target})",
             effort_for(cfg, &model).unwrap_or_else(|| "inherited".into()),
         ));
+        // Post the leaf's title too, so the channel says what it's working on.
+        let task_label = match &resolved.target_title {
+            Some(title) => format!("{target} — {title}"),
+            None => target.to_string(),
+        };
         notify::notify(
             &notifier,
-            &format!("▶️ **iter {next}** → `{model}` · {target}"),
+            &format!("▶️ **iter {next}** → `{model}` · {task_label}"),
         );
         for warning in resolved.warnings() {
             if seen_context_warnings.insert(context_warning_key(warning)) {
