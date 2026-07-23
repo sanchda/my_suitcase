@@ -618,16 +618,24 @@ fn run_one(cfg: &Config, state: &State, n: u64, model: &str, prompt: &str) -> R<
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    // Run the child in its own process group so the WHOLE tree (claude + every
-    // tool subprocess it spawns, e.g. a Godot instance) can be killed as a unit:
-    // the timeout watchdog uses it to reclaim a hung iteration, and we also sweep
-    // it at the end of *every* iteration so a process the agent left running can't
-    // leak into the next step and accumulate. Trade-off: an isolated group means
-    // a Ctrl-C to ralph no longer propagates to the child.
+    // Run claude in its OWN session (setsid): it leads a fresh process group AND
+    // session, so the WHOLE tree (claude + every tool subprocess it spawns, e.g. a
+    // Godot instance) can be killed as a unit — the timeout watchdog reclaims a
+    // hung iteration and we sweep it after every iteration — while a group-kill
+    // stays strictly inside claude's subtree and can NEVER climb back up to ralph.
+    // (A bare setpgid left ralph and claude one accidental `kill -9 -<pgid>` away
+    // from taking each other, and ralphd, down; a new session is the hard wall.)
+    // Trade-off: claude no longer shares ralph's controlling terminal, so a Ctrl-C
+    // to ralph does not propagate to it.
     #[cfg(unix)]
-    {
+    unsafe {
         use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
     }
     let mut child = cmd.spawn()?;
     let pid = child.id();
@@ -865,10 +873,20 @@ fn context_warning_key(warning: &str) -> String {
 /// its own group leader (see `run_one`), so the negative-pid target reaps
 /// `claude` and every subprocess it started — reclaiming a truly hung iteration.
 fn kill_group(pid: u32) {
-    let _ = Command::new("kill")
-        .arg("-9")
-        .arg(format!("-{pid}"))
-        .status();
+    // SIGKILL the whole process group led by `pid`, via the syscall directly.
+    //
+    // Do NOT shell out to `kill -9 -<pid>`: it's fragile (PATH may have no `kill`
+    // binary) and, worse, some `kill` implementations mis-parse the negative pgid
+    // and fall back to `kill(0, SIGKILL)` — which signals the *caller's own*
+    // process group, i.e. ralph itself (and, when it shares a group, ralphd).
+    // A pid of 0 would make the syscall do the same, so guard against it.
+    if pid == 0 {
+        return;
+    }
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGKILL);
+    }
 }
 
 /// Minimal PATH lookup for a program (avoids a `which` dependency).

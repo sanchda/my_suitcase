@@ -72,14 +72,29 @@ impl Ralph {
     /// over the launch profile. The child is detached from stdio and NOT waited
     /// on; the caller records its pid.
     pub fn spawn_loop(&self, extra_args: &[String]) -> std::io::Result<Child> {
-        Command::new("ralph")
-            .args(&self.ralph_args)
+        let mut cmd = Command::new("ralph");
+        cmd.args(&self.ralph_args)
             .args(extra_args)
             .current_dir(&self.working_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
+            .stderr(Stdio::null());
+        // Run the loop in its OWN session so ralph's process tree — and the
+        // `kill -9 -<pgid>` sweeps it fires between iterations — can never climb
+        // back up and take ralphd down with it. Without this, ralphd and ralph
+        // share one process group and a group-kill of the iteration subtree nukes
+        // ralphd too (observed: one `kill` SIGKILLing ralphd + both ralph procs).
+        #[cfg(unix)]
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        cmd.spawn()
     }
 
     /// Spawn a one-off yolo `claude` session with `message` as the prompt,
