@@ -162,6 +162,18 @@ fn iteration_report(
     s
 }
 
+/// A compact "where this run ended" suffix for terminal webhook messages, so the
+/// channel shows the full scope of the run at its stopping point.
+fn run_scope(iter: u64, cost_total: f64, elapsed: Duration) -> String {
+    let s = elapsed.as_secs();
+    let dur = if s >= 3600 {
+        format!("{}h{:02}m", s / 3600, (s % 3600) / 60)
+    } else {
+        format!("{}m{:02}s", s / 60, s % 60)
+    };
+    format!("iter {iter} · ${cost_total:.2} this run · {dur}")
+}
+
 /// Compact token count for webhook lines: `512`, `4.2k`, `1.3M`.
 fn human_tokens(n: u64) -> String {
     if n >= 1_000_000 {
@@ -243,7 +255,13 @@ pub fn run(cfg: &Config) -> R<i32> {
         // --- boundary checks ---
         if state.stop_requested() {
             state.log("STOP file present → halting");
-            notify::notify(&notifier, "⏹️ **ralph halted** — STOP file present");
+            notify::notify(
+                &notifier,
+                &format!(
+                    "⏹️ **ralph halted** — stop requested, honored after the current job · {}",
+                    run_scope(iter, cost_total, start.elapsed())
+                ),
+            );
             state.clear_stop();
             break;
         }
@@ -380,7 +398,8 @@ pub fn run(cfg: &Config) -> R<i32> {
                         notify::notify(
                             &notifier,
                             &format!(
-                                "✅ **ralph COMPLETE** — backlog done after {iter} iterations"
+                                "✅ **ralph COMPLETE** — backlog done · {}",
+                                run_scope(iter, cost_total, start.elapsed())
                             ),
                         );
                         break;
@@ -895,6 +914,16 @@ mod tests {
         assert!(rich.contains("api 269s / tools 43s"), "{rich}");
         assert!(rich.contains("20.0k out"), "{rich}");
         assert!(rich.contains("3.2M cache"), "{rich}");
+    }
+
+    #[test]
+    fn run_scope_formats_iter_cost_and_duration() {
+        assert_eq!(
+            run_scope(64, 12.3456, Duration::from_secs(25 * 60 + 7)),
+            "iter 64 · $12.35 this run · 25m07s"
+        );
+        // Past an hour, switch to h/m.
+        assert!(run_scope(3, 1.0, Duration::from_secs(3 * 3600 + 5 * 60)).contains("3h05m"));
     }
 
     #[test]
