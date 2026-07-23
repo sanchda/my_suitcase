@@ -62,6 +62,23 @@ fn hints_is_embedded_and_bypasses_project_config() {
 }
 
 #[test]
+fn start_subcommand_writes_marker() {
+    let root = scratch();
+    let start = root.join(".ralph/START");
+    assert!(!start.exists());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .arg("start")
+        .current_dir(&root)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    assert!(start.exists(), "ralph start should create .ralph/START");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("start requested"));
+}
+
+#[test]
 fn stop_subcommand_writes_marker() {
     let root = scratch();
     let stop = root.join(".ralph/STOP");

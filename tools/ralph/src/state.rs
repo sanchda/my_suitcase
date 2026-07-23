@@ -131,6 +131,15 @@ impl State {
         Ok(())
     }
 
+    /// Write the START marker (used by `ralph start`): a request for a watching
+    /// ralphd to launch the loop. Symmetric to STOP; ralphd consumes it. Lets a
+    /// separate local process (e.g. a claude session) trigger the ralphd-managed
+    /// loop without going through Discord.
+    pub fn request_start(&self) -> R<()> {
+        fs::write(self.path("START"), "start requested\n")?;
+        Ok(())
+    }
+
     pub fn baseline_path(&self) -> PathBuf {
         self.path("git-baseline")
     }
@@ -252,6 +261,15 @@ mod tests {
         assert!(s.stop_requested());
         s.clear_stop();
         assert!(!s.stop_requested());
+    }
+
+    #[test]
+    fn request_start_writes_marker() {
+        let dir = tmp();
+        let s = State::open(&dir).unwrap();
+        assert!(!dir.join("START").exists());
+        s.request_start().unwrap();
+        assert!(dir.join("START").exists());
     }
 
     #[test]

@@ -10,19 +10,114 @@ use crate::{auth, btw, format, loop_pid, model};
 use serenity::all::{
     ChannelId, CommandOptionType, Context, CreateCommand, CreateCommandOption,
     CreateInteractionResponse, CreateInteractionResponseMessage, EditInteractionResponse,
-    EventHandler, GuildId, Interaction, Ready,
+    EventHandler, GuildId, Http, Interaction, Ready,
 };
 use serenity::async_trait;
+use std::process::Child;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+/// Cadence of the `.ralph/START` trigger poll.
+const START_POLL: Duration = Duration::from_secs(3);
+
+/// Shared, thread-safe handle on the loop we spawned — shared between the command
+/// handlers and the START watcher so both track the one loop.
+pub type LoopChild = Arc<Mutex<Option<Child>>>;
 
 pub struct Handler {
     pub cfg: BotConfig,
     /// The loop process we spawned this session, kept so we can reap it when it
     /// exits (std Mutex — never held across an `.await`).
-    pub loop_child: std::sync::Mutex<Option<std::process::Child>>,
+    pub loop_child: LoopChild,
     /// Set once we've attempted the opt-in auto-start, so a gateway reconnect
     /// (which re-fires `ready`) never launches a second loop.
     pub autostarted: AtomicBool,
+}
+
+/// Spawn the loop, record its pid, and adopt its child handle (into the shared
+/// `loop_child`). The caller is responsible for the "already running" check.
+/// Returns the new pid. Used by `/start`, auto-start, and the START watcher.
+pub fn launch_and_record(cfg: &BotConfig, loop_child: &LoopChild, extra: &[String]) -> Result<u32, String> {
+    match Ralph::new(cfg).spawn_loop(extra) {
+        Ok(child) => {
+            let pid = child.id();
+            let _ = loop_pid::write(&cfg.state_dir, pid);
+            *loop_child.lock().unwrap() = Some(child);
+            Ok(pid)
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Reap the loop we spawned if it has exited, clearing its pidfile so a new start
+/// works again. A cross-session loop is reparented to init and reaped there, so
+/// only this same-session child can zombie.
+pub fn reap_and_clear(cfg: &BotConfig, loop_child: &LoopChild) {
+    let mut guard = loop_child.lock().unwrap();
+    if let Some(child) = guard.as_mut() {
+        if let Ok(Some(_status)) = child.try_wait() {
+            *guard = None;
+            loop_pid::clear(&cfg.state_dir);
+        }
+    }
+}
+
+/// Background watcher: a separate local process (e.g. a claude session running
+/// `ralph start`) drops `<state_dir>/START`; when it appears and no loop is
+/// running, launch the tracked loop and announce it — no Discord round-trip
+/// needed to start the ralphd-managed loop. Runs for the process lifetime.
+pub async fn watch_start(cfg: BotConfig, loop_child: LoopChild, http: Arc<Http>) {
+    let channel = ChannelId::new(cfg.channel_id);
+    loop {
+        tokio::time::sleep(START_POLL).await;
+        match poll_start(&cfg, &loop_child) {
+            StartDecision::NoTrigger => {}
+            StartDecision::AlreadyRunning(pid) => {
+                eprintln!("ralphd: START ignored — loop already running (pid {pid})");
+            }
+            StartDecision::Launch => match launch_and_record(&cfg, &loop_child, &[]) {
+                Ok(pid) => {
+                    eprintln!("ralphd: START trigger → launched ralph (pid {pid})");
+                    let _ = channel
+                        .say(&http, format!("🟢 started ralph (pid {pid}) — via `ralph start`"))
+                        .await;
+                }
+                Err(e) => {
+                    eprintln!("ralphd: START trigger failed: {e}");
+                    let _ = channel
+                        .say(&http, format!("⚠️ `ralph start` trigger failed: {e}"))
+                        .await;
+                }
+            },
+        }
+    }
+}
+
+/// What one START poll should do (pure decision — no launch, no Discord).
+#[derive(Debug, PartialEq, Eq)]
+enum StartDecision {
+    NoTrigger,
+    AlreadyRunning(u32),
+    Launch,
+}
+
+/// Reap a finished loop, then inspect the `START` marker: consume it if present
+/// and decide whether to launch. Factored out of [`watch_start`] so the trigger
+/// logic is testable without a gateway or a real loop.
+fn poll_start(cfg: &BotConfig, loop_child: &LoopChild) -> StartDecision {
+    // Keep the pidfile honest so a finished loop can be relaunched.
+    reap_and_clear(cfg, loop_child);
+    let marker = cfg.state_dir.join("START");
+    if !marker.exists() {
+        return StartDecision::NoTrigger;
+    }
+    // Consume the trigger regardless of outcome so it fires once.
+    let _ = std::fs::remove_file(&marker);
+    match loop_pid::running(&cfg.state_dir) {
+        Some(pid) => StartDecision::AlreadyRunning(pid),
+        None => StartDecision::Launch,
+    }
 }
 
 impl Handler {
@@ -33,15 +128,7 @@ impl Handler {
     /// Spawn the loop, record its pid, and adopt its child handle. The caller is
     /// responsible for the "already running" check. Returns the new pid.
     fn launch_loop(&self, extra: &[String]) -> Result<u32, String> {
-        match self.ralph().spawn_loop(extra) {
-            Ok(child) => {
-                let pid = child.id();
-                let _ = loop_pid::write(&self.cfg.state_dir, pid);
-                *self.loop_child.lock().unwrap() = Some(child);
-                Ok(pid)
-            }
-            Err(e) => Err(e.to_string()),
-        }
+        launch_and_record(&self.cfg, &self.loop_child, extra)
     }
 
     /// Opt-in auto-start: launch the loop on connect unless one is already
@@ -73,16 +160,9 @@ impl Handler {
     }
 
     /// Reap the loop we spawned this session if it has exited, clearing its
-    /// pidfile so /start works again. A cross-session loop is reparented to init
-    /// and reaped there, so only this same-session child can zombie.
+    /// pidfile so a new start works again.
     fn reap_finished_loop(&self) {
-        let mut guard = self.loop_child.lock().unwrap();
-        if let Some(child) = guard.as_mut() {
-            if let Ok(Some(_status)) = child.try_wait() {
-                *guard = None;
-                loop_pid::clear(&self.cfg.state_dir);
-            }
-        }
+        reap_and_clear(&self.cfg, &self.loop_child);
     }
 
     /// Turn a command name plus an option resolver into the reply string. `opt`
@@ -267,5 +347,65 @@ impl EventHandler for Handler {
         if let Err(e) = command.create_response(&ctx.http, response).await {
             eprintln!("ralphd: failed to send response: {e}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering as O};
+
+    fn tmp_cfg() -> BotConfig {
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "ralphd-start-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, O::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        BotConfig {
+            token: "t".into(),
+            guild_id: 1,
+            channel_id: 2,
+            user_id: 3,
+            working_dir: dir.clone(),
+            state_dir: dir,
+            ralph_args: vec![],
+            autostart: false,
+        }
+    }
+
+    #[test]
+    fn poll_start_no_marker_is_no_trigger() {
+        let cfg = tmp_cfg();
+        let lc: LoopChild = Arc::new(Mutex::new(None));
+        assert_eq!(poll_start(&cfg, &lc), StartDecision::NoTrigger);
+    }
+
+    #[test]
+    fn poll_start_launches_and_consumes_marker() {
+        let cfg = tmp_cfg();
+        let lc: LoopChild = Arc::new(Mutex::new(None));
+        std::fs::write(cfg.state_dir.join("START"), "go").unwrap();
+        assert_eq!(poll_start(&cfg, &lc), StartDecision::Launch);
+        assert!(!cfg.state_dir.join("START").exists(), "marker must be consumed");
+    }
+
+    #[test]
+    fn poll_start_skips_when_a_loop_is_running() {
+        let cfg = tmp_cfg();
+        let lc: LoopChild = Arc::new(Mutex::new(None));
+        std::fs::write(cfg.state_dir.join("START"), "go").unwrap();
+        // A live pid (our own) recorded in the pidfile reads as "running".
+        loop_pid::write(&cfg.state_dir, std::process::id()).unwrap();
+        assert_eq!(
+            poll_start(&cfg, &lc),
+            StartDecision::AlreadyRunning(std::process::id())
+        );
+        assert!(
+            !cfg.state_dir.join("START").exists(),
+            "marker consumed even when skipped"
+        );
     }
 }

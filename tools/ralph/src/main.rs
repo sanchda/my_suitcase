@@ -33,6 +33,7 @@ ralph — external autonomous loop for Claude Code (run from the repo root)
 
 Usage: ralph [options]
        ralph init                Scaffold .ralph/ in the current repo
+       ralph start [options]     Ask a running ralphd to launch the loop (writes START)
        ralph stop [options]      Ask a running loop to halt after the current task
        ralph hints               Lessons for writing a per-project PROMPT.md
        ralph schema              Explain the backlog schema and lint workflow
@@ -102,8 +103,8 @@ fn run() -> R<i32> {
     }
 
     let command = argv.first().map(String::as_str);
-    // `stop` and the inspect-only commands take their flags after the subcommand.
-    let subcommand = matches!(command, Some("brief" | "lint" | "stop"));
+    // `stop`/`start` and the inspect-only commands take flags after the subcommand.
+    let subcommand = matches!(command, Some("brief" | "lint" | "stop" | "start"));
     let inspect_only = matches!(command, Some("brief" | "lint"));
     let args = if subcommand { &argv[1..] } else { &argv[..] };
 
@@ -122,6 +123,16 @@ fn run() -> R<i32> {
         println!(
             "ralph: stop requested → {} (loop halts after the current task; suppresses --restart)",
             cfg.dir.join("STOP").display()
+        );
+        return Ok(0);
+    }
+
+    if command == Some("start") {
+        let state = state::State::open(&cfg.dir)?;
+        state.request_start()?;
+        println!(
+            "ralph: start requested → {} (a running ralphd will launch the loop)",
+            cfg.dir.join("START").display()
         );
         return Ok(0);
     }
