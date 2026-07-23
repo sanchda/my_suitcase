@@ -542,13 +542,14 @@ fn run_one(cfg: &Config, state: &State, n: u64, model: &str, prompt: &str) -> R<
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    // With a per-iteration timeout, run the child in its own process group so
-    // the watchdog can kill the WHOLE tree (claude + its tool subprocesses) —
-    // otherwise a killed leader's children keep the stdout pipe open and the
-    // hung iteration isn't reclaimed. Only when a timeout is set: an isolated
-    // group would otherwise stop Ctrl-C from propagating to the child.
+    // Run the child in its own process group so the WHOLE tree (claude + every
+    // tool subprocess it spawns, e.g. a Godot instance) can be killed as a unit:
+    // the timeout watchdog uses it to reclaim a hung iteration, and we also sweep
+    // it at the end of *every* iteration so a process the agent left running can't
+    // leak into the next step and accumulate. Trade-off: an isolated group means
+    // a Ctrl-C to ralph no longer propagates to the child.
     #[cfg(unix)]
-    if cfg.iteration_timeout > 0 {
+    {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
@@ -610,8 +611,14 @@ fn run_one(cfg: &Config, state: &State, n: u64, model: &str, prompt: &str) -> R<
         state.write_live_status(&s.render());
     })?;
 
-    // Signal watchdog to stop, reap the child and the stderr drainer.
+    // Signal the watchdog to stop, then sweep the child's whole process group
+    // before reaping: SIGKILL anything the agent left alive (a lingering headed
+    // Godot, an X server, a stray python) so nothing survives into the next
+    // iteration. claude is a zombie holding its pid until we wait(), so the pgid
+    // is still unambiguously ours here. No-op (ESRCH) when the group is empty.
     done.store(true, Ordering::SeqCst);
+    #[cfg(unix)]
+    kill_group(pid);
     let _ = child.wait();
     let prompt_result = prompt_thread.join();
     let _ = stderr_thread.join();
