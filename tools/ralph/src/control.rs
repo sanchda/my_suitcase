@@ -16,7 +16,7 @@ use std::io::{BufReader, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -129,16 +129,48 @@ impl Thrash {
     }
 }
 
-/// Format the per-iteration progress webhook line. A bounded run shows a fixed
-/// denominator (`iter N/M`); an unlimited run shows a point-in-time estimate of
-/// remaining work (`iter N (~P pending)`). Both carry the one-line turn summary.
-fn progress_line(iter: u64, max_iterations: u64, pending: usize, cost: f64, summary: &str) -> String {
+/// Format the end-of-iteration webhook report: the progress head (`iter N/M`, or
+/// `iter N (~P pending)` when unbounded), cost, tokens, turn count, and the
+/// api-vs-tools wall-clock split, plus the one-line turn summary. Perf fields come
+/// from the result envelope and are omitted when it's absent.
+fn iteration_report(
+    iter: u64,
+    max_iterations: u64,
+    pending: usize,
+    env: Option<&ResultEnvelope>,
+    cost: f64,
+    summary: &str,
+) -> String {
     let head = if max_iterations > 0 {
         format!("iter {iter}/{max_iterations}")
     } else {
         format!("iter {iter} (~{pending} pending)")
     };
-    format!("🔄 **{head}** — ok (${cost:.4}) — {summary}")
+    let mut s = format!("✅ **{head}** — ${cost:.4}");
+    if let Some(e) = env.filter(|e| e.duration_ms > 0) {
+        let total = e.duration_ms as f64 / 1000.0;
+        let api = e.duration_api_ms as f64 / 1000.0;
+        let tools = e.duration_ms.saturating_sub(e.duration_api_ms) as f64 / 1000.0;
+        s.push_str(&format!(
+            " · {} out / {} cache tok · {} turns · ⏱ {total:.0}s (api {api:.0}s / tools {tools:.0}s)",
+            human_tokens(e.output_tokens),
+            human_tokens(e.cache_read_input_tokens),
+            e.num_turns,
+        ));
+    }
+    s.push_str(&format!(" — {summary}"));
+    s
+}
+
+/// Compact token count for webhook lines: `512`, `4.2k`, `1.3M`.
+fn human_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
 }
 
 /// Capped exponential backoff: 0 → base, else min(cur*2, cap).
@@ -155,6 +187,15 @@ pub fn next_backoff(cur: u64, base: u64, cap: u64) -> u64 {
 struct Ran {
     envelope: Option<ResultEnvelope>,
     killed: bool,
+}
+
+/// Live iteration progress the heartbeat thread reads; the stream reader keeps it
+/// fresh so a slow webhook POST off-thread never stalls stream consumption.
+#[derive(Default, Clone)]
+struct HbSnapshot {
+    out_tokens: u64,
+    events: u64,
+    tool: Option<String>,
 }
 
 /// Run the whole loop. Returns the process exit code.
@@ -274,11 +315,15 @@ pub fn run(cfg: &Config) -> R<i32> {
         let iteration_prompt = resolved.compose(&base_prompt);
         let head_before = git::head(repo);
 
+        let target = resolved.target.as_deref().unwrap_or("completion audit");
         state.log(&format!(
-            "iter {next} → {model} (effort={}, target={})",
+            "iter {next} → {model} (effort={}, target={target})",
             effort_for(cfg, &model).unwrap_or_else(|| "inherited".into()),
-            resolved.target.as_deref().unwrap_or("completion audit")
         ));
+        notify::notify(
+            &notifier,
+            &format!("▶️ **iter {next}** → `{model}` · {target}"),
+        );
         for warning in resolved.warnings() {
             if seen_context_warnings.insert(context_warning_key(warning)) {
                 state.log(&format!("  ⚠ {warning}"));
@@ -408,7 +453,14 @@ pub fn run(cfg: &Config) -> R<i32> {
                     let summary = snippet.replace('\n', " ");
                     notify::notify(
                         &notifier,
-                        &progress_line(iter, cfg.max_iterations, doc.pending_leaf_count(), cost, &summary),
+                        &iteration_report(
+                            iter,
+                            cfg.max_iterations,
+                            doc.pending_leaf_count(),
+                            ran.envelope.as_ref(),
+                            cost,
+                            &summary,
+                        ),
                     );
                 }
 
@@ -602,13 +654,62 @@ fn run_one(cfg: &Config, state: &State, n: u64, model: &str, prompt: &str) -> R<
         stdin.write_all(&prompt_bytes)
     });
 
+    // Optional heartbeat: while the turn runs, post live progress (elapsed,
+    // output tokens, current tool) to the webhook every heartbeat_interval. Its
+    // own thread means a slow POST never stalls stream consumption; it reads a
+    // snapshot the stream reader keeps fresh, and stops via `done`.
+    let hb_shared = Arc::new(Mutex::new(HbSnapshot::default()));
+    let heartbeat = if cfg.heartbeat_interval > 0 && !cfg.discord_webhook.trim().is_empty() {
+        let (done_h, shared_h) = (done.clone(), hb_shared.clone());
+        let webhook = cfg.discord_webhook.clone();
+        let interval = cfg.heartbeat_interval;
+        Some(thread::spawn(move || {
+            let notifier = notify::Notifier::new(&webhook);
+            let start = Instant::now();
+            loop {
+                // Wait `interval` seconds in 1s ticks so the turn ending stops us
+                // promptly rather than after a full interval.
+                for _ in 0..interval {
+                    if done_h.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    thread::sleep(Duration::from_secs(1));
+                }
+                if done_h.load(Ordering::SeqCst) {
+                    return;
+                }
+                let snap = shared_h.lock().map(|g| g.clone()).unwrap_or_default();
+                let elapsed = start.elapsed().as_secs();
+                let tool = snap.tool.map(|t| format!(" · {t}")).unwrap_or_default();
+                notify::notify(
+                    &notifier,
+                    &format!(
+                        "⏳ **iter {n}** · {}m{:02}s · ~{} out tok · {} events{tool}",
+                        elapsed / 60,
+                        elapsed % 60,
+                        snap.out_tokens,
+                        snap.events,
+                    ),
+                );
+            }
+        }))
+    } else {
+        None
+    };
+
     // Consume the stream on this thread (blocks until EOF / child exit / kill).
     let mut raw = std::fs::OpenOptions::new().append(true).open(&log_path)?;
     let mut status = IterStatus::new(n, model);
     state.write_live_status(&status.render());
     let reader = BufReader::new(stdout);
+    let hb_emit = hb_shared.clone();
     let envelope = stream::consume(reader, &mut raw, &mut status, |s| {
         state.write_live_status(&s.render());
+        if let Ok(mut g) = hb_emit.lock() {
+            g.out_tokens = s.out_tokens;
+            g.events = s.events;
+            g.tool = s.current_tool.clone();
+        }
     })?;
 
     // Signal the watchdog to stop, then sweep the child's whole process group
@@ -624,6 +725,9 @@ fn run_one(cfg: &Config, state: &State, n: u64, model: &str, prompt: &str) -> R<
     let _ = stderr_thread.join();
     if let Some(w) = watchdog {
         let _ = w.join();
+    }
+    if let Some(h) = heartbeat {
+        let _ = h.join();
     }
 
     let killed = killed.load(Ordering::SeqCst);
@@ -768,16 +872,36 @@ mod tests {
     }
 
     #[test]
-    fn progress_line_bounded_vs_unlimited() {
-        // Bounded run: fixed denominator from max_iterations.
-        let bounded = progress_line(12, 200, 35, 0.0431, "did a thing");
-        assert!(bounded.contains("iter 12/200"), "{bounded}");
-        assert!(bounded.contains("($0.0431)"), "{bounded}");
-        assert!(bounded.contains("did a thing"), "{bounded}");
+    fn iteration_report_head_cost_and_perf() {
+        // No envelope → head + cost + summary only.
+        let basic = iteration_report(12, 200, 35, None, 0.0431, "did a thing");
+        assert!(basic.contains("iter 12/200"), "{basic}");
+        assert!(basic.contains("$0.0431"), "{basic}");
+        assert!(basic.contains("did a thing"), "{basic}");
         // Unlimited run: pending-work estimate instead of a denominator.
-        let unlimited = progress_line(12, 0, 35, 0.5, "more work");
+        let unlimited = iteration_report(12, 0, 35, None, 0.5, "more work");
         assert!(unlimited.contains("iter 12 (~35 pending)"), "{unlimited}");
-        assert!(!unlimited.contains('/'), "{unlimited}");
+        // With an envelope → tokens, turns, and the api/tools wall-clock split.
+        let env = ResultEnvelope {
+            duration_ms: 312_000,
+            duration_api_ms: 269_000,
+            num_turns: 67,
+            output_tokens: 20_000,
+            cache_read_input_tokens: 3_200_000,
+            ..Default::default()
+        };
+        let rich = iteration_report(64, 0, 5, Some(&env), 1.60, "leaf done");
+        assert!(rich.contains("67 turns"), "{rich}");
+        assert!(rich.contains("api 269s / tools 43s"), "{rich}");
+        assert!(rich.contains("20.0k out"), "{rich}");
+        assert!(rich.contains("3.2M cache"), "{rich}");
+    }
+
+    #[test]
+    fn human_tokens_is_compact() {
+        assert_eq!(human_tokens(512), "512");
+        assert_eq!(human_tokens(20_000), "20.0k");
+        assert_eq!(human_tokens(3_200_000), "3.2M");
     }
 
     #[test]

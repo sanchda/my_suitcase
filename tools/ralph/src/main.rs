@@ -56,6 +56,7 @@ Usage: ralph [options]
   --dir <path>             Runtime/log dir (default .ralph)
   --config <file>          Config file (default .ralph/ralph.toml)
   --restart <bool>         Relaunch the loop after an ungraceful death (default false)
+  --heartbeat <dur>        Post live per-iteration status this often (0 = off)
   --once                   Run a single iteration then exit (testing)
   --no-yolo                Do NOT pass --dangerously-skip-permissions
   -h, --help               This help

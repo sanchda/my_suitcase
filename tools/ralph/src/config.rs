@@ -51,6 +51,9 @@ pub struct Config {
     /// Restart the loop after an ungraceful death (killed by a signal). The
     /// supervisor owns this; graceful exits and STOP are always terminal.
     pub restart: bool,
+    /// Seconds between in-iteration heartbeat webhook posts (0 = off). Reports
+    /// live elapsed, output tokens, and the current tool while a turn runs.
+    pub heartbeat_interval: u64,
 }
 
 impl Default for Config {
@@ -82,6 +85,7 @@ impl Default for Config {
             once: false,
             discord_webhook: String::new(),
             restart: false,
+            heartbeat_interval: 0,
         }
     }
 }
@@ -116,6 +120,7 @@ pub struct FileConfig {
     pub abort_after: Option<u32>,
     pub escalation_ladder: Option<Vec<String>>,
     pub restart: Option<bool>,
+    pub heartbeat_interval: Option<DurationSpec>,
 }
 
 /// `extra_args` may be a single string ("--foo --bar") or an array of strings.
@@ -262,6 +267,9 @@ pub fn apply_file(cfg: &mut Config, f: FileConfig) -> Result<(), String> {
     if let Some(v) = f.restart {
         cfg.restart = v;
     }
+    if let Some(v) = f.heartbeat_interval {
+        cfg.heartbeat_interval = v.resolve()?;
+    }
     Ok(())
 }
 
@@ -327,6 +335,9 @@ pub fn apply_env<F: Fn(&str) -> Option<String>>(cfg: &mut Config, get: F) -> Res
     if let Some(v) = get("RALPH_RESTART") {
         cfg.restart = v != "0" && !v.eq_ignore_ascii_case("false");
     }
+    if let Some(v) = get("RALPH_HEARTBEAT") {
+        cfg.heartbeat_interval = parse_duration(&v)?;
+    }
     Ok(())
 }
 
@@ -363,6 +374,7 @@ pub fn apply_args(cfg: &mut Config, args: &[String]) -> Result<bool, String> {
             }
             "--once" => cfg.once = true,
             "--restart" => cfg.restart = parse_bool(&next()?)?,
+            "--heartbeat" => cfg.heartbeat_interval = parse_duration(&next()?)?,
             "--no-yolo" => cfg.yolo = false,
             // --config is consumed earlier (see config_path); skip its value here.
             "--config" => {
@@ -649,6 +661,18 @@ mod tests {
         assert!(!c.restart); // env beat file
         apply_args(&mut c, &["--restart".into(), "true".into()]).unwrap();
         assert!(c.restart); // flag beat env
+    }
+
+    #[test]
+    fn heartbeat_precedence_and_duration_parsing() {
+        let mut c = Config::default();
+        assert_eq!(c.heartbeat_interval, 0); // off by default
+        apply_file(&mut c, toml::from_str(r#"heartbeat_interval = "5m""#).unwrap()).unwrap();
+        assert_eq!(c.heartbeat_interval, 300); // file, suffixed duration
+        apply_env(&mut c, |k| (k == "RALPH_HEARTBEAT").then(|| "120".to_string())).unwrap();
+        assert_eq!(c.heartbeat_interval, 120); // env beat file, bare seconds
+        apply_args(&mut c, &["--heartbeat".into(), "10m".into()]).unwrap();
+        assert_eq!(c.heartbeat_interval, 600); // flag beat env
     }
 
     #[test]
