@@ -40,7 +40,25 @@ fn help_lists_schema_command() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("ralph schema"));
     assert!(stdout.contains("ralph stop"));
+    assert!(stdout.contains("ralph hints"));
     assert!(stdout.contains("--restart"));
+}
+
+#[test]
+fn hints_is_embedded_and_bypasses_project_config() {
+    let root = scratch();
+    // A broken project config must not affect an embedded, config-free command.
+    fs::write(root.join(".ralph/ralph.toml"), "this is invalid toml = [").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ralph"))
+        .arg("hints")
+        .current_dir(&root)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(output.stdout, include_bytes!("../HINTS.md"));
+    assert!(output.stderr.is_empty());
 }
 
 #[test]

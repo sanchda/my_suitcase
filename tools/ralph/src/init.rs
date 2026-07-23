@@ -80,7 +80,7 @@ pub fn run() -> R<i32> {
         eprintln!("  ⚠ {w}");
     }
     println!(
-        "\n.ralph/ ready. Run `ralph schema`, fill in PROMPT.md and BACKLOG.md, then run `ralph lint`."
+        "\n.ralph/ ready. See `ralph hints` and `ralph schema`, fill in PROMPT.md and BACKLOG.md, then run `ralph lint`."
     );
     Ok(0)
 }
