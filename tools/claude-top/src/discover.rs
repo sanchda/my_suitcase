@@ -38,12 +38,45 @@ pub fn is_claude(command: &str) -> bool {
 }
 
 /// Extract KEY=value from a `ps -Eww` command string (env appended after argv).
+///
+/// This is the BSD/macOS route; Linux reads `/proc/<pid>/environ` via
+/// `parse_env_nul` instead, so on Linux nothing but the test calls this. Kept
+/// compiled and tested on every platform since it's a pure parser.
+#[allow(dead_code)]
 pub fn parse_env_var(command: &str, key: &str) -> Option<String> {
     let needle = format!("{key}=");
     command
         .split_whitespace()
         .find_map(|tok| tok.strip_prefix(&needle))
         .map(|s| s.to_string())
+}
+
+/// Extract KEY=value from NUL-separated environment data, i.e. the contents of
+/// Linux `/proc/<pid>/environ`. Preferred over `parse_env_var` where available:
+/// entries are delimited exactly, so values containing spaces survive intact.
+pub fn parse_env_nul(raw: &str, key: &str) -> Option<String> {
+    let needle = format!("{key}=");
+    raw.split('\0')
+        .find_map(|entry| entry.strip_prefix(&needle))
+        .map(|s| s.to_string())
+}
+
+/// Parse `ps -o etime=` output (elapsed time since process start) into seconds.
+/// POSIX renders it as `[[dd-]hh:]mm:ss`, right-aligned in a padded field.
+pub fn parse_etime(s: &str) -> Option<u64> {
+    let s = s.trim();
+    let (days, hms) = match s.split_once('-') {
+        Some((d, rest)) => (d.parse::<u64>().ok()?, rest),
+        None => (0, s),
+    };
+    let mut parts = hms.split(':').map(|p| p.parse::<u64>().ok());
+    let (a, b, c) = (parts.next()?, parts.next()?, parts.next());
+    if parts.next().is_some() { return None; } // more than hh:mm:ss
+    let (h, m, sec) = match c {
+        Some(c) => (a?, b?, c?),      // hh:mm:ss
+        None => (0, a?, b?),          // mm:ss
+    };
+    Some(days * 86400 + h * 3600 + m * 60 + sec)
 }
 
 /// Read `oauthAccount.emailAddress` from a `.claude.json` string.
@@ -121,6 +154,46 @@ mod tests {
         assert_eq!(claude.len(), 1);
         assert_eq!(claude[0].pid, 1634);
         assert_eq!(claude[0].ppid, 197);
+    }
+
+    #[test]
+    fn parses_ps_etime_in_all_documented_widths() {
+        // POSIX `ps -o etime=` renders [[dd-]hh:]mm:ss, space-padded.
+        assert_eq!(parse_etime("      03:35"), Some(3 * 60 + 35));
+        assert_eq!(parse_etime("   04:36:02"), Some(4 * 3600 + 36 * 60 + 2));
+        assert_eq!(parse_etime(" 3-04:36:02"), Some(3 * 86400 + 4 * 3600 + 36 * 60 + 2));
+        assert_eq!(parse_etime("00:00\n"), Some(0));
+    }
+
+    #[test]
+    fn rejects_unparseable_etime() {
+        assert_eq!(parse_etime(""), None);
+        assert_eq!(parse_etime("-"), None);
+        assert_eq!(parse_etime("garbage"), None);
+        assert_eq!(parse_etime("1:2:3:4"), None);
+    }
+
+    #[test]
+    fn parses_nul_separated_environ() {
+        // Shape of Linux `/proc/<pid>/environ`: NUL-separated, no trailing key.
+        let raw = "PATH=/usr/bin\0CLAUDE_CODE_SESSION_ID=abc-123\0HOME=/home/u\0";
+        assert_eq!(parse_env_nul(raw, "CLAUDE_CODE_SESSION_ID"), Some("abc-123".into()));
+        assert_eq!(parse_env_nul(raw, "HOME"), Some("/home/u".into()));
+        assert_eq!(parse_env_nul(raw, "CLAUDE_CONFIG_DIR"), None);
+    }
+
+    #[test]
+    fn nul_environ_keeps_values_containing_spaces() {
+        // The whitespace-splitting `ps` parser can't do this; /proc data can.
+        let raw = "SSH_CLIENT=10.0.0.1 55912 22\0CLAUDE_CONFIG_DIR=/opt/my claude\0";
+        assert_eq!(parse_env_nul(raw, "SSH_CLIENT"), Some("10.0.0.1 55912 22".into()));
+        assert_eq!(parse_env_nul(raw, "CLAUDE_CONFIG_DIR"), Some("/opt/my claude".into()));
+    }
+
+    #[test]
+    fn nul_environ_does_not_match_key_as_substring() {
+        let raw = "XCLAUDE_CONFIG_DIR=/wrong\0CLAUDE_CONFIG_DIRX=/wrong\0";
+        assert_eq!(parse_env_nul(raw, "CLAUDE_CONFIG_DIR"), None);
     }
 
     #[test]

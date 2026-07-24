@@ -2,7 +2,7 @@
 //! format is internal and may shift, so we read tolerantly via serde_json::Value
 //! and skip anything that doesn't look like an assistant usage record.
 
-use chrono::{DateTime, NaiveDate};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::Value;
 
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,6 +30,13 @@ pub struct Record {
     pub model: String,
     pub date: NaiveDate,
     pub toks: Toks,
+    /// Working directory Claude Code stamped on the entry. Used to attribute a
+    /// transcript to a running instance when its session id isn't readable from
+    /// the process tree.
+    pub cwd: Option<String>,
+    /// Entry time, kept alongside `date` so recency comparisons don't have to
+    /// round to a whole day.
+    pub at: DateTime<Utc>,
 }
 
 /// Parse a single JSONL line into a usage Record, or None if it isn't one.
@@ -46,8 +53,10 @@ pub fn parse_line(line: &str) -> Option<Record> {
         cache_write: g("cache_creation_input_tokens"),
     };
     let ts = v.get("timestamp")?.as_str()?;
-    let date = DateTime::parse_from_rfc3339(ts).ok()?.with_timezone(&chrono::Local).date_naive();
-    Some(Record { model, date, toks })
+    let parsed = DateTime::parse_from_rfc3339(ts).ok()?;
+    let date = parsed.with_timezone(&chrono::Local).date_naive();
+    let cwd = v.get("cwd").and_then(Value::as_str).map(|s| s.to_string());
+    Some(Record { model, date, toks, cwd, at: parsed.with_timezone(&Utc) })
 }
 
 use std::collections::HashMap;
@@ -74,6 +83,11 @@ struct FileAgg {
     model_daily: HashMap<(String, NaiveDate), Toks>,
     session_toks: Toks,
     latest_model: Option<String>,
+    /// Most recent `cwd` seen in this transcript, so a session that changed
+    /// directory is matched on where it actually is now.
+    latest_cwd: Option<String>,
+    /// Timestamp of the newest usage entry seen in this transcript.
+    last_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Default)]
@@ -103,6 +117,12 @@ impl Collector {
                 agg.model_daily.entry((r.model.clone(), r.date)).or_default().add(&r.toks);
                 agg.session_toks.add(&r.toks);
                 agg.latest_model = Some(r.model);
+                // Entries are appended in time order, but don't rely on it:
+                // only advance cwd when this entry is genuinely the newest.
+                if agg.last_at.is_none_or(|prev| r.at >= prev) {
+                    agg.last_at = Some(r.at);
+                    if r.cwd.is_some() { agg.latest_cwd = r.cwd; }
+                }
             }
         }
         agg.offset = len;
@@ -120,6 +140,23 @@ impl Collector {
                 else if p.extension().and_then(|s| s.to_str()) == Some("jsonl") { self.refresh_file(&p); }
             }
         }
+    }
+
+    /// Session ids whose transcript's latest `cwd` is `cwd` and which have been
+    /// active at or after `active_since`, most recently active first.
+    ///
+    /// This is the fallback path for identifying a running instance: the exact
+    /// route (`CLAUDE_CODE_SESSION_ID` from the process tree) only works while
+    /// the instance happens to have a live child process, so an idle instance
+    /// is matched on its working directory instead. `active_since` keeps a
+    /// freshly-launched instance from inheriting an old session's totals.
+    pub fn sessions_for_cwd(&self, cwd: &Path, active_since: DateTime<Utc>) -> Vec<String> {
+        let mut hits: Vec<(DateTime<Utc>, &str)> = self.files.values()
+            .filter(|a| a.latest_cwd.as_deref() == cwd.to_str())
+            .filter_map(|a| a.last_at.filter(|at| *at >= active_since).map(|at| (at, a.session_id.as_str())))
+            .collect();
+        hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+        hits.into_iter().map(|(_, sid)| sid.to_string()).collect()
     }
 
     /// Build the two panels. `today` is passed in so callers/tests are deterministic.
@@ -238,6 +275,87 @@ mod tests {
         drop(fh);
         c.refresh_dir(&dir); // must add only the new 50, not re-add the first 100
         assert_eq!(c.snapshot(Window::All, today, &running).by_model[0].toks.input, 150);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A usage line carrying the `cwd` field that Claude Code stamps on every
+    /// transcript entry, at a specific wall-clock time.
+    fn line_at(model: &str, ts: &str, cwd: &str, inp: u64) -> String {
+        format!(
+            r#"{{"timestamp":"{ts}","cwd":"{cwd}","message":{{"model":"{model}","usage":{{"input_tokens":{inp},"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}}}}"#
+        )
+    }
+
+    fn write_lines(path: &Path, lines: &[String]) {
+        let mut fh = std::fs::File::create(path).unwrap();
+        for l in lines { writeln!(fh, "{l}").unwrap(); }
+    }
+
+    fn utc(s: &str) -> DateTime<chrono::Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&chrono::Utc)
+    }
+
+    #[test]
+    fn sessions_for_cwd_returns_matching_sessions_most_recent_first() {
+        let dir = std::env::temp_dir().join(format!("ctop-cwd-{}", std::process::id()));
+        let proj = dir.join("projects/p");
+        std::fs::create_dir_all(&proj).unwrap();
+
+        write_lines(&proj.join("sess-old.jsonl"), &[line_at("claude-opus-4-8", "2026-07-17T09:00:00Z", "/w/proj", 10)]);
+        write_lines(&proj.join("sess-new.jsonl"), &[line_at("claude-opus-4-8", "2026-07-17T11:00:00Z", "/w/proj", 20)]);
+        write_lines(&proj.join("sess-other.jsonl"), &[line_at("claude-opus-4-8", "2026-07-17T12:00:00Z", "/w/elsewhere", 30)]);
+
+        let mut c = Collector::new();
+        c.refresh_dir(&dir);
+
+        let since = utc("2026-07-17T00:00:00Z");
+        assert_eq!(
+            c.sessions_for_cwd(Path::new("/w/proj"), since),
+            vec!["sess-new".to_string(), "sess-old".to_string()]
+        );
+        assert!(c.sessions_for_cwd(Path::new("/w/unknown"), since).is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn sessions_for_cwd_excludes_sessions_idle_since_before_cutoff() {
+        let dir = std::env::temp_dir().join(format!("ctop-stale-{}", std::process::id()));
+        let proj = dir.join("projects/p");
+        std::fs::create_dir_all(&proj).unwrap();
+
+        write_lines(&proj.join("sess-stale.jsonl"), &[line_at("claude-opus-4-8", "2026-07-10T09:00:00Z", "/w/proj", 10)]);
+        write_lines(&proj.join("sess-live.jsonl"), &[line_at("claude-opus-4-8", "2026-07-17T09:00:00Z", "/w/proj", 20)]);
+
+        let mut c = Collector::new();
+        c.refresh_dir(&dir);
+
+        // Cutoff sits between the two: only the recent session is a candidate,
+        // so a freshly-launched instance can't inherit last week's tokens.
+        let since = utc("2026-07-16T00:00:00Z");
+        assert_eq!(c.sessions_for_cwd(Path::new("/w/proj"), since), vec!["sess-live".to_string()]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn sessions_for_cwd_tracks_latest_cwd_after_a_directory_change() {
+        let dir = std::env::temp_dir().join(format!("ctop-chdir-{}", std::process::id()));
+        let proj = dir.join("projects/p");
+        std::fs::create_dir_all(&proj).unwrap();
+
+        write_lines(&proj.join("sess-moved.jsonl"), &[
+            line_at("claude-opus-4-8", "2026-07-17T09:00:00Z", "/w/before", 10),
+            line_at("claude-opus-4-8", "2026-07-17T10:00:00Z", "/w/after", 10),
+        ]);
+
+        let mut c = Collector::new();
+        c.refresh_dir(&dir);
+        let since = utc("2026-07-17T00:00:00Z");
+
+        assert_eq!(c.sessions_for_cwd(Path::new("/w/after"), since), vec!["sess-moved".to_string()]);
+        assert!(c.sessions_for_cwd(Path::new("/w/before"), since).is_empty());
+
         std::fs::remove_dir_all(&dir).ok();
     }
 
