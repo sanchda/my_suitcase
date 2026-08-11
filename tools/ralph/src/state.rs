@@ -13,6 +13,18 @@ pub struct State {
     pub dir: PathBuf,
 }
 
+/// The parsed consolidated end-of-turn report from `.ralph/HANDOFF.json`.
+/// Every field is optional and pre-validated; `None` means "not declared".
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Handoff {
+    /// Iteration type: `code`, `plan`, `review`, or `blocked`.
+    pub status: Option<String>,
+    /// One-shot model override for the NEXT iteration (validated tier).
+    pub model: Option<String>,
+    /// Human-readable dead-end reason accompanying `status: blocked`.
+    pub blocked: Option<String>,
+}
+
 impl State {
     /// Open (creating `dir` and `dir/logs`) a runtime directory.
     pub fn open(dir: &Path) -> R<State> {
@@ -64,6 +76,57 @@ impl State {
         let picked = self.read_model(allowed);
         let _ = fs::remove_file(self.path("MODEL"));
         picked
+    }
+
+    /// Write the one-shot MODEL override (used to bridge a HANDOFF-declared
+    /// model to the next iteration's existing `take_model` path).
+    pub fn write_model(&self, model: &str) {
+        let _ = fs::write(self.path("MODEL"), format!("{model}\n"));
+    }
+
+    /// Read and remove `.ralph/HANDOFF.json` — the consolidated end-of-turn
+    /// report (`{"status": "...", "model": "...", "blocked": "..."}`). The
+    /// legacy STATUS/MODEL files remain honored when no handoff is present.
+    /// Malformed JSON or invalid field values warn and are ignored — a bad
+    /// handoff never aborts the loop.
+    pub fn take_handoff(&self, allowed_models: &[String]) -> Option<Handoff> {
+        let path = self.path("HANDOFF.json");
+        let raw = fs::read_to_string(&path).ok()?;
+        let _ = fs::remove_file(&path);
+        let value: serde_json::Value = match serde_json::from_str(&raw) {
+            Ok(v) => v,
+            Err(e) => {
+                self.log(&format!("  ⚠ ignoring malformed .ralph/HANDOFF.json: {e}"));
+                return None;
+            }
+        };
+        let field = |name: &str| {
+            value
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        };
+        let status = field("status").map(str::to_lowercase).filter(|s| {
+            let ok = matches!(s.as_str(), "code" | "plan" | "review" | "blocked");
+            if !ok {
+                self.log(&format!("  ⚠ ignoring invalid HANDOFF status ('{s}')"));
+            }
+            ok
+        });
+        let model = field("model").map(str::to_string).filter(|m| {
+            let ok = allowed_models.iter().any(|a| a == m);
+            if !ok {
+                self.log(&format!("  ⚠ ignoring invalid HANDOFF model ('{m}')"));
+            }
+            ok
+        });
+        let blocked = field("blocked").map(str::to_string);
+        Some(Handoff {
+            status,
+            model,
+            blocked,
+        })
     }
 
     /// The agent's declared iteration type from `.ralph/STATUS` (lowercased,
@@ -251,6 +314,52 @@ mod tests {
         assert_eq!(s.read_status(), Some("review".into()));
         fs::write(s.path("STATUS"), "   ").unwrap();
         assert_eq!(s.read_status(), None);
+    }
+
+    #[test]
+    fn handoff_roundtrip_and_validation() {
+        let s = State::open(&tmp()).unwrap();
+        let allowed: Vec<String> = ["haiku", "sonnet", "opus"]
+            .iter()
+            .map(|x| x.to_string())
+            .collect();
+        assert_eq!(s.take_handoff(&allowed), None); // absent
+
+        // Valid handoff: parsed once, then the file is consumed.
+        fs::write(
+            s.path("HANDOFF.json"),
+            r#"{"status": "Blocked", "model": "opus", "blocked": "needs an API key"}"#,
+        )
+        .unwrap();
+        let h = s.take_handoff(&allowed).unwrap();
+        assert_eq!(h.status.as_deref(), Some("blocked"));
+        assert_eq!(h.model.as_deref(), Some("opus"));
+        assert_eq!(h.blocked.as_deref(), Some("needs an API key"));
+        assert_eq!(s.take_handoff(&allowed), None); // consumed
+
+        // Invalid field values are dropped individually, not fatally.
+        fs::write(
+            s.path("HANDOFF.json"),
+            r#"{"status": "heroic", "model": "gpt5"}"#,
+        )
+        .unwrap();
+        let h = s.take_handoff(&allowed).unwrap();
+        assert_eq!(h.status, None);
+        assert_eq!(h.model, None);
+
+        // Malformed JSON is ignored entirely (legacy files then govern).
+        fs::write(s.path("HANDOFF.json"), "{not json").unwrap();
+        assert_eq!(s.take_handoff(&allowed), None);
+        assert!(!s.path("HANDOFF.json").exists(), "consumed even when bad");
+    }
+
+    #[test]
+    fn write_model_feeds_take_model() {
+        let s = State::open(&tmp()).unwrap();
+        let allowed: Vec<String> = vec!["sonnet".into(), "opus".into()];
+        s.write_model("opus");
+        assert_eq!(s.take_model(&allowed), Some("opus".into()));
+        assert_eq!(s.take_model(&allowed), None); // one-shot
     }
 
     #[test]

@@ -1,5 +1,7 @@
 mod auth;
 mod btw;
+mod card;
+mod chunk;
 mod config;
 mod format;
 mod handler;
@@ -28,6 +30,10 @@ Required environment:
 
 Everything after `--` is forwarded verbatim to `ralph` when you run /start.
 Slash commands: /start /stop /model /status /next /backlog-add /backlog-edit /btw
+
+While a loop runs, ralphd keeps one pinned status card edited in place; when a
+loop it spawned dies abnormally it posts the abort reason with Start-again /
+Start-on-opus buttons. Pinning needs the Manage Messages permission.
 ";
 
 #[tokio::main]
@@ -59,6 +65,8 @@ async fn main() {
     let loop_child: handler::LoopChild = std::sync::Arc::new(std::sync::Mutex::new(None));
     let watcher_cfg = cfg.clone();
     let watcher_loop_child = loop_child.clone();
+    let card_cfg = cfg.clone();
+    let card_loop_child = loop_child.clone();
 
     // Application-command interactions arrive without any privileged intents.
     let intents = GatewayIntents::empty();
@@ -82,6 +90,13 @@ async fn main() {
     tokio::spawn(handler::watch_start(
         watcher_cfg,
         watcher_loop_child,
+        client.http.clone(),
+    ));
+
+    // Maintain the pinned live status card while a loop runs.
+    tokio::spawn(card::watch_card(
+        card_cfg,
+        card_loop_child,
         client.http.clone(),
     ));
 

@@ -10,20 +10,22 @@
 //! token count and cost, taken from the authoritative `{"type":"result"}`
 //! envelope.
 
+use crate::chunk::{cap_chunks, chunk_message, DISCORD_LIMIT, MAX_CHUNKS};
 use serenity::all::{
-    CommandInteraction, Context, CreateMessage, EditInteractionResponse, EditMessage, MessageId,
+    CommandInteraction, Context, CreateAllowedMentions, CreateMessage, EditInteractionResponse,
+    EditMessage, MessageId,
 };
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Child;
 
 /// Cadence of the progress edits.
-const PROGRESS_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const PROGRESS_INTERVAL: Duration = Duration::from_secs(60);
+/// First progress edit lands early so a slow session shows signs of life.
+const FIRST_PROGRESS: Duration = Duration::from_secs(20);
 /// Move off the interaction token before Discord's 15-minute expiry (with
 /// margin), after which the deferred reply can no longer be edited or deleted.
 const TRANSITION_DEADLINE: Duration = Duration::from_secs(14 * 60);
-/// Discord's message-content cap.
-const DISCORD_LIMIT: usize = 2000;
 
 /// Live, cumulative accounting folded from the event stream.
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -126,7 +128,8 @@ pub fn progress_text(elapsed: Duration, stats: &Stats) -> String {
 }
 
 /// The final message: the result body plus a token/cost footer, or an error /
-/// no-result note. `elapsed` is the wall-clock the runner measured.
+/// no-result note. `elapsed` is the wall-clock the runner measured. Length is
+/// unbounded here — [`finalize`] chunks it into fence-safe Discord messages.
 pub fn final_text(summary: Option<&Summary>, stats: &Stats, elapsed: Duration) -> String {
     match summary {
         Some(s) if !s.is_error => {
@@ -145,7 +148,7 @@ pub fn final_text(summary: Option<&Summary>, stats: &Stats, elapsed: Duration) -
                 s.total_cost_usd,
                 human_elapsed(elapsed),
             );
-            truncate_with_footer(&body, &footer)
+            format!("{body}\n\n`{footer}`")
         }
         Some(s) => {
             let msg = if s.result.trim().is_empty() {
@@ -153,15 +156,15 @@ pub fn final_text(summary: Option<&Summary>, stats: &Stats, elapsed: Duration) -
             } else {
                 s.result.clone()
             };
-            truncate_discord(&format!("❌ claude failed after {}: {msg}", human_elapsed(elapsed)))
+            format!("❌ claude failed after {}: {msg}", human_elapsed(elapsed))
         }
-        None => truncate_discord(&format!(
+        None => format!(
             "❓ claude ended without a result after {} ({} step{}, ~{} output tok) — it may have failed to start or crashed.",
             human_elapsed(elapsed),
             stats.steps,
             plural(stats.steps),
             human_count(stats.output_tokens),
-        )),
+        ),
     }
 }
 
@@ -181,8 +184,11 @@ pub async fn drive(ctx: &Context, command: &CommandInteraction, mut child: Child
     let mut summary: Option<Summary> = None;
     let mut live = Live::Interaction;
 
+    // Replace the bare "thinking…" right away so the command visibly took.
+    update_live(ctx, command, &live, "⏳ starting claude…".to_string()).await;
+
     let mut tick = tokio::time::interval_at(
-        tokio::time::Instant::now() + PROGRESS_INTERVAL,
+        tokio::time::Instant::now() + FIRST_PROGRESS,
         PROGRESS_INTERVAL,
     );
     let deadline = tokio::time::sleep(TRANSITION_DEADLINE);
@@ -243,18 +249,35 @@ async fn transition(ctx: &Context, command: &CommandInteraction, live: &mut Live
     }
 }
 
-/// Replace the live message with the final result, falling back to a new channel
-/// message if the in-place edit fails.
+/// Replace the live message with the final result, falling back to a new
+/// channel message if the in-place edit fails. Long results are split into
+/// fence-safe chunks (the first edits the live message, the rest follow), all
+/// with mentions suppressed — a session must not be able to ping anyone.
 async fn finalize(ctx: &Context, command: &CommandInteraction, live: &Live, text: String) {
+    let chunks = cap_chunks(chunk_message(&text, DISCORD_LIMIT), MAX_CHUNKS);
+    let (first, rest) = chunks.split_first().expect("chunk_message never returns empty");
+    let no_mentions = CreateAllowedMentions::new();
+
     let err = match live {
         Live::Interaction => command
-            .edit_response(&ctx.http, EditInteractionResponse::new().content(text.clone()))
+            .edit_response(
+                &ctx.http,
+                EditInteractionResponse::new()
+                    .content(first.clone())
+                    .allowed_mentions(no_mentions.clone()),
+            )
             .await
             .err()
             .map(|e| e.to_string()),
         Live::Channel(id) => command
             .channel_id
-            .edit_message(&ctx.http, *id, EditMessage::new().content(text.clone()))
+            .edit_message(
+                &ctx.http,
+                *id,
+                EditMessage::new()
+                    .content(first.clone())
+                    .allowed_mentions(no_mentions.clone()),
+            )
             .await
             .err()
             .map(|e| e.to_string()),
@@ -263,7 +286,23 @@ async fn finalize(ctx: &Context, command: &CommandInteraction, live: &Live, text
         eprintln!("ralphd: /btw final update failed ({e}); posting result as a new message");
         let _ = command
             .channel_id
-            .send_message(&ctx.http, CreateMessage::new().content(text))
+            .send_message(
+                &ctx.http,
+                CreateMessage::new()
+                    .content(first.clone())
+                    .allowed_mentions(no_mentions.clone()),
+            )
+            .await;
+    }
+    for chunk in rest {
+        let _ = command
+            .channel_id
+            .send_message(
+                &ctx.http,
+                CreateMessage::new()
+                    .content(chunk.clone())
+                    .allowed_mentions(no_mentions.clone()),
+            )
             .await;
     }
 }
@@ -295,30 +334,6 @@ fn human_count(n: u64) -> String {
     } else {
         n.to_string()
     }
-}
-
-fn truncate_discord(text: &str) -> String {
-    if text.chars().count() <= DISCORD_LIMIT {
-        return text.to_string();
-    }
-    let mut out: String = text.chars().take(DISCORD_LIMIT - 1).collect();
-    out.push('…');
-    out
-}
-
-/// Lay out `<body>` followed by a code-spanned `footer`, truncating the body so
-/// the whole thing fits Discord's cap while always keeping the footer.
-fn truncate_with_footer(body: &str, footer: &str) -> String {
-    let deco = format!("\n\n`{footer}`");
-    let budget = DISCORD_LIMIT.saturating_sub(deco.chars().count());
-    let body = if body.chars().count() > budget {
-        let mut t: String = body.chars().take(budget.saturating_sub(1)).collect();
-        t.push('…');
-        t
-    } else {
-        body.to_string()
-    };
-    format!("{body}{deco}")
 }
 
 #[cfg(test)]
@@ -436,13 +451,25 @@ mod tests {
     }
 
     #[test]
-    fn footer_is_always_kept_when_body_is_huge() {
-        let body = "x".repeat(5000);
-        let footer = "— 6 turns · 1.5k in / 6.2k out · $0.09";
-        let out = truncate_with_footer(&body, footer);
-        assert!(out.chars().count() <= DISCORD_LIMIT);
-        assert!(out.contains(footer), "footer must survive truncation");
-        assert!(out.contains('…'));
+    fn final_text_is_unbounded_and_chunking_keeps_the_footer() {
+        // final_text no longer truncates — the chunker owns the cap, and the
+        // footer must land intact in the LAST chunk.
+        let summary = Summary {
+            is_error: false,
+            result: "x".repeat(5000),
+            total_cost_usd: 0.09,
+            num_turns: 6,
+            ..Summary::default()
+        };
+        let text = final_text(Some(&summary), &Stats::default(), Duration::from_secs(60));
+        assert!(text.chars().count() > 5000);
+        let chunks = cap_chunks(chunk_message(&text, DISCORD_LIMIT), MAX_CHUNKS);
+        assert!(chunks.len() >= 3 && chunks.len() <= MAX_CHUNKS);
+        assert!(
+            chunks.last().unwrap().contains("$0.0900"),
+            "footer must survive chunking: {:?}",
+            chunks.last()
+        );
     }
 
     #[test]

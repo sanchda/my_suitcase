@@ -10,7 +10,7 @@ use crate::context;
 use crate::notify;
 use crate::state::State;
 use crate::stream::{self, IterStatus, ResultEnvelope};
-use crate::{curate, git, synth, R};
+use crate::{curate, git, judge, learn, synth, R};
 use std::collections::HashSet;
 use std::io::{BufReader, Write};
 use std::path::Path;
@@ -329,9 +329,13 @@ pub fn run(cfg: &Config) -> R<i32> {
                     .filter(|m| cfg.escalation_ladder.iter().any(|t| t == m))
             })
             .unwrap_or_else(|| cfg.model.clone());
-        let base_prompt = std::fs::read_to_string(&cfg.prompt)?;
+        // Learnings ride the stable base: they change rarely, so the
+        // prompt-cache prefix survives across iterations.
+        let mut base_prompt = std::fs::read_to_string(&cfg.prompt)?;
+        base_prompt.push_str(&learn::injection_block(&learn::learnings_dir(cfg)));
         let iteration_prompt = resolved.compose(&base_prompt);
         let head_before = git::head(repo);
+        let branch_before = git::branch(repo);
 
         let target = resolved.target.as_deref().unwrap_or("completion audit");
         state.log(&format!(
@@ -399,6 +403,7 @@ pub fn run(cfg: &Config) -> R<i32> {
                     if post_iteration.is_complete() {
                         state.log("  marker seen and backlog has no pending task → COMPLETE");
                         archive_backlog(cfg, &state);
+                        finish_arc(cfg, &state);
                         state.log(&format!("=== ralph COMPLETE after {iter} iterations ==="));
                         notify::notify(
                             &notifier,
@@ -420,12 +425,50 @@ pub fn run(cfg: &Config) -> R<i32> {
                     state.log(&format!("  ⚠ completion marker ignored: {reason}"));
                 }
 
-                let status = state.read_status();
-                let verdict = match status.as_deref() {
-                    Some("blocked") => {
-                        state.log(
-                            "  ⛔ iteration declared itself blocked — needs human intervention",
+                // The consolidated handoff wins; the legacy STATUS/MODEL pair
+                // still governs when it's absent. A handoff-declared model
+                // bridges into the existing one-shot MODEL path.
+                let handoff = state.take_handoff(&cfg.escalation_ladder);
+                if let Some(m) = handoff.as_ref().and_then(|h| h.model.as_deref()) {
+                    state.write_model(m);
+                }
+                let status = handoff
+                    .as_ref()
+                    .and_then(|h| h.status.clone())
+                    .or_else(|| state.read_status());
+                let blocked_reason = handoff.as_ref().and_then(|h| h.blocked.clone());
+
+                // Audit the commit/safety contract: a branch switch is fatal;
+                // a rewrite or committed runtime files count as no-progress.
+                let breaches = git::audit_iteration(repo, &branch_before, &head_before, &cfg.dir);
+                for b in &breaches {
+                    state.log(&format!("  ⛔ contract breach: {}", b.message));
+                    notify::notify(
+                        &notifier,
+                        &format!("⛔ **ralph contract breach** — {}", b.message),
+                    );
+                    if b.fatal {
+                        state.log("=== ralph ABORTED — fatal contract breach ===");
+                        notify::notify(
+                            &notifier,
+                            &format!(
+                                "🔴 **ralph ABORTED** — {} · {}",
+                                b.message,
+                                run_scope(iter, cost_total, start.elapsed())
+                            ),
                         );
+                        return Ok(1);
+                    }
+                }
+                let contract_breached = !breaches.is_empty();
+
+                let mut verdict = match status.as_deref() {
+                    Some("blocked") => {
+                        let reason = blocked_reason
+                            .as_deref()
+                            .unwrap_or("needs human intervention (no reason given)");
+                        state.log(&format!("  ⛔ iteration declared itself blocked — {reason}"));
+                        notify::notify(&notifier, &format!("⛔ **ralph blocked** — {reason}"));
                         Verdict::Blocked
                     }
                     Some(s) if s != "code" => {
@@ -435,18 +478,51 @@ pub fn run(cfg: &Config) -> R<i32> {
                         Verdict::Excluded
                     }
                     _ => {
-                        if git::advanced_since(repo, &head_before) {
-                            Verdict::Made
-                        } else {
+                        if !git::advanced_since(repo, &head_before) {
                             state.log(
                                 "  ⚠ code iteration with no new commit — counts as no-progress",
                             );
                             Verdict::NoProgress
+                        } else if contract_breached {
+                            state.log(
+                                "  ⚠ commit landed but breached the contract — counts as no-progress",
+                            );
+                            Verdict::NoProgress
+                        } else {
+                            Verdict::Made
                         }
                     }
                 };
                 newly_dirty_warn(&state, repo);
                 state.clear_status();
+
+                // Opt-in adversarial judge: a refuted check-off reopens the leaf
+                // and counts as no-progress. Fail-open, and must run before
+                // curation so the leaf is still in the backlog.
+                if verdict == Verdict::Made && judge::wants_judgment(cfg, &model) {
+                    if let (Some(target), Some(title)) = (&resolved.target, &resolved.target_title)
+                    {
+                        let leaf_id = target.rsplit(" > ").next().unwrap_or(target.as_str());
+                        state.log(&format!(
+                            "  ⚖ judging check-off of {leaf_id} with {}",
+                            cfg.judge_model
+                        ));
+                        match judge::judge_iteration(cfg, repo, &head_before, leaf_id, title, &text)
+                        {
+                            Some(reason) => {
+                                state.log(&format!(
+                                    "  ⚖ judge REFUTED {leaf_id} — reopened; counts as no-progress: {reason}"
+                                ));
+                                notify::notify(
+                                    &notifier,
+                                    &format!("🔍 **judge refuted** `{leaf_id}` — reopened · {reason}"),
+                                );
+                                verdict = Verdict::NoProgress;
+                            }
+                            None => state.log("  ⚖ judge: pass"),
+                        }
+                    }
+                }
 
                 // Distill this turn's summary into the next carry-forward, then
                 // sweep completed backlog sections.
@@ -559,6 +635,28 @@ fn archive_backlog(cfg: &Config, state: &State) {
             "  ⚠ could not archive backlog {}",
             cfg.backlog.display()
         ));
+    }
+}
+
+/// Close out a completed arc so the next backlog starts clean: archive and
+/// clear the carry-forward, and reset the iteration counter
+/// (`--max-iterations` compares against it absolutely, and post-COMPLETE
+/// there is nothing to resume). `.ralph/learnings/` deliberately survives.
+/// Best-effort: a finished run is never turned into a failure here.
+fn finish_arc(cfg: &Config, state: &State) {
+    if let Ok(text) = std::fs::read_to_string(&cfg.progress) {
+        if !text.trim().is_empty() {
+            let archive_dir = cfg.dir.join("archive");
+            if std::fs::create_dir_all(&archive_dir).is_ok() {
+                let dest = archive_dir.join(format!("PROGRESS-{}.md", crate::state::timestamp()));
+                let _ = std::fs::write(dest, &text);
+            }
+        }
+        let _ = std::fs::write(&cfg.progress, "");
+    }
+    match state.set_iteration(0) {
+        Ok(()) => state.log("  arc closed: carry-forward archived, iteration counter reset"),
+        Err(e) => state.log(&format!("  ⚠ could not reset iteration counter: {e}")),
     }
 }
 
@@ -1096,6 +1194,44 @@ mod tests {
             1
         );
         assert_eq!(arg_value(&args, "--effort"), Some("xhigh"));
+    }
+
+    #[test]
+    fn finish_arc_archives_progress_and_resets_counter() {
+        use std::fs;
+        let repo = std::env::temp_dir().join(format!("ralph-arc-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&repo);
+        fs::create_dir_all(repo.join(".ralph")).unwrap();
+        fs::write(repo.join(".ralph/PROGRESS.md"), "- old arc note\n").unwrap();
+
+        let cfg = Config {
+            dir: repo.join(".ralph"),
+            progress: repo.join(".ralph/PROGRESS.md"),
+            ..Config::default()
+        };
+        let state = State::open(&cfg.dir).unwrap();
+        state.set_iteration(87).unwrap();
+
+        finish_arc(&cfg, &state);
+
+        // Counter reset: a fresh `--max-iterations 30` arc must not halt at boot.
+        assert_eq!(state.iteration(), 0);
+        // Carry-forward cleared, its content archived.
+        assert_eq!(fs::read_to_string(&cfg.progress).unwrap(), "");
+        let archived: Vec<_> = fs::read_dir(repo.join(".ralph/archive"))
+            .unwrap()
+            .map(|e| e.unwrap())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("PROGRESS-"))
+            .collect();
+        assert_eq!(archived.len(), 1);
+        assert!(fs::read_to_string(archived[0].path())
+            .unwrap()
+            .contains("old arc note"));
+
+        // Idempotent-ish: an already-empty PROGRESS archives nothing new.
+        finish_arc(&cfg, &state);
+        let count = fs::read_dir(repo.join(".ralph/archive")).unwrap().count();
+        assert_eq!(count, 1, "empty carry-forward must not archive again");
     }
 
     #[test]

@@ -8,12 +8,14 @@ use crate::ralph::Ralph;
 use crate::{auth, btw, format, loop_pid, model};
 
 use serenity::all::{
-    ChannelId, CommandOptionType, Context, CreateCommand, CreateCommandOption,
-    CreateInteractionResponse, CreateInteractionResponseMessage, EditInteractionResponse,
-    EventHandler, GuildId, Http, Interaction, Ready,
+    ButtonStyle, ChannelId, CommandOptionType, ComponentInteraction, Context, CreateActionRow,
+    CreateButton, CreateCommand, CreateCommandOption, CreateInteractionResponse,
+    CreateInteractionResponseMessage, CreateMessage, EditInteractionResponse, EventHandler,
+    GuildId, Http, Interaction, Ready,
 };
 use serenity::async_trait;
-use std::process::Child;
+use std::path::Path;
+use std::process::{Child, ExitStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -50,17 +52,54 @@ pub fn launch_and_record(cfg: &BotConfig, loop_child: &LoopChild, extra: &[Strin
     }
 }
 
-/// Reap the loop we spawned if it has exited, clearing its pidfile so a new start
-/// works again. A cross-session loop is reparented to init and reaped there, so
-/// only this same-session child can zombie.
-pub fn reap_and_clear(cfg: &BotConfig, loop_child: &LoopChild) {
+/// Reap the loop we spawned if it has exited, clearing its pidfile so a new
+/// start works again. Returns the exit status when a reap happened — the START
+/// watcher turns an abnormal one into a channel post. A cross-session loop is
+/// reparented to init and reaped there, so only this same-session child can
+/// zombie (and only it carries a status).
+pub fn reap_and_clear(cfg: &BotConfig, loop_child: &LoopChild) -> Option<ExitStatus> {
     let mut guard = loop_child.lock().unwrap();
     if let Some(child) = guard.as_mut() {
-        if let Ok(Some(_status)) = child.try_wait() {
+        if let Ok(Some(status)) = child.try_wait() {
             *guard = None;
             loop_pid::clear(&cfg.state_dir);
+            return Some(status);
         }
     }
+    None
+}
+
+/// The last abort line from `run.log` (timestamp stripped), for the
+/// abnormal-exit post.
+pub fn last_abort_reason(state_dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(state_dir.join("run.log")).ok()?;
+    let tail_start = text.len().saturating_sub(16 * 1024);
+    let mut start = tail_start;
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
+    }
+    text[start..]
+        .lines()
+        .rev()
+        .find(|l| l.contains("ABORTED"))
+        .map(|l| {
+            // Lines look like `HH:MM:SS === ralph ABORTED — reason ===`.
+            let l = l.trim();
+            let stripped = l.split_once(' ').map(|(_, rest)| rest).unwrap_or(l);
+            stripped.trim_matches(|c| c == '=' || c == ' ').to_string()
+        })
+}
+
+/// The buttons attached to an abnormal-exit post.
+fn restart_buttons() -> Vec<CreateActionRow> {
+    vec![CreateActionRow::Buttons(vec![
+        CreateButton::new("ralphd:start")
+            .label("Start again")
+            .style(ButtonStyle::Primary),
+        CreateButton::new("ralphd:start-opus")
+            .label("Start on opus")
+            .style(ButtonStyle::Secondary),
+    ])]
 }
 
 /// Background watcher: a separate local process (e.g. a claude session running
@@ -71,7 +110,25 @@ pub async fn watch_start(cfg: BotConfig, loop_child: LoopChild, http: Arc<Http>)
     let channel = ChannelId::new(cfg.channel_id);
     loop {
         tokio::time::sleep(START_POLL).await;
-        match poll_start(&cfg, &loop_child) {
+        let (decision, reaped) = poll_start(&cfg, &loop_child);
+        // An abnormal exit of the loop WE spawned becomes a post with the
+        // reason and restart buttons. (A user-command reap can race this and
+        // swallow the status — rare at a 3s poll.) Graceful exits are already
+        // announced by ralph's own webhook.
+        if let Some(status) = reaped.filter(|s| !s.success()) {
+            let reason = last_abort_reason(&cfg.state_dir)
+                .unwrap_or_else(|| format!("no abort line in run.log ({status})"));
+            eprintln!("ralphd: loop exited abnormally — {reason}");
+            let _ = channel
+                .send_message(
+                    &http,
+                    CreateMessage::new()
+                        .content(format!("🔴 **loop exited** — {reason}"))
+                        .components(restart_buttons()),
+                )
+                .await;
+        }
+        match decision {
             StartDecision::NoTrigger => {}
             StartDecision::AlreadyRunning(pid) => {
                 eprintln!("ralphd: START ignored — loop already running (pid {pid})");
@@ -103,21 +160,23 @@ enum StartDecision {
 }
 
 /// Reap a finished loop, then inspect the `START` marker: consume it if present
-/// and decide whether to launch. Factored out of [`watch_start`] so the trigger
-/// logic is testable without a gateway or a real loop.
-fn poll_start(cfg: &BotConfig, loop_child: &LoopChild) -> StartDecision {
+/// and decide whether to launch. Returns the reaped exit status (if this poll
+/// reaped one) alongside the decision. Factored out of [`watch_start`] so the
+/// trigger logic is testable without a gateway or a real loop.
+fn poll_start(cfg: &BotConfig, loop_child: &LoopChild) -> (StartDecision, Option<ExitStatus>) {
     // Keep the pidfile honest so a finished loop can be relaunched.
-    reap_and_clear(cfg, loop_child);
+    let reaped = reap_and_clear(cfg, loop_child);
     let marker = cfg.state_dir.join("START");
     if !marker.exists() {
-        return StartDecision::NoTrigger;
+        return (StartDecision::NoTrigger, reaped);
     }
     // Consume the trigger regardless of outcome so it fires once.
     let _ = std::fs::remove_file(&marker);
-    match loop_pid::running(&cfg.state_dir) {
+    let decision = match loop_pid::running(&cfg.state_dir) {
         Some(pid) => StartDecision::AlreadyRunning(pid),
         None => StartDecision::Launch,
-    }
+    };
+    (decision, reaped)
 }
 
 impl Handler {
@@ -160,9 +219,49 @@ impl Handler {
     }
 
     /// Reap the loop we spawned this session if it has exited, clearing its
-    /// pidfile so a new start works again.
+    /// pidfile so a new start works again. The status is intentionally dropped
+    /// here — the START watcher owns turning it into a channel post.
     fn reap_finished_loop(&self) {
-        reap_and_clear(&self.cfg, &self.loop_child);
+        let _ = reap_and_clear(&self.cfg, &self.loop_child);
+    }
+
+    /// A button click from an abnormal-exit post: same auth gate as commands,
+    /// then start the loop (optionally on opus).
+    async fn handle_component(&self, ctx: &Context, comp: ComponentInteraction) {
+        if !auth::authorized(comp.channel_id.get(), comp.user.id.get(), &self.cfg) {
+            let deny = CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content("not authorized in this channel")
+                    .ephemeral(true),
+            );
+            let _ = comp.create_response(&ctx.http, deny).await;
+            return;
+        }
+        let reply = match comp.data.custom_id.as_str() {
+            "ralphd:start" => self.component_start(&[]),
+            "ralphd:start-opus" => self.component_start(&["--model".into(), "opus".into()]),
+            other => format!("unknown button `{other}`"),
+        };
+        let _ = comp
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new().content(reply),
+                ),
+            )
+            .await;
+    }
+
+    fn component_start(&self, extra: &[String]) -> String {
+        self.reap_finished_loop();
+        if let Some(pid) = loop_pid::running(&self.cfg.state_dir) {
+            return format!("already running (pid {pid})");
+        }
+        match self.launch_loop(extra) {
+            Ok(pid) if extra.is_empty() => format!("started ralph (pid {pid})"),
+            Ok(pid) => format!("started ralph (pid {pid}) — {}", extra.join(" ")),
+            Err(e) => format!("failed to start: {e}"),
+        }
     }
 
     /// Turn a command name plus an option resolver into the reply string. `opt`
@@ -288,8 +387,13 @@ impl EventHandler for Handler {
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
-        let Interaction::Command(command) = interaction else {
-            return;
+        let command = match interaction {
+            Interaction::Command(command) => command,
+            Interaction::Component(comp) => {
+                self.handle_component(&ctx, comp).await;
+                return;
+            }
+            _ => return,
         };
 
         let channel_id = command.channel_id.get();
@@ -380,7 +484,7 @@ mod tests {
     fn poll_start_no_marker_is_no_trigger() {
         let cfg = tmp_cfg();
         let lc: LoopChild = Arc::new(Mutex::new(None));
-        assert_eq!(poll_start(&cfg, &lc), StartDecision::NoTrigger);
+        assert_eq!(poll_start(&cfg, &lc), (StartDecision::NoTrigger, None));
     }
 
     #[test]
@@ -388,7 +492,7 @@ mod tests {
         let cfg = tmp_cfg();
         let lc: LoopChild = Arc::new(Mutex::new(None));
         std::fs::write(cfg.state_dir.join("START"), "go").unwrap();
-        assert_eq!(poll_start(&cfg, &lc), StartDecision::Launch);
+        assert_eq!(poll_start(&cfg, &lc), (StartDecision::Launch, None));
         assert!(!cfg.state_dir.join("START").exists(), "marker must be consumed");
     }
 
@@ -401,11 +505,55 @@ mod tests {
         loop_pid::write(&cfg.state_dir, std::process::id()).unwrap();
         assert_eq!(
             poll_start(&cfg, &lc),
-            StartDecision::AlreadyRunning(std::process::id())
+            (StartDecision::AlreadyRunning(std::process::id()), None)
         );
         assert!(
             !cfg.state_dir.join("START").exists(),
             "marker consumed even when skipped"
         );
+    }
+
+    #[test]
+    fn reap_returns_the_childs_exit_status() {
+        let cfg = tmp_cfg();
+        // A real short-lived child with a nonzero exit.
+        let child = std::process::Command::new("sh")
+            .args(["-c", "exit 3"])
+            .spawn()
+            .unwrap();
+        loop_pid::write(&cfg.state_dir, child.id()).unwrap();
+        let lc: LoopChild = Arc::new(Mutex::new(Some(child)));
+        // Wait for the child to exit, then reap.
+        let status = loop {
+            if let Some(s) = reap_and_clear(&cfg, &lc) {
+                break s;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(status.code(), Some(3));
+        assert!(lc.lock().unwrap().is_none(), "child handle cleared");
+        assert_eq!(loop_pid::read(&cfg.state_dir), None, "pidfile cleared");
+        // Nothing left to reap.
+        assert_eq!(reap_and_clear(&cfg, &lc), None);
+    }
+
+    #[test]
+    fn abort_reason_is_last_aborted_line_without_timestamp() {
+        let cfg = tmp_cfg();
+        std::fs::write(
+            cfg.state_dir.join("run.log"),
+            "10:00:01 iter 3 → sonnet\n\
+             10:05:00 === ralph ABORTED — no progress after 4 iterations (escalated to opus) ===\n\
+             10:05:01 tail noise\n",
+        )
+        .unwrap();
+        let reason = last_abort_reason(&cfg.state_dir).unwrap();
+        assert_eq!(
+            reason,
+            "ralph ABORTED — no progress after 4 iterations (escalated to opus)"
+        );
+        // Absent file → None (caller falls back to the raw exit status).
+        let empty = tmp_cfg();
+        assert_eq!(last_abort_reason(&empty.state_dir), None);
     }
 }

@@ -29,15 +29,19 @@ verification/self-assessment finds no high-value gap.}}
    changed, the exact proof you ran, and any constraint the next iteration must
    respect. Do not write PROGRESS or a `Next:` line — the runner owns the handoff.
    Check off a finished task in BACKLOG in the same iteration.
-6. The next leaf's own `(tier/…)` decoration sets its model automatically; leave
-   `.ralph/MODEL` alone unless you must OVERRIDE that tier for the next pass — a
-   one-shot directive (`haiku`/`sonnet`/`opus`), cleared once read. Write
-   `.ralph/STATUS` for this pass: `code` (committed work), `plan`/`review`
-   (non-code progress), or `blocked`. A `code` pass must commit. Reserve
-   `blocked` for a genuine dead-end only a human can clear (a stop gate awaiting
-   approval, missing authority/credentials, or the same failure unresolved after
-   escalation) — consecutive blocked passes halt the loop. Needing a bigger model
-   is never `blocked`: the decoration (or a one-off `MODEL` override) does it.
+6. End every pass by writing `.ralph/HANDOFF.json` — one JSON object, e.g.
+   `{"status": "code", "model": null, "blocked": null}`:
+   - `status`: `code` (committed work), `plan`/`review` (non-code progress), or
+     `blocked`. A `code` pass must commit.
+   - `model`: normally null — the next leaf's own `(tier/…)` decoration sets its
+     model automatically. Set `haiku`/`sonnet`/`opus` only to OVERRIDE that tier
+     for the next pass; it is one-shot, cleared once read.
+   - `blocked`: when status is `blocked`, one line naming exactly what a human
+     must clear. Reserve `blocked` for a genuine dead-end only a human can clear
+     (a stop gate awaiting approval, missing authority/credentials, or the same
+     failure unresolved after escalation) — consecutive blocked passes halt the
+     loop. Needing a bigger model is never `blocked`: the decoration (or a
+     one-shot `model` override) does it.
 7. Commit only after verification succeeds.
 
 ## Commit and safety contract

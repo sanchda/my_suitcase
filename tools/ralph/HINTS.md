@@ -83,5 +83,12 @@ This is the lesson that takes down machines.
 
 ---
 
-Learned something new worth keeping? Add it here (`tools/ralph/HINTS.md`) so the
-next project starts from the lesson instead of relearning it.
+Learned something new worth keeping? Two homes, by scope:
+
+- **Repo-local lessons** (this project's gotchas, verification traps): run
+  `ralph learn` — it mines `run.log`, proposes candidates, and `--apply` writes
+  them as one file each under `.ralph/learnings/`, injected into every
+  iteration. Prune with `rm`.
+- **Cross-project lessons** (loop-authoring wisdom): add them here
+  (`tools/ralph/HINTS.md`) so the next project starts from the lesson instead
+  of relearning it.

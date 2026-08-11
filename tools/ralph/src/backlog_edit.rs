@@ -4,8 +4,15 @@
 //! reaches disk, so a mutation can never crash a running loop (which aborts on
 //! an invalid backlog). Writes are atomic (temp file + rename).
 
-use crate::backlog::{Document, Severity};
+use crate::backlog::{Document, Severity, SCHEMA_MARKER};
 use crate::R;
+
+/// The skeleton a bootstrapped backlog starts from. `add` appends the first
+/// task to this when the backlog file is absent — completion archives the file
+/// away, and the next arc must be startable from `/backlog-add` alone.
+pub fn empty_backlog() -> String {
+    format!("{SCHEMA_MARKER}\n# Backlog\n")
+}
 
 /// Collected lint error lines for a rejected mutation.
 fn lint_errors(doc: &Document) -> String {
@@ -50,10 +57,53 @@ pub fn apply_add(current: &str, title: &str, verify: &str) -> Result<(String, St
     Ok((text, id))
 }
 
+/// Un-check task `id` (flip its `[x]` back to `[ ]`), plus any checked ancestor
+/// — a leaf that closed its parent must reopen it or the result fails the
+/// "checked parent contains an unchecked stage" lint. Same lint-or-reject
+/// safety as add/edit: an invalid result never reaches disk.
+pub fn apply_uncheck(current: &str, id: &str) -> Result<String, String> {
+    let doc = Document::parse(current);
+    let index = doc
+        .tasks
+        .iter()
+        .position(|t| t.id == id)
+        .ok_or_else(|| format!("no task with id `{id}`"))?;
+    if !doc.tasks[index].checked {
+        return Err(format!("task `{id}` is not checked"));
+    }
+    // Header lines to flip: the task itself and every checked ancestor.
+    let mut header_lines = vec![doc.tasks[index].line];
+    let mut parent = doc.tasks[index].parent;
+    while let Some(p) = parent {
+        if doc.tasks[p].checked {
+            header_lines.push(doc.tasks[p].line);
+        }
+        parent = doc.tasks[p].parent;
+    }
+    let mut lines: Vec<String> = current.lines().map(String::from).collect();
+    for line_no in header_lines {
+        let line = &mut lines[line_no - 1];
+        let flipped = line.replacen("- [x] ", "- [ ] ", 1);
+        *line = if flipped != *line {
+            flipped
+        } else {
+            line.replacen("- [X] ", "- [ ] ", 1)
+        };
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    let new_doc = Document::parse(&out);
+    if new_doc.has_errors() {
+        return Err(lint_errors(&new_doc));
+    }
+    Ok(out)
+}
+
 /// Atomically replace `path`'s contents with `new_text` (temp file + rename in
 /// the same directory, so a reader never sees a half-written backlog).
-fn write_atomic(path: &std::path::Path, new_text: &str) -> R<()> {
+pub(crate) fn write_atomic(path: &std::path::Path, new_text: &str) -> R<()> {
     let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    std::fs::create_dir_all(dir)?;
     let tmp = dir.join(format!(
         ".{}.{}.tmp",
         path.file_name().and_then(|n| n.to_str()).unwrap_or("BACKLOG.md"),
@@ -120,8 +170,18 @@ pub fn run(args: &[String]) -> R<i32> {
     let sub = args.first().map(String::as_str);
     let rest = args.get(1..).unwrap_or(&[]);
     let cfg = crate::config::load_base(rest)?;
-    let current = std::fs::read_to_string(&cfg.backlog)
-        .map_err(|e| format!("{}: cannot read backlog: {e}", cfg.backlog.display()))?;
+    // `add` bootstraps a fresh schema-valid backlog when the file is absent
+    // (the previous arc's completion archived it away); `edit` never does —
+    // there is nothing to edit.
+    let (current, bootstrapped) = match std::fs::read_to_string(&cfg.backlog) {
+        Ok(text) => (text, false),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && sub == Some("add") => {
+            (empty_backlog(), true)
+        }
+        Err(e) => {
+            return Err(format!("{}: cannot read backlog: {e}", cfg.backlog.display()).into())
+        }
+    };
     match sub {
         Some("add") => {
             let title = flag(rest, "--title").ok_or("backlog add: --title <text> required")?;
@@ -129,7 +189,14 @@ pub fn run(args: &[String]) -> R<i32> {
             match apply_add(&current, title, verify) {
                 Ok((new_text, id)) => {
                     write_atomic(&cfg.backlog, &new_text)?;
-                    println!("added task {id}");
+                    if bootstrapped {
+                        println!(
+                            "bootstrapped {} and added task {id}",
+                            cfg.backlog.display()
+                        );
+                    } else {
+                        println!("added task {id}");
+                    }
                     Ok(0)
                 }
                 Err(errors) => {
@@ -162,6 +229,17 @@ pub fn run(args: &[String]) -> R<i32> {
 mod tests {
     use super::*;
     use crate::backlog::SCHEMA_MARKER;
+
+    #[test]
+    fn add_onto_empty_backlog_bootstraps_a_valid_arc() {
+        // The exact new-arc path: completion archived BACKLOG.md away, and the
+        // first /backlog-add must produce a valid, routable backlog from nothing.
+        let (new_text, id) = apply_add(&empty_backlog(), "First of new arc", "cargo test").unwrap();
+        assert_eq!(id, "1");
+        let doc = Document::parse(&new_text);
+        assert!(!doc.has_errors(), "{:?}", doc.issues);
+        assert_eq!(doc.tasks[doc.selected_index().unwrap()].title, "First of new arc");
+    }
 
     #[test]
     fn add_appends_valid_task_with_incremented_id() {
@@ -220,6 +298,28 @@ mod tests {
         );
         let new_text = apply_edit(&current, "1.1", "Done child renamed", "focused2").unwrap();
         assert!(new_text.contains("  - [x] **1.1 — Done child renamed**"));
+    }
+
+    #[test]
+    fn uncheck_reopens_leaf_and_checked_ancestors() {
+        let current = format!(
+            "{SCHEMA_MARKER}\n# B\n- [x] **1 — Parent.**\n  Verify: broad\n  - [x] **1.1 — Child.** Verify: focused\n- [ ] **2 — Next.** Verify: y\n"
+        );
+        let new_text = apply_uncheck(&current, "1.1").unwrap();
+        let doc = Document::parse(&new_text);
+        assert!(!doc.has_errors(), "{:?}", doc.issues);
+        // Both the leaf and its closed parent reopen, so the lint stays green
+        // and routing re-selects 1.1.
+        assert!(new_text.contains("- [ ] **1 — Parent.**"));
+        assert!(new_text.contains("  - [ ] **1.1 — Child.**"));
+        assert_eq!(doc.tasks[doc.selected_index().unwrap()].id, "1.1");
+    }
+
+    #[test]
+    fn uncheck_rejects_pending_or_unknown_task() {
+        let current = format!("{SCHEMA_MARKER}\n- [ ] **1 — P.** Verify: y\n");
+        assert!(apply_uncheck(&current, "1").unwrap_err().contains("not checked"));
+        assert!(apply_uncheck(&current, "9").unwrap_err().contains("no task"));
     }
 
     #[test]

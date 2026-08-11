@@ -123,7 +123,9 @@ local tools/tests visible without mining raw NDJSON.
   tasks. `--json` emits one machine-readable line.
 - `ralph backlog add --title "<t>" --verify "<cmd>"` — append a well-formed task
   (auto-assigned top-level id). Rejected without touching the file if the result
-  would fail schema lint.
+  would fail schema lint. When the backlog file is absent (a completed arc
+  archived it away), `add` bootstraps a fresh schema-valid file first — the
+  next arc starts from `backlog add` alone.
 - `ralph backlog edit --id <id> --title "<t>" --verify "<cmd>"` — replace a
   task's title and verify in place (children preserved). Same lint-or-revert
   safety. Both writes are atomic, so they never expose a half-written backlog to
@@ -160,7 +162,27 @@ yolo `claude` session with your message (optionally on a given model) and posts
 its output back. Loop lifecycle/progress still posts via
 `ralph`'s existing `DISCORD_WEBHOOK` (point it at the same channel); ralphd only
 handles inbound commands and their replies. Invite the bot with the `bot` +
-`applications.commands` scopes.
+`applications.commands` scopes (pinning the status card also needs the *Manage
+Messages* permission; without it the card degrades to an ordinary message).
+
+Beyond commands, ralphd maintains channel state on its own:
+
+- **One pinned live status card**, edited every 30s while a loop runs:
+  run-state, iteration, pending count, current + upcoming leaves, the live
+  in-iteration line from `.ralph/live`, and a relative "updated" stamp. When
+  the loop ends the card gets a final past-tense edit and stays as the run's
+  record; the next run deletes it and pins a fresh one — exactly one card,
+  never a pile of status posts.
+- **Actionable failure posts**: when a ralphd-spawned loop exits abnormally,
+  ralphd posts the abort reason (pulled from `run.log`) with **Start again** /
+  **Start on opus** buttons — the "come look" signal carries its remedies, so
+  you can unblock from your phone. Buttons pass the same single-tenant auth
+  gate as commands.
+- **`/btw` message hygiene**: output is never truncated — it's split into up to
+  4 messages at line boundaries, code fences are closed and reopened across the
+  split (never torn), and all mentions are suppressed so a session can't ping
+  `@everyone`. The first status edit lands within ~20s and progress updates
+  every minute.
 
 ## Completion
 The loop ends when the model's **final text** (from the result envelope's
@@ -168,25 +190,51 @@ The loop ends when the model's **final text** (from the result envelope's
 default `RALPH_COMPLETE`. Your `PROMPT.md` must instruct the model to emit it
 only when the whole goal is genuinely done and verified.
 
-### Completion → archive
+### Completion closes the arc
 On completion, the runner moves the backlog file into
 `.ralph/archive/BACKLOG-<timestamp>.md` — `git mv` + a commit when the backlog
-is tracked, a plain filesystem rename otherwise. This is best-effort: a
-finished run is never turned into a failure by an archive hiccup.
+is tracked, a plain filesystem rename otherwise — and then closes out the arc:
+
+- the carry-forward is archived to `.ralph/archive/PROGRESS-<timestamp>.md` and
+  `PROGRESS.md` is cleared, so the next arc's first iteration never reads the
+  previous arc's notes;
+- the iteration counter resets to 0, so a fresh `--max-iterations` budget means
+  what it says (the counter's persistence is for resuming *within* an arc;
+  post-completion there is nothing to resume);
+- `.ralph/learnings/` is deliberately untouched — that's the memory that should
+  survive arcs.
+
+All best-effort: a finished run is never turned into a failure by archive
+hiccups.
+
+### Starting the next arc
+`ralph backlog add` bootstraps a fresh, schema-valid `BACKLOG.md` when the file
+is absent, so the whole cycle works without touching a terminal: complete →
+`/backlog-add …` (repeat as needed) → `/start`. Edit `PROMPT.md` between arcs
+when the goal or verification contract changes; config, learnings, and the
+webhook carry over as-is.
 
 ## Per-iteration hand-offs (the agent writes these)
-Each iteration ends by writing two one-word files that steer the next step:
+Each iteration ends by writing **one** consolidated report, `.ralph/HANDOFF.json`:
 
-- `.ralph/MODEL` — `haiku` / `sonnet` / `opus`, a **one-shot override** sizing
-  the NEXT iteration; cleared once read. Normally unset: a task's own `(tier/…)`
-  decoration is the baseline (see below), and `MODEL` only overrides it for a
-  single pass.
-- `.ralph/STATUS` — this iteration's type: `code` (a normal committing
-  iteration), or `review`/`plan`/`blocked` for an intentional non-code pass.
-  Absent is treated as `code`.
+```json
+{"status": "code", "model": null, "blocked": null}
+```
 
-Invalid `MODEL` values are ignored with a warning (never abort). See the PROMPT
-template for the exact instructions given to the model.
+- `status` — this iteration's type: `code` (a normal committing iteration), or
+  `review`/`plan`/`blocked` for an intentional non-code pass. Absent is treated
+  as `code`.
+- `model` — `haiku` / `sonnet` / `opus`, a **one-shot override** sizing the NEXT
+  iteration; cleared once read. Normally null: a task's own `(tier/…)`
+  decoration is the baseline (see below).
+- `blocked` — with `status: blocked`, one line naming exactly what a human must
+  clear; it is logged and posted to the webhook so the "come look" signal
+  carries its reason.
+
+One file instead of the previous `STATUS`/`MODEL` pair, so the agent can't
+half-comply; the legacy files are still honored when no handoff is present.
+Malformed JSON or invalid field values are warned about and ignored (never
+abort). See the PROMPT template for the exact instructions given to the model.
 
 **Model precedence** (highest first): escalation override → one-shot `.ralph/MODEL`
 → the resolved leaf's own `(tier/…)` decoration (e.g. `(opus/pedagogy.)` → `opus`;
@@ -200,6 +248,56 @@ parsing, no id matching. The base prompt remains first and stable for caching.
 Ralph also passes `--no-session-persistence` (iterations are deliberately
 fresh) and `--exclude-dynamic-system-prompt-sections` (better prompt-cache
 reuse).
+
+## Mechanical contract audit (prompt-as-request, runner-as-contract)
+After every successful iteration the runner audits the commit/safety contract
+the PROMPT only *requests*, using git itself:
+
+- **Branch switched** → the loop's core invariant is gone: logged, posted to the
+  webhook, and the loop **aborts** immediately.
+- **History rewritten** (HEAD moved without fast-forward: amend/reset/rebase) →
+  logged + posted, and the iteration **counts as no-progress**.
+- **Runtime files committed** (any `.ralph/` path in the new commits) → same.
+
+Lenient outside a git repo. This closes the gap where a prompt rule is only as
+strong as the model's compliance.
+
+## Adversarial check-off judge (opt-in)
+For expensive tiers it's worth a second opinion before a check-off stands. With
+`judge_tiers = ["opus"]` in `ralph.toml` (default: off), every committed `code`
+iteration that RAN on a listed tier gets a one-shot judge pass on
+`judge_model` (default `sonnet`): the judge reads the leaf's own text (with its
+`Verify:` contract), the agent's end-of-turn summary (labeled *claims,
+unverified*), and the iteration's commits + diff, and is told to **refute if
+uncertain**. On refute, the runner mechanically un-checks the leaf (and any
+ancestor the check-off closed) with the usual lint-or-reject safety, posts the
+reason, and counts the iteration as no-progress — so routing re-selects the
+same leaf, and a repeat refutation escalates the tier like any other stall.
+The harness itself fails **open**: a missing/hung/garbled judge call passes the
+iteration rather than stalling the loop (skepticism belongs in the judgment,
+availability in the harness).
+
+## `ralph learn` — durable lessons as files
+Mines `run.log` (plus the current carry-forward) with a one-shot `synth_model`
+call for durable, non-obvious lessons: recurring failures, environment gotchas,
+verification traps, tier lessons. Propose-then-approve, never auto-written:
+
+```bash
+ralph learn              # mine → print numbered proposals (saved, not applied)
+ralph learn --apply      # write all proposals to .ralph/learnings/<slug>.md
+ralph learn --apply 1,3  # write a subset
+ralph learn --discard    # drop the saved proposals
+```
+
+Discipline: existing learnings are shown to the miner so they aren't
+re-proposed, and "nothing non-obvious happened" yields an empty proposal list —
+that's the correct outcome for a clean run, not a failure. One learning per
+file so cleanup is `rm .ralph/learnings/<file>`.
+
+Learnings are injected into every iteration under a `## Learnings` heading,
+appended to the stable base prompt (cache-friendly: they change only when you
+apply or prune). Budgets: 1 KB per file, 4 KB total; files over budget are
+named in the prompt rather than silently dropped.
 
 ## No-progress detection & escalation
 A **progress streak** counts consecutive unproductive iterations. An iteration
@@ -312,6 +410,8 @@ abort_after = 4
 | `transient_wait` / `_max` | `RALPH_TRANSIENT_WAIT[_MAX]` | — | 10 / 300 |
 | `extra_args` | `RALPH_EXTRA_ARGS` | — | — |
 | `escalation_ladder` | — | — | `["haiku","sonnet","opus"]` |
+| `judge_tiers` | `RALPH_JUDGE_TIERS` (comma-sep) | — | `[]` (off) |
+| `judge_model` | `RALPH_JUDGE_MODEL` | — | `sonnet` |
 | — | `RALPH_CONFIG` | `--config` | `.ralph/ralph.toml` |
 | — | — | `--once` | run one iteration then exit |
 
@@ -340,5 +440,7 @@ cargo build --release
 ```
 Modules: `backlog` (schema/lint) · `context` (bounded brief) · `config` ·
 `stream` (NDJSON) · `classify` · `control` (loop, thrash, budgets, timeout) ·
-`state` (`.ralph/`) · `git` · `init` (`ralph init` scaffolding). See
+`state` (`.ralph/`, HANDOFF) · `git` (baseline, contract audit) · `judge`
+(adversarial check-off gate) · `learn` (`ralph learn`) · `init` (`ralph init`
+scaffolding). See
 `docs/superpowers/specs/2026-07-17-ralph-rust-design.md` for the original design.

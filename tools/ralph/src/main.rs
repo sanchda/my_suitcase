@@ -17,6 +17,8 @@ mod curate;
 mod git;
 mod hints;
 mod init;
+mod judge;
+mod learn;
 mod notify;
 mod schema;
 mod state;
@@ -41,6 +43,9 @@ Usage: ralph [options]
        ralph brief [options]     Print the runner-resolved iteration brief
        ralph status [--json]     Print backlog frontier (JSON with --json)
        ralph backlog <add|edit> ...  Add or edit a backlog task (schema-checked)
+       ralph learn               Mine run.log for durable lessons (propose only)
+       ralph learn --apply [1,3] Write proposed learnings to .ralph/learnings/
+       ralph learn --discard     Drop the saved proposals
   --prompt <file>          Prompt fed each iteration (default .ralph/PROMPT.md)
   --backlog <file>         Backlog archived on completion (default .ralph/BACKLOG.md)
   --progress <file>        Current hand-off file (default .ralph/PROGRESS.md)
@@ -61,6 +66,15 @@ Usage: ralph [options]
   --once                   Run a single iteration then exit (testing)
   --no-yolo                Do NOT pass --dangerously-skip-permissions
   -h, --help               This help
+
+Config-file-only settings (.ralph/ralph.toml — no flag; see README):
+  synth_model, judge_tiers, judge_model, escalation_ladder,
+  limit_wait[_max], transient_wait[_max], extra_args
+
+Completion closes the arc: BACKLOG and the carry-forward are archived, PROGRESS
+is cleared, and the iteration counter resets. `ralph backlog add` bootstraps a
+fresh backlog when none exists, so the next arc starts from `backlog add`.
+`.ralph/learnings/` persists across arcs.
 
 Control while running:
   ralph stop                   Halt gracefully after the current iteration
@@ -100,6 +114,9 @@ fn run() -> R<i32> {
     }
     if argv.first().map(String::as_str) == Some("backlog") {
         return backlog_edit::run(&argv[1..]);
+    }
+    if argv.first().map(String::as_str) == Some("learn") {
+        return learn::run(&argv[1..]);
     }
 
     let command = argv.first().map(String::as_str);

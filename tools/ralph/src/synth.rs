@@ -83,15 +83,22 @@ pub fn synthesize_with(
 }
 
 /// Real spawn: one-shot `claude -p --model <synth_model>`, prompt on stdin, plain
-/// text stdout. Returns None on spawn/exit failure OR if the call outlives
-/// `SYNTH_TIMEOUT_SECS` (watchdog kills the process tree). Stdin is written on a
-/// separate thread so a full stdin pipe can't deadlock against a full stdout one.
+/// text stdout. See [`run_claude_oneshot`] for the mechanics.
 pub fn run_claude(cfg: &Config, prompt: &str) -> Option<String> {
+    run_claude_oneshot(&cfg.synth_model, SYNTH_TIMEOUT_SECS, prompt)
+}
+
+/// One-shot `claude -p --model <model>`, prompt on stdin, plain text stdout.
+/// Shared by the handoff synthesizer, the adversarial judge, and `ralph learn`.
+/// Returns None on spawn/exit failure OR if the call outlives `timeout_secs`
+/// (watchdog kills the process tree). Stdin is written on a separate thread so
+/// a full stdin pipe can't deadlock against a full stdout one.
+pub fn run_claude_oneshot(model: &str, timeout_secs: u64, prompt: &str) -> Option<String> {
     let mut cmd = Command::new("claude");
     cmd.args([
         "-p",
         "--model",
-        &cfg.synth_model,
+        model,
         "--output-format",
         "text",
         "--no-session-persistence",
@@ -125,7 +132,7 @@ pub fn run_claude(cfg: &Config, prompt: &str) -> Option<String> {
     let killed = Arc::new(AtomicBool::new(false));
     let (done_w, killed_w) = (done.clone(), killed.clone());
     let watchdog = thread::spawn(move || {
-        for _ in 0..SYNTH_TIMEOUT_SECS * 10 {
+        for _ in 0..timeout_secs * 10 {
             if done_w.load(Ordering::SeqCst) {
                 return;
             }

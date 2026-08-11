@@ -54,6 +54,11 @@ pub struct Config {
     /// Seconds between in-iteration heartbeat webhook posts (0 = off). Reports
     /// live elapsed, output tokens, and the current tool while a turn runs.
     pub heartbeat_interval: u64,
+    /// Model tiers whose committed `code` iterations get an adversarial
+    /// check-off judge pass (empty = feature off). Judged by the tier that RAN.
+    pub judge_tiers: Vec<String>,
+    /// Model used for the adversarial judge call.
+    pub judge_model: String,
 }
 
 impl Default for Config {
@@ -86,6 +91,8 @@ impl Default for Config {
             discord_webhook: String::new(),
             restart: false,
             heartbeat_interval: 0,
+            judge_tiers: Vec::new(),
+            judge_model: "sonnet".into(),
         }
     }
 }
@@ -121,6 +128,8 @@ pub struct FileConfig {
     pub escalation_ladder: Option<Vec<String>>,
     pub restart: Option<bool>,
     pub heartbeat_interval: Option<DurationSpec>,
+    pub judge_tiers: Option<Vec<String>>,
+    pub judge_model: Option<String>,
 }
 
 /// `extra_args` may be a single string ("--foo --bar") or an array of strings.
@@ -270,6 +279,12 @@ pub fn apply_file(cfg: &mut Config, f: FileConfig) -> Result<(), String> {
     if let Some(v) = f.heartbeat_interval {
         cfg.heartbeat_interval = v.resolve()?;
     }
+    if let Some(v) = f.judge_tiers {
+        cfg.judge_tiers = v;
+    }
+    if let Some(v) = f.judge_model {
+        cfg.judge_model = v;
+    }
     Ok(())
 }
 
@@ -338,6 +353,16 @@ pub fn apply_env<F: Fn(&str) -> Option<String>>(cfg: &mut Config, get: F) -> Res
     if let Some(v) = get("RALPH_HEARTBEAT") {
         cfg.heartbeat_interval = parse_duration(&v)?;
     }
+    // Comma-separated tiers, e.g. RALPH_JUDGE_TIERS=opus or "sonnet,opus".
+    if let Some(v) = get("RALPH_JUDGE_TIERS") {
+        cfg.judge_tiers = v
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect();
+    }
+    set_str!("RALPH_JUDGE_MODEL", cfg.judge_model);
     Ok(())
 }
 
@@ -673,6 +698,28 @@ mod tests {
         assert_eq!(c.heartbeat_interval, 120); // env beat file, bare seconds
         apply_args(&mut c, &["--heartbeat".into(), "10m".into()]).unwrap();
         assert_eq!(c.heartbeat_interval, 600); // flag beat env
+    }
+
+    #[test]
+    fn judge_config_defaults_off_with_file_and_env_overrides() {
+        let mut c = Config::default();
+        assert!(c.judge_tiers.is_empty()); // off by default
+        assert_eq!(c.judge_model, "sonnet");
+        apply_file(
+            &mut c,
+            toml::from_str("judge_tiers = [\"opus\"]\njudge_model = \"haiku\"").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(c.judge_tiers, vec!["opus"]);
+        assert_eq!(c.judge_model, "haiku");
+        apply_env(&mut c, |k| match k {
+            "RALPH_JUDGE_TIERS" => Some("sonnet, opus".into()),
+            "RALPH_JUDGE_MODEL" => Some("sonnet".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(c.judge_tiers, vec!["sonnet", "opus"]);
+        assert_eq!(c.judge_model, "sonnet");
     }
 
     #[test]
