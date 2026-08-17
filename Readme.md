@@ -49,10 +49,23 @@ shell/
   bash.sh               Bash-only: prompt, shopt, completions
   zsh.sh                Zsh-only: setopt, starship, atuin
   functions/*.sh        Auto-sourced shell functions (git worktree helpers, …)
-bin/                    On PATH: sc-doctor, getCost.sh
+bin/                    On PATH: sc-doctor, cc-mod, cc-statusline, getCost.sh
+claude/mods/            Reversible ~/.claude/settings.json fragments (cc-mod)
+lib/cc-mod.jq           The merge/unmerge jq library behind cc-mod
+tools/                  Rust tools: bark, ralph, ralphd, claude-top
 atuin/  tmux.conf  htoprc
 personalize/  scripts/  Optional per-machine extras (run manually)
+tests/                  Fixture tests for the shell tooling (tests/cc-mod.sh)
 ```
+
+## Claude Code config
+
+`~/.claude/settings.json` is managed in reversible pieces called mods: a status
+line, an ExitPlanMode plan reviewer, Discord notifications. `cc-mod list` shows
+them, `cc-mod disable <mod>` takes one back out (and it stays out across
+personalize runs). Each has a `personalize/scripts/` switch taking the same
+flags -- `setup_claude_statusline.sh --disable`, `setup_bark.sh --status`. See
+`claude/mods/README.md`.
 
 Generated rc files source `shell/boot.sh` first, then use `sc_source` for
 everything else — so a moved or renamed file prints a clear, non-fatal warning

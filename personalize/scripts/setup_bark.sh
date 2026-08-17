@@ -5,6 +5,13 @@
 # - Builds the Rust binary from suitcase/tools/bark (cargo).
 # - Installs it to ~/.local/bin/bark.
 # - Seeds ~/.config/bark/config.toml (0600) if it does not exist yet.
+# - Turns on the `bark-notify` cc-mod, which is what makes Claude Code bark on
+#   Stop/Notification/SessionEnd.
+#
+# Flags (the mod, not the binary):
+#   --disable   stop Claude Code barking, and keep it that way
+#   --enable    start again after a --disable
+#   --status    show what the mod owns
 #
 # The webhook is read from $BARK_WEBHOOK when set, otherwise DEFAULT_WEBHOOK
 # below. An existing config is never touched, so this is safe to re-run.
@@ -21,6 +28,16 @@ DEFAULT_WEBHOOK="https://discord.com/api/webhooks/1538974466154037289/hkQbkIPV-a
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SUITCASE_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+# shellcheck source-path=SCRIPTDIR source=../lib/cc-mod-shim.sh
+. "$SUITCASE_ROOT/personalize/lib/cc-mod-shim.sh"
+
+# Turning the notifier off (or just asking about it) needs no build.
+if cc_mod_skips_build "$@"; then
+  cc_mod_shim bark-notify "$@"
+  exit $?
+fi
+
 PROJECT_DIR="$SUITCASE_ROOT/tools/bark"
 BIN_DIR="$HOME/.local/bin"
 BIN="$BIN_DIR/bark"
@@ -71,3 +88,7 @@ else
 fi
 
 echo "Ensure ~/.local/bin is on your PATH, then: bark hello 'first bark'"
+
+# Claude Code notifications. `ensure` respects an earlier --disable, so a
+# personalize run never turns your pings back on behind your back.
+cc_mod_shim bark-notify "$@"

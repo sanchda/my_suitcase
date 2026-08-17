@@ -14,7 +14,6 @@ const TRUNCATION_MARKER: &str = " [truncated]";
 
 /// Attempts for a retryable failure, including the first try.
 const MAX_ATTEMPTS: u32 = 3;
-/// Cap on any single backoff sleep.
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq)]
@@ -57,7 +56,12 @@ fn clamp(s: &str) -> String {
 }
 
 pub fn payload(post: &Post) -> String {
-    let mut body = serde_json::json!({ "content": post.content });
+    // parse: [] means no mention in the content resolves -- a piped log line or
+    // a transcript excerpt containing @everyone must not ping the channel.
+    let mut body = serde_json::json!({
+        "content": post.content,
+        "allowed_mentions": { "parse": [] },
+    });
     if let Some(name) = post.username.as_deref().map(str::trim) {
         if !name.is_empty() {
             body["username"] = serde_json::Value::String(name.to_string());
@@ -257,11 +261,21 @@ mod tests {
     #[test]
     fn payload_omits_blank_username() {
         let mut post = post_of("hi");
-        assert_eq!(payload(&post), r#"{"content":"hi"}"#);
+        assert!(!payload(&post).contains("username"));
         post.username = Some("  ".into());
-        assert_eq!(payload(&post), r#"{"content":"hi"}"#);
+        assert!(!payload(&post).contains("username"));
         post.username = Some("bark".into());
         assert!(payload(&post).contains(r#""username":"bark""#));
+    }
+
+    #[test]
+    fn payload_never_resolves_mentions() {
+        let post = post_of("@everyone deploy done");
+        assert!(
+            payload(&post).contains(r#""allowed_mentions":{"parse":[]}"#),
+            "{}",
+            payload(&post)
+        );
     }
 
     #[test]

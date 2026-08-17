@@ -83,6 +83,17 @@ else
   warn "atuin config not linked to suitcase (run install/atuin.sh)"
 fi
 
+# --- claude config mods (cc-mod owns ~/.claude/settings.json fragments) ---
+if [ -x "$SUITCASE/bin/cc-mod" ]; then
+  if ! command -v jq >/dev/null 2>&1; then
+    warn "cc-mod needs jq (claude config mods unchecked)"
+  elif "$SUITCASE/bin/cc-mod" doctor >/dev/null 2>&1; then
+    green "claude mods healthy"
+  else
+    warn "claude mods need attention (run: cc-mod doctor)"
+  fi
+fi
+
 # --- expected tools (missing = warning, not failure) ---
 for tool in starship atuin vim tmux htop; do
   if command -v "$tool" >/dev/null 2>&1; then

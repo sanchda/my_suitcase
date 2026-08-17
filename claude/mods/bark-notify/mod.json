@@ -1,0 +1,42 @@
+{
+  "description": "Bark to Discord when Claude finishes, wants input, or a session ends",
+  "default": true,
+  "requires": {
+    "commands": ["jq", "curl"],
+    "files": ["{{LOCAL_BIN}}/bark", "{{SUITCASE}}/tools/bark/hooks/claude-bark.sh"]
+  },
+  "settings": {
+    "hooks": {
+      "Notification": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "{{SUITCASE}}/tools/bark/hooks/claude-bark.sh"
+            }
+          ]
+        }
+      ],
+      "Stop": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "{{SUITCASE}}/tools/bark/hooks/claude-bark.sh"
+            }
+          ]
+        }
+      ],
+      "SessionEnd": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "{{SUITCASE}}/tools/bark/hooks/claude-bark.sh"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

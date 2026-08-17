@@ -71,10 +71,41 @@ Behavior worth knowing
 - 429 and 5xx are retried up to 3 attempts, honoring Discord's `retry_after`
   (capped at 30s). A 4xx is not retried.
 - Content is clamped to Discord's 2000 characters, marked ` [truncated]`.
+- Mentions never resolve (`allowed_mentions.parse = []`), so a log line
+  containing `@everyone` pings nobody.
 - The POST shells out to `curl --config -`, so the webhook token arrives on stdin
   and never appears in `ps`. No HTTP crate, no TLS stack to keep patched.
 - `-` as the entire message reads stdin; empty stdin is an error, not an empty
   post. Use `--` before a message starting with a dash.
+
+Claude Code notifications
+-------------------------
+
+```sh
+cc-mod enable bark-notify      # off again: cc-mod disable bark-notify
+```
+
+`bark-notify` is a cc-mod (`claude/mods/bark-notify`, enabled by default during
+`personalize`). It adds three hooks to `~/.claude/settings.json`, all pointing at
+`tools/bark/hooks/claude-bark.sh`:
+
+| Event | Bark |
+|---|---|
+| `Notification` | `needs you: <what Claude is waiting for>` |
+| `Stop` | `done: <last thing Claude said, 240 chars>` |
+| `SessionEnd` | `session ended (<reason>)` |
+
+Ids look like `claude/<dir>/<session prefix>`, so parallel sessions stay apart.
+The hook needs `jq`, always exits 0, and posts with a 5s timeout.
+
+Per-machine knobs: `BARK_CC_EVENTS` (default `Notification,Stop,SessionEnd`;
+`SubagentStop` is also understood), `BARK_CC_TO` (target name), `BARK_BIN`.
+`cc-mod disable bark-notify` turns it off and keeps it off (see
+`claude/mods/README.md`).
+
+A hook cannot show you its own errors, so failed posts (rotated webhook, no
+network) land in `~/.cache/bark/claude-hook.log` (`BARK_CC_LOG`). If the
+notifications go quiet, look there first.
 
 Test
 ----
