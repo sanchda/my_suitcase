@@ -417,6 +417,7 @@ fn commands() -> Vec<CreateCommand> {
         CreateCommand::new("msg")
             .description("Steer the loop through its persistent claude session")
             .add_option(req_str("message", "what to tell the session"))
+            .add_option(opt_str("model", "repin the session's model (sticks until changed)"))
             .add_option(opt_bool("new", "start a fresh session, archiving the old one")),
     ]
 }
@@ -497,7 +498,7 @@ impl EventHandler for Handler {
             if command.defer(&ctx.http).await.is_err() {
                 return;
             }
-            match Ralph::new(lc).spawn_msg(&text, get_bool("new")) {
+            match Ralph::new(lc).spawn_msg(&text, get_bool("new"), get("model").as_deref()) {
                 Ok(child) => msg::drive(&ctx, &command, child).await,
                 Err(e) => {
                     let edit = EditInteractionResponse::new()

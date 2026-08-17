@@ -10,16 +10,20 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 const USAGE: &str = "\
-Usage: ralph msg [--new] [--stream-json] [--] <text>
+Usage: ralph msg [--new] [--model <m>] [--stream-json] [--] <text>
        ralph msg --new            Reset the session without sending anything
 
 Send <text> to this repo's steering session, resuming it (or creating it on
 first use). Only one msg runs at a time; a second is refused, not queued.
 
   --new            Archive the current session id and start a fresh one
+  --model <m>      Repin the session's model; sticks until changed or --new
   --stream-json    Pass claude's raw NDJSON events through on stdout
   --dir <path>     Runtime dir (default .ralph)
   --config <file>  Config file (default .ralph/ralph.toml)
+
+--model takes anything claude takes (an alias like `opus`, or a full name like
+`claude-fable-5`); it is not checked against the loop's escalation ladder.
 ";
 
 /// The session's whole job is to drive the loop through the CLI, so it needs no
@@ -47,8 +51,25 @@ pub fn session_path(dir: &Path) -> PathBuf {
     dir.join("msg-session")
 }
 
+/// The session's model sticks until changed: a conversation has one model in the
+/// operator's head, and silently reverting mid-thread is the worse surprise.
+fn model_path(dir: &Path) -> PathBuf {
+    dir.join("msg-model")
+}
+
 fn pidfile(dir: &Path) -> PathBuf {
     dir.join("msg.pid")
+}
+
+/// The session's pinned model, if one was set. Not validated against the
+/// escalation ladder — claude accepts aliases and full names alike, and this
+/// never reaches the loop's own tier machinery.
+fn read_model(dir: &Path) -> Option<String> {
+    let m = std::fs::read_to_string(model_path(dir))
+        .ok()?
+        .trim()
+        .to_string();
+    (!m.is_empty()).then_some(m)
 }
 
 /// `--session-id`/`--resume` demand a real UUID, so a truncated or hand-mangled
@@ -95,6 +116,8 @@ pub fn archive_session(dir: &Path) -> Option<String> {
         let _ = std::fs::rename(&path, &dest);
     }
     let _ = std::fs::remove_file(&path);
+    // The pinned model belongs to the retired conversation, not the next one.
+    let _ = std::fs::remove_file(model_path(dir));
     id
 }
 
@@ -109,8 +132,8 @@ fn guard(dir: &Path) -> Result<pidguard::Guard, String> {
 
 /// The exact `claude` argv. `resume` distinguishes continuing a session from
 /// establishing the id we just generated.
-fn claude_args(id: &str, resume: bool, preamble: &str) -> Vec<String> {
-    vec![
+fn claude_args(id: &str, resume: bool, preamble: &str, model: Option<&str>) -> Vec<String> {
+    let mut args: Vec<String> = vec![
         "-p".into(),
         "--output-format".into(),
         "stream-json".into(),
@@ -120,13 +143,15 @@ fn claude_args(id: &str, resume: bool, preamble: &str) -> Vec<String> {
         "--dangerously-skip-permissions".into(),
         "--append-system-prompt".into(),
         preamble.into(),
-        if resume {
-            "--resume".into()
-        } else {
-            "--session-id".into()
-        },
-        id.into(),
-    ]
+    ];
+    // Session-scoped, so it applies to a resumed conversation from here on.
+    if let Some(m) = model {
+        args.push("--model".into());
+        args.push(m.into());
+    }
+    args.push(if resume { "--resume" } else { "--session-id" }.into());
+    args.push(id.into());
+    args
 }
 
 /// The final text of a `{"type":"result"}` envelope, if this line is one.
@@ -146,9 +171,9 @@ fn result_text(line: &str) -> Option<String> {
 /// Run one message. In `--stream-json` mode claude's stdout is inherited, so the
 /// NDJSON reaches the caller line-by-line unbuffered and unreformatted (ralphd
 /// folds it); otherwise we read it and print only the final text.
-fn send(id: &str, resume: bool, text: &str, stream_json: bool) -> R<i32> {
+fn send(id: &str, resume: bool, text: &str, stream_json: bool, model: Option<&str>) -> R<i32> {
     let mut cmd = Command::new("claude");
-    cmd.args(claude_args(id, resume, PREAMBLE))
+    cmd.args(claude_args(id, resume, PREAMBLE, model))
         .stdin(Stdio::piped())
         .stdout(if stream_json {
             Stdio::inherit()
@@ -190,6 +215,8 @@ struct Args {
     stream_json: bool,
     help: bool,
     dir: Option<PathBuf>,
+    /// Repins the session's model; absent leaves the stored pin alone.
+    model: Option<String>,
     /// Forwarded to config resolution (`--config <file>`).
     passthrough: Vec<String>,
     text: String,
@@ -213,6 +240,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--stream-json" => args.stream_json = true,
             "-h" | "--help" => args.help = true,
             "--dir" => args.dir = Some(PathBuf::from(next()?)),
+            "--model" => args.model = Some(next()?),
             "--config" => {
                 args.passthrough.push(a.clone());
                 args.passthrough.push(next()?);
@@ -267,11 +295,30 @@ pub fn run(argv: &[String]) -> R<i32> {
         None => new_uuid()?,
     };
 
-    let code = send(&id, existing.is_some(), &args.text, args.stream_json)?;
+    // An explicit --model repins; otherwise the stored pin carries the thread.
+    let model = args.model.clone().or_else(|| read_model(&cfg.dir));
+    if let Some(m) = &model {
+        eprintln!("ralph: session {id} on {m}");
+    }
+
+    let code = send(
+        &id,
+        existing.is_some(),
+        &args.text,
+        args.stream_json,
+        model.as_deref(),
+    )?;
     // Record a new id only once claude has established it, or every later
-    // --resume would fail against a session that never existed.
-    if existing.is_none() && code == 0 {
-        std::fs::write(session_path(&cfg.dir), format!("{id}\n"))?;
+    // --resume would fail against a session that never existed. A repin is
+    // persisted on the same terms, so a rejected model name can't brick the
+    // session the way a phantom id would.
+    if code == 0 {
+        if existing.is_none() {
+            std::fs::write(session_path(&cfg.dir), format!("{id}\n"))?;
+        }
+        if let Some(m) = args.model {
+            std::fs::write(model_path(&cfg.dir), format!("{m}\n"))?;
+        }
     }
     Ok(code)
 }
@@ -328,24 +375,23 @@ mod tests {
         assert!(parse(&argv(&["hi", "-h"])).unwrap().help);
     }
 
+    const ID: &str = "11111111-2222-3333-4444-555555555555";
+
     #[test]
     fn first_call_creates_the_session_later_calls_resume_it() {
-        let create = claude_args("11111111-2222-3333-4444-555555555555", false, "P");
+        let create = claude_args(ID, false, "P", None);
         assert!(create.contains(&"--session-id".to_string()));
         assert!(!create.contains(&"--resume".to_string()));
 
-        let resume = claude_args("11111111-2222-3333-4444-555555555555", true, "P");
+        let resume = claude_args(ID, true, "P", None);
         assert!(resume.contains(&"--resume".to_string()));
         assert!(!resume.contains(&"--session-id".to_string()));
-        assert_eq!(
-            resume.last().unwrap(),
-            "11111111-2222-3333-4444-555555555555"
-        );
+        assert_eq!(resume.last().unwrap(), ID);
     }
 
     #[test]
     fn argv_carries_the_stream_and_permission_flags() {
-        let a = claude_args("11111111-2222-3333-4444-555555555555", false, "PRE");
+        let a = claude_args(ID, false, "PRE", None);
         assert_eq!(a[0], "-p");
         assert!(a
             .windows(2)
@@ -353,6 +399,41 @@ mod tests {
         assert!(a.contains(&"--verbose".to_string()));
         assert!(a.contains(&"--dangerously-skip-permissions".to_string()));
         assert!(a.windows(2).any(|w| w == ["--append-system-prompt", "PRE"]));
+        assert!(!a.contains(&"--model".to_string()));
+    }
+
+    #[test]
+    fn a_pinned_model_reaches_claude_without_displacing_the_session_id() {
+        let a = claude_args(ID, true, "P", Some("opus"));
+        assert!(a.windows(2).any(|w| w == ["--model", "opus"]));
+        // The id must stay the trailing value of --resume, not of --model.
+        assert!(a.windows(2).any(|w| w == ["--resume", ID]));
+        assert_eq!(a.last().unwrap(), ID);
+    }
+
+    #[test]
+    fn the_model_pin_is_read_back_and_retired_with_the_session() {
+        let dir = tmp();
+        assert_eq!(read_model(&dir), None);
+        std::fs::write(model_path(&dir), "opus\n").unwrap();
+        assert_eq!(read_model(&dir), Some("opus".into()));
+        // Whitespace-only is as good as absent.
+        std::fs::write(model_path(&dir), "  \n").unwrap();
+        assert_eq!(read_model(&dir), None);
+
+        std::fs::write(model_path(&dir), "opus\n").unwrap();
+        std::fs::write(session_path(&dir), format!("{ID}\n")).unwrap();
+        archive_session(&dir);
+        assert_eq!(read_model(&dir), None, "pin belongs to the retired thread");
+    }
+
+    #[test]
+    fn model_parses_and_is_optional() {
+        let a = parse(&argv(&["--model", "opus", "hi"])).unwrap();
+        assert_eq!(a.model.as_deref(), Some("opus"));
+        assert_eq!(a.text, "hi");
+        assert_eq!(parse(&argv(&["hi"])).unwrap().model, None);
+        assert!(parse(&argv(&["--model"])).is_err());
     }
 
     #[test]

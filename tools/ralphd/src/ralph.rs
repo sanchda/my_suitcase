@@ -173,11 +173,20 @@ impl Ralph {
     /// (diagnostics also surface in the result envelope). The session can run for
     /// many minutes, so callers must defer the interaction and drive the stream
     /// (see `crate::msg`).
-    pub fn spawn_msg(&self, text: &str, new: bool) -> std::io::Result<tokio::process::Child> {
+    pub fn spawn_msg(
+        &self,
+        text: &str,
+        new: bool,
+        model: Option<&str>,
+    ) -> std::io::Result<tokio::process::Child> {
         let mut cmd = tokio::process::Command::new("ralph");
         cmd.arg("msg");
         if new {
             cmd.arg("--new");
+        }
+        // Sticky on ralph's side, so omitting it keeps whatever the thread is on.
+        if let Some(m) = model.map(str::trim).filter(|m| !m.is_empty()) {
+            cmd.arg("--model").arg(m);
         }
         // Raw NDJSON passthrough: msg.rs folds claude's own event stream, so the
         // human-readable default would leave it with nothing to parse.
