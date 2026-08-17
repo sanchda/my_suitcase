@@ -1,6 +1,17 @@
 
-# Return the repository root for the current directory.
+# Return the MAIN worktree's root, even when called from a linked worktree.
+# Not --show-toplevel: inside a linked worktree that returns the worktree, which
+# made this identical to _gwWorktreeRoot — so gwD cd'd into the worktree it was
+# about to remove, and config lookup keyed on the worktree's name instead of the
+# repo's. --git-common-dir points at the shared .git for both. Needs git 2.31 for
+# --path-format; fall back rather than emit "." into a cd.
 _gwRepoRoot() {
+    local common
+    common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+    if [ -n "$common" ]; then
+        dirname "$common"
+        return 0
+    fi
     git rev-parse --show-toplevel 2>/dev/null
 }
 
