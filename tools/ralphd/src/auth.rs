@@ -4,7 +4,6 @@
 
 use crate::config::BotConfig;
 
-/// True only when the user matches and the channel names a known loop.
 pub fn authorized(channel_id: u64, user_id: u64, cfg: &BotConfig) -> bool {
     user_id == cfg.user_id && cfg.loops.contains_key(&channel_id)
 }

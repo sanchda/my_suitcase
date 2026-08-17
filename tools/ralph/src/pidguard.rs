@@ -26,7 +26,6 @@ pub fn is_alive(pid: u32) -> bool {
     if pid == 0 || pid > i32::MAX as u32 {
         return false;
     }
-    // Signal 0: no-op delivery, but errors with ESRCH if the pid is gone.
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 

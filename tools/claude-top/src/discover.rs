@@ -1,6 +1,6 @@
 //! Discovering local Claude Code instances and their identity. Pure parsers are
 //! unit-tested here; the functions that actually shell out to `ps` live in
-//! `runtime` (Task 9 wires them in) and are intentionally thin.
+//! `runtime` and are intentionally thin.
 
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};

@@ -21,11 +21,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// Cadence of the `.ralph/START` trigger poll.
 const START_POLL: Duration = Duration::from_secs(3);
 
-/// Shared, thread-safe handle on the loops we spawned, keyed by channel id —
-/// shared between the command handlers and each loop's START watcher.
+/// The loops we spawned, keyed by channel id — shared by the command handlers
+/// and each loop's START watcher.
 pub type LoopChild = Arc<Mutex<HashMap<u64, Child>>>;
 
 pub struct Handler {
@@ -38,9 +37,8 @@ pub struct Handler {
     pub autostarted: AtomicBool,
 }
 
-/// Spawn the loop and adopt its child handle (into the shared `loop_child`).
-/// The caller is responsible for the "already running" check. Returns the new
-/// pid. `ralph` writes `loop.pid` itself, so ralphd must not.
+/// The caller is responsible for the "already running" check. `ralph` writes
+/// `loop.pid` itself, so ralphd must not.
 pub fn launch_and_record(
     lc: &LoopConfig,
     loop_child: &LoopChild,
@@ -165,10 +163,8 @@ enum StartDecision {
     Launch,
 }
 
-/// Reap a finished loop, then inspect the `START` marker: consume it if present
-/// and decide whether to launch. Returns the reaped exit status (if this poll
-/// reaped one) alongside the decision. Factored out of [`watch_start`] so the
-/// trigger logic is testable without a gateway or a real loop.
+/// Factored out of [`watch_start`] so the trigger logic is testable without a
+/// gateway or a real loop.
 fn poll_start(lc: &LoopConfig, loop_child: &LoopChild) -> (StartDecision, Option<ExitStatus>) {
     let reaped = reap_finished(lc, loop_child);
     let marker = lc.state_dir.join("START");
@@ -201,9 +197,7 @@ fn shell_reply(what: &str, out: std::io::Result<Output>) -> String {
 }
 
 impl Handler {
-    /// Opt-in auto-start: launch every loop configured for it on connect, unless
-    /// one is already running, announcing each outcome in its channel. Guarded by
-    /// `autostarted` so a reconnect can't spawn duplicates.
+    /// Opt-in auto-start on connect, skipping any loop already running.
     async fn autostart(&self, ctx: &Context) {
         if self.autostarted.swap(true, Ordering::SeqCst) {
             return; // a prior `ready` already handled it this process
@@ -278,9 +272,8 @@ impl Handler {
         }
     }
 
-    /// Turn a command name plus its option resolvers into the reply string, for
-    /// the loop that owns `channel_id`. `opt`/`flag` resolve options by name,
-    /// keeping the serenity plumbing in `interaction_create`.
+    /// `opt`/`flag` resolve options by name, keeping the serenity plumbing in
+    /// `interaction_create`.
     async fn dispatch(
         &self,
         channel_id: u64,
@@ -465,8 +458,7 @@ impl EventHandler for Handler {
         let channel_id = command.channel_id.get();
         let user_id = command.user.id.get();
 
-        // Auth gate: refuse anything outside the one user and a channel some
-        // loop claims, with an ephemeral notice, and take no further action.
+        // Refuse anything outside the one user and a channel some loop claims.
         if !auth::authorized(channel_id, user_id, &self.cfg) {
             let deny = CreateInteractionResponse::Message(
                 CreateInteractionResponseMessage::new()
@@ -484,9 +476,7 @@ impl EventHandler for Handler {
         let get_bool =
             |name: &str| -> bool { value(name).and_then(|o| o.value.as_bool()).unwrap_or(false) };
 
-        // `/msg` drives a claude session, which far exceeds Discord's 3s ack
-        // window: defer first, then stream the session, keeping one live status
-        // message current with token usage and finishing with the cost.
+        // A claude session far exceeds Discord's 3s ack window, so defer first.
         if command.data.name == "msg" {
             let text = get("message").unwrap_or_default();
             if text.trim().is_empty() {
@@ -612,7 +602,6 @@ mod tests {
             loop_pid::read(&lc.state_dir).is_some(),
             "ralph owns loop.pid — ralphd must not delete it"
         );
-        // Nothing left to reap.
         assert_eq!(reap_finished(&lc, &lchild), None);
     }
 

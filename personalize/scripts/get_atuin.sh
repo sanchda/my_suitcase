@@ -1,14 +1,12 @@
 #!/bin/bash
 set -e
 
-# Check if atuin is already installed
 if command -v atuin &> /dev/null; then
     echo "atuin is already installed!"
     atuin --version | head -n1
     exit 0
 fi
 
-# Variables
 ATUIN_VERSION="18.16.0"
 
 # Pick the cargo-dist target triple matching this host. Note: atuin upstream
@@ -35,7 +33,6 @@ ATUIN_ARCHIVE="atuin-${ATUIN_TARGET}.tar.gz"
 ATUIN_URL="https://github.com/atuinsh/atuin/releases/download/v${ATUIN_VERSION}/${ATUIN_ARCHIVE}"
 EXTRACT_DIR="atuin-${ATUIN_TARGET}"
 
-# Create temporary directory
 TMP_DIR=$(mktemp -d /tmp/atuin-install.XXXXXX)
 echo "Using temporary directory: $TMP_DIR"
 cd "$TMP_DIR"
@@ -53,7 +50,6 @@ sudo mkdir -p /usr/local/bin
 # Install binary (cargo-dist layout: binary at root of extracted dir)
 sudo cp "$EXTRACT_DIR/atuin" /usr/local/bin/
 
-# Clean up temporary directory
 cd
 if [[ "$TMP_DIR" == /tmp/atuin-install.* && -d "$TMP_DIR" ]]; then
     echo "Cleaning up temporary directory: $TMP_DIR"
@@ -62,7 +58,6 @@ else
     echo "Warning: Temporary directory not removed: $TMP_DIR"
 fi
 
-# Check installation
 which atuin
 atuin --version | head -n1
 

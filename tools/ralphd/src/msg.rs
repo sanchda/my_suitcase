@@ -1,15 +1,12 @@
 //! Driving the streaming `/msg` session.
 //!
 //! `ralph msg` passes through the `claude -p --output-format stream-json` it
-//! runs, which emits one NDJSON event per line. We
-//! fold those into live token accounting (a technique inspired by `cctop`, which
-//! surfaces a running session's token usage) and edit a *single* Discord status
-//! message every few minutes with elapsed time and tokens-so-far. When the
-//! session outlives Discord's 15-minute interaction-token window we delete the
-//! deferred reply and continue in a plain channel message (which never expires).
-//! On completion the live message becomes the result plus the session's final
-//! token count and cost, taken from the authoritative `{"type":"result"}`
-//! envelope.
+//! runs, one NDJSON event per line. We fold those into live token accounting (a
+//! technique inspired by `cctop`) and edit a *single* Discord status message with
+//! elapsed time and tokens-so-far. When the session outlives Discord's 15-minute
+//! interaction-token window we delete the deferred reply and continue in a plain
+//! channel message, which never expires. On completion the live message becomes
+//! the result plus the authoritative totals from the `{"type":"result"}` envelope.
 
 use crate::chunk::{cap_chunks, chunk_message, DISCORD_LIMIT, MAX_CHUNKS};
 use serenity::all::{
@@ -20,7 +17,6 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Child;
 
-/// Cadence of the progress edits.
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(60);
 /// First progress edit lands early so a slow session shows signs of life.
 const FIRST_PROGRESS: Duration = Duration::from_secs(20);

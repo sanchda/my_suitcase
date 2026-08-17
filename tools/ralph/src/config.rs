@@ -197,7 +197,7 @@ pub fn parse_duration(s: &str) -> Result<u64, String> {
     Ok(n * mult)
 }
 
-/// Parse a boolean flag value. Accepts `true`/`false`/`1`/`0` case-insensitively.
+/// Parse a boolean flag value. Accepts true/false, 1/0 and yes/no, any case.
 pub fn parse_bool(s: &str) -> Result<bool, String> {
     match s.trim().to_ascii_lowercase().as_str() {
         "true" | "1" | "yes" => Ok(true),

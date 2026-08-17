@@ -54,7 +54,7 @@ impl IterStatus {
         }
     }
 
-    /// Render the multi-line status written to `.ralph/status`.
+    /// Render the multi-line status written to `.ralph/live`.
     pub fn render(&self) -> String {
         let elapsed = now_secs().saturating_sub(self.start_secs);
         let mut s = format!(

@@ -167,7 +167,6 @@ pub fn advanced_since(dir: &Path, before: &Option<String>) -> bool {
     }
 }
 
-/// `git status --porcelain --untracked-files=no`, sorted lines.
 fn tracked_dirt(dir: &Path) -> Vec<String> {
     let out = match git(dir, &["status", "--porcelain", "--untracked-files=no"]) {
         Some(o) => o,

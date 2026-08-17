@@ -22,7 +22,6 @@ pub struct Output {
     pub stderr: String,
 }
 
-/// Build an owned argv from string-ish parts.
 fn argv<const N: usize>(parts: [&str; N]) -> Vec<String> {
     parts.iter().map(|s| s.to_string()).collect()
 }
@@ -168,9 +167,8 @@ impl Ralph {
     }
 
     /// Spawn `ralph msg [--new] <text>` — a persistent steering session whose
-    /// `claude` NDJSON stream passes through on stdout, so the caller can fold
-    /// live token usage and the final cost from it. stderr is discarded
-    /// (diagnostics also surface in the result envelope). The session can run for
+    /// `claude` NDJSON stream passes through on stdout. stderr is discarded;
+    /// diagnostics also surface in the result envelope. The session can run for
     /// many minutes, so callers must defer the interaction and drive the stream
     /// (see `crate::msg`).
     pub fn spawn_msg(

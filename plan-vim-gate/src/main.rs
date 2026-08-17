@@ -38,9 +38,8 @@ fn run() -> R<()> {
         return Err("no plan content in hook event (.tool_input.plan)".into());
     }
 
-    // Write the plan (with a directive header) to a scratch file and open it.
-    // The NamedTempFile is kept alive until the end of this scope so it isn't
-    // deleted out from under the editor.
+    // The NamedTempFile must stay alive for this whole scope, or it is deleted
+    // out from under the editor.
     let scratch = buffer::write_scratch(&event.plan)?;
     editor::open_and_wait(scratch.path())?;
 

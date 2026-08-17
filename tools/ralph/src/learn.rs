@@ -310,7 +310,6 @@ pub fn run(args: &[String]) -> R<i32> {
         return Ok(0);
     }
 
-    // Mine.
     let run_log = read_tail(&cfg.dir.join("run.log"), RUN_LOG_TAIL_BYTES);
     if run_log.trim().is_empty() {
         println!(

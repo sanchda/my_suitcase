@@ -8,10 +8,14 @@
 //!
 //! The parent only ever waits, so it stays single-threaded and every `fork`
 //! happens from a single-threaded process. On the child's *ungraceful* death
-//! (killed by a signal — SIGKILL/OOM, SIGSEGV) the parent reports it and, when
-//! `--restart` is set and no STOP is pending, relaunches. Graceful exits (and a
-//! Rust panic, which unwinds to exit 101) are `WIFEXITED` and terminal — their
-//! code is propagated unchanged.
+//! (killed by a signal — SIGKILL/OOM, SIGSEGV) the parent reports it and may
+//! relaunch. Graceful exits (and a Rust panic, which unwinds to exit 101) are
+//! `WIFEXITED` and terminal — their code is propagated unchanged.
+//!
+//! Four things independently veto a restart, so `--restart` alone does not mean
+//! "always come back": a pending STOP, a deliberate signal (SIGINT/TERM/HUP/QUIT
+//! — see `is_terminating_signal`), too many rapid failures (`RestartGuard`), and
+//! `--restart` being unset at all. Each is enforced at its own definition.
 
 use crate::config::Config;
 use crate::notify;
@@ -219,7 +223,6 @@ pub fn run(cfg: &Config) -> R<i32> {
                 CHILD_PID.store(0, Ordering::SeqCst);
                 let lived = start.elapsed();
                 match interpret(status) {
-                    // Graceful exit (or panic): propagate, terminal.
                     Wait::Exited(code) => return Ok(code),
                     Wait::Signalled(sig) => {
                         let state = State::open(&cfg.dir).ok();

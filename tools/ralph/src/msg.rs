@@ -46,7 +46,6 @@ is what keeps this session cheap, and it is usually read from a phone.
   current task (`ralph stop --now` signals the running turn as well).
 ";
 
-/// Where the current session id is recorded.
 pub fn session_path(dir: &Path) -> PathBuf {
     dir.join("msg-session")
 }

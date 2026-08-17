@@ -130,10 +130,8 @@ impl Thrash {
     }
 }
 
-/// Format the end-of-iteration webhook report: the progress head (`iter N/M`, or
-/// `iter N (~P pending)` when unbounded), cost, tokens, turn count, and the
-/// api-vs-tools wall-clock split, plus the one-line turn summary. Perf fields come
-/// from the result envelope and are omitted when it's absent.
+/// Format the end-of-iteration webhook report. The perf fields come from the
+/// result envelope and are omitted when it's absent.
 fn iteration_report(
     iter: u64,
     max_iterations: u64,
@@ -291,7 +289,6 @@ pub fn run(cfg: &Config) -> R<i32> {
     );
 
     loop {
-        // --- boundary checks ---
         if state.stop_requested() {
             state.log("STOP file present → halting");
             notify::notify(
@@ -424,7 +421,6 @@ pub fn run(cfg: &Config) -> R<i32> {
         }
         let ran = run_one(cfg, &state, next, &model, &iteration_prompt)?;
 
-        // --- interpret outcome ---
         let (class, cost, text) = match &ran.envelope {
             Some(env) => {
                 state.write_last_result(&env.raw);

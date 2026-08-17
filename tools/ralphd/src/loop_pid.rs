@@ -8,8 +8,8 @@ fn pidfile(state_dir: &Path) -> PathBuf {
     state_dir.join("loop.pid")
 }
 
-/// Is a process with this pid alive? `kill(pid, 0)` performs the permission/
-/// existence check without sending a signal.
+/// Is a process with this pid alive? Signal 0 is not delivered, but the call
+/// still errors with ESRCH when the pid is gone.
 pub fn is_alive(pid: u32) -> bool {
     // Only probe a real, single process: 0 targets our own process group and
     // values that don't fit pid_t would wrap negative (a group target), so a
@@ -17,7 +17,6 @@ pub fn is_alive(pid: u32) -> bool {
     if pid == 0 || pid > i32::MAX as u32 {
         return false;
     }
-    // Signal 0: no-op delivery, but errors with ESRCH if the pid is gone.
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
@@ -28,15 +27,13 @@ pub fn write(state_dir: &Path, pid: u32) -> std::io::Result<()> {
     std::fs::write(pidfile(state_dir), format!("{pid}\n"))
 }
 
-/// Read the recorded pid, if any and parseable.
 pub fn read(state_dir: &Path) -> Option<u32> {
     std::fs::read_to_string(pidfile(state_dir))
         .ok()
         .and_then(|s| s.trim().parse().ok())
 }
 
-/// The pid of a live loop, if one is recorded and still alive. A recorded but
-/// dead pid is stale — it is removed and `None` returned.
+/// The pid of a live loop; a recorded-but-dead pid is stale, so it is removed.
 pub fn running(state_dir: &Path) -> Option<u32> {
     match read(state_dir) {
         Some(pid) if is_alive(pid) => Some(pid),
@@ -81,10 +78,8 @@ mod tests {
     #[test]
     fn running_returns_live_pid_and_clears_stale() {
         let dir = tmp();
-        // A live pid (our own) is reported as running.
         write(&dir, std::process::id()).unwrap();
         assert_eq!(running(&dir), Some(std::process::id()));
-        // A dead pid is treated as stale and removed.
         write(&dir, 4_000_000_000).unwrap();
         assert_eq!(running(&dir), None);
         assert_eq!(read(&dir), None);

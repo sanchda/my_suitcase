@@ -13,9 +13,7 @@ impl Price {
     }
 }
 
-/// USD per 1M tokens, matched on lowercase family substrings so version
-/// suffixes still resolve. Rates as published 2026-07; an unknown model
-/// degrades to `None` rather than a wrong number.
+/// Rates as published 2026-07.
 ///
 /// Ordering matters: legacy Opus billed at 3x the current Opus rate, so those
 /// ids must be matched before the generic `opus` arm or old transcripts get

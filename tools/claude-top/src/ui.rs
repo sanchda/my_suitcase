@@ -1,5 +1,4 @@
-//! ratatui rendering. Pure formatting helpers are unit-tested; `render` is
-//! exercised by the smoke test in Task 11.
+//! ratatui rendering. Pure formatting helpers are unit-tested; `render` is not.
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Row, Table};
@@ -43,7 +42,6 @@ pub fn render(f: &mut Frame, app: &crate::AppState) {
     ]);
     f.render_widget(header, chunks[0]);
 
-    // Instances
     let mut rows: Vec<Row> = Vec::new();
     for i in &app.instances {
         let wt = i.worktree.as_ref().map(|w| format!(" (wt:{w})")).unwrap_or_default();
@@ -63,7 +61,6 @@ pub fn render(f: &mut Frame, app: &crate::AppState) {
         .block(Block::default().borders(Borders::ALL).title("Instances"));
     f.render_widget(instances, chunks[1]);
 
-    // Usage
     let mut urows: Vec<Row> = Vec::new();
     for m in &app.by_model {
         urows.push(Row::new(vec![

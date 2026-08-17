@@ -11,7 +11,7 @@ use crate::R;
 
 /// The skeleton a bootstrapped backlog starts from. `add` appends the first
 /// task to this when the backlog file is absent — completion archives the file
-/// away, and the next arc must be startable from `/backlog-add` alone.
+/// away, and the next arc must be startable from `ralph add` alone.
 pub fn empty_backlog() -> String {
     format!("{SCHEMA_MARKER}\n# Backlog\n")
 }
@@ -377,7 +377,7 @@ mod tests {
     #[test]
     fn add_onto_empty_backlog_bootstraps_a_valid_arc() {
         // The exact new-arc path: completion archived BACKLOG.md away, and the
-        // first /backlog-add must produce a valid, routable backlog from nothing.
+        // first `ralph add` must produce a valid, routable backlog from nothing.
         let (new_text, id) = apply_add_top(
             &empty_backlog(),
             "First of new arc",

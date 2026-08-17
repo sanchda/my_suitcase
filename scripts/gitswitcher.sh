@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: ./git-switch-remote.sh [personal|work]
+# Usage: ./gitswitcher.sh [personal|work]
 
 if [ $# -ne 1 ]; then
   echo "Usage: $0 [personal|work]"
@@ -13,7 +13,6 @@ if [ "$MODE" != "personal" ] && [ "$MODE" != "work" ]; then
   exit 1
 fi
 
-# Get current remote URL and check
 CURRENT_URL=$(git config --get remote.origin.url)
 if [ -z "$CURRENT_URL" ]; then
   echo "Error: No origin remote found"
@@ -27,7 +26,6 @@ else
   REPO_PATH=$(echo $CURRENT_URL | sed 's/https:\/\/github.com\/\(.*\)/\1/')
 fi
 
-# Update
 NEW_URL="git@github.com-$MODE:$REPO_PATH"
 git remote set-url origin "$NEW_URL"
 

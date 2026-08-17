@@ -5,7 +5,7 @@
 
 /// Discord's message-content cap.
 pub const DISCORD_LIMIT: usize = 2000;
-/// Most messages one `/btw` result may produce; the rest is dropped with a note.
+/// Most messages one `/msg` result may produce; the rest is dropped with a note.
 pub const MAX_CHUNKS: usize = 4;
 
 /// Split `text` into chunks of at most `limit` chars, breaking only at line
@@ -37,7 +37,6 @@ pub fn chunk_message(text: &str, limit: usize) -> Vec<String> {
         if !current.is_empty() && current.chars().count() + needed + reserve > limit {
             flush(&mut current, &mut chunks, &fence);
         }
-        // A single line longer than the limit: hard-split by chars.
         if line.chars().count() + reserve > limit {
             let mut rest: Vec<char> = line.chars().collect();
             while rest.len() + reserve > limit {
@@ -138,7 +137,6 @@ mod tests {
         assert_well_formed(&chunks, 200);
         // Continuation chunks reopen with the language tag.
         assert!(chunks[1].starts_with("```rust\n"), "{:?}", &chunks[1][..20]);
-        // The code lines all survive.
         let rejoined = chunks.join("\n");
         assert!(rejoined.contains("let x59 = 59;"));
         assert!(rejoined.contains("done"));
@@ -160,7 +158,6 @@ mod tests {
         let capped = cap_chunks(chunks, 4);
         assert_eq!(capped.len(), 4);
         assert!(capped[3].contains("3 more message(s) omitted"));
-        // Under the cap: untouched.
         let ok = cap_chunks(vec!["a".into()], 4);
         assert_eq!(ok, vec!["a"]);
     }

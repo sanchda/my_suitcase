@@ -2,8 +2,7 @@
 
 use serde_json::Value;
 
-/// Format a status JSON document plus a run-state line into a Discord message.
-/// `running` is ralphd's own pid-liveness verdict (ralph does not know it).
+/// `running` is ralphd's own pid-liveness verdict — ralph does not know it.
 pub fn status_message(json: &str, running: bool) -> String {
     let v: Value = match serde_json::from_str(json) {
         Ok(v) => v,

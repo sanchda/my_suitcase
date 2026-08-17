@@ -53,9 +53,7 @@ fn build_state(rt: &runtime::Runtime, window: Window) -> AppState {
     let running_set: HashSet<String> = running.iter().cloned().collect();
     let snap = rt.usage_snapshot(window, &running_set);
 
-    // The Instances panel's model/tok columns are populated from the usage
-    // snapshot's by_instance list (already scoped to running sessions),
-    // keyed by session id.
+    // by_instance is already scoped to running sessions; join it on session id.
     let by_sid: HashMap<&str, &InstanceUsage> = snap.by_instance.iter().map(|u| (u.session_id.as_str(), u)).collect();
     for row in instances.iter_mut() {
         if let Some(sid) = row.session_id.as_deref() {
@@ -99,11 +97,8 @@ fn main() -> Result<()> {
     run(&mut terminal)
 }
 
-/// RAII guard that unconditionally (best-effort) restores the terminal to
-/// its normal state on drop, regardless of whether that happens via a
-/// normal return, an early `?` propagation, or a panic unwind. Individual
-/// restore steps ignore their own errors so one failing step never
-/// prevents the rest from running.
+/// Restores the terminal on drop — normal return, early `?`, or panic unwind.
+/// Each step ignores its own error so one failure never skips the rest.
 struct TerminalGuard;
 
 impl Drop for TerminalGuard {

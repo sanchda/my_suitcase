@@ -246,11 +246,9 @@ gwA() {
         return 1
     }
 
-    # Check if remote branch exists
     if git show-ref --verify --quiet "refs/remotes/$remote/$branch_name"; then
         echo "Remote branch $remote/$branch_name exists, checking out existing branch"
         if git show-ref --verify --quiet "refs/heads/$branch_name"; then
-            # Local branch already exists, just create worktree from it
             git worktree add "$worktree_path" "$branch_name"
         else
             git worktree add --track -b "$branch_name" "$worktree_path" "$remote/$branch_name"
@@ -274,7 +272,6 @@ gwA() {
         return 1
     fi
 
-    # Change to the newly created worktree
     cd "$worktree_path"
 }
 
@@ -371,7 +368,6 @@ gwD() {
 
     echo "gwD: Analyzing current directory: $current_dir"
 
-    # Check if we're in a git worktree (not the main repo)
     if ! git rev-parse --is-inside-work-tree &>/dev/null; then
         echo "Error: Not in a git repository"
         return 1
@@ -395,7 +391,6 @@ gwD() {
     local branch_name=$(git branch --show-current)
     echo "gwD: Current branch: $branch_name"
 
-    # Check for uncommitted changes
     if ! git diff --quiet || ! git diff --cached --quiet; then
         echo "gwD: WARNING - You have uncommitted changes in this worktree:"
         git status --porcelain
@@ -422,7 +417,6 @@ gwD() {
         fi
     else
         echo "gwD: Failed to remove worktree: $current_dir"
-        # Move back to original directory if removal failed
         cd "$current_dir"
         return 1
     fi

@@ -82,8 +82,7 @@ pub fn synthesize_with(
     }
 }
 
-/// Real spawn: one-shot `claude -p --model <synth_model>`, prompt on stdin, plain
-/// text stdout. See [`run_claude_oneshot`] for the mechanics.
+/// The real `run` for [`synthesize_with`], at the configured synth model.
 pub fn run_claude(cfg: &Config, prompt: &str) -> Option<String> {
     run_claude_oneshot(&cfg.synth_model, SYNTH_TIMEOUT_SECS, prompt)
 }

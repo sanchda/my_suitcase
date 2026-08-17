@@ -1,6 +1,6 @@
 //! Reading and writing the gitignored `.ralph/` runtime directory: the
-//! iteration counter, the agent's `MODEL`/`STATUS` hand-offs, the live status
-//! file, the raw per-iteration logs, and `run.log`.
+//! iteration counter, the agent's `HANDOFF.json`/`MODEL`/`STATUS` hand-offs, the
+//! live status file, the raw per-iteration logs, and `run.log`.
 
 use crate::R;
 use std::fs;
@@ -46,7 +46,6 @@ impl State {
             .unwrap_or(0)
     }
 
-    /// Persist the iteration counter.
     pub fn set_iteration(&self, n: u64) -> R<()> {
         fs::write(self.path("iteration"), format!("{n}\n"))?;
         Ok(())
@@ -159,7 +158,6 @@ impl State {
         let _ = fs::write(self.path("live"), text);
     }
 
-    /// Persist the last result envelope JSON.
     pub fn write_last_result(&self, json: &str) {
         let _ = fs::write(self.path("last-result.json"), json);
     }

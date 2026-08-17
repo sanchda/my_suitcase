@@ -36,19 +36,16 @@ sc_source "\$SUITCASE/shell/$1"
 RCEOF
 }
 
-# --- bashrc ---
 backup_if_needed "$cfg_bash"
 rc_body "bash.sh" > "$cfg_bash"
 echo "Installed $cfg_bash"
 
-# --- zshrc ---
 backup_if_needed "$cfg_zsh"
 rc_body "zsh.sh" > "$cfg_zsh"
 echo "Installed $cfg_zsh"
 
-# --- zshenv ---
-# Owned by the suitcase so it can't drift. Holds only truly-global env that
-# non-interactive zsh needs (core.sh early-returns on non-interactive shells).
+# .zshenv is owned by the suitcase so it can't drift. Holds only truly-global
+# env that non-interactive zsh needs (core.sh early-returns when not interactive).
 backup_if_needed "$cfg_zshenv"
 cat > "$cfg_zshenv" <<ZSHENVEOF
 $HEADER

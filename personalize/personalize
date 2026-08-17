@@ -6,7 +6,6 @@ if [ ! -d "$SCRIPTS_DIR" ]; then
     exit 1
 fi
 
-# Find all executable files in the directory and execute them
 echo "Executing personalization scripts from $SCRIPTS_DIR..."
 find "$SCRIPTS_DIR" -type f -executable | sort | while read -r script; do
     echo "Executing: $script"

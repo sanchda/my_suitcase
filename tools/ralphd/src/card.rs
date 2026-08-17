@@ -14,11 +14,10 @@ use serenity::all::{ChannelId, CreateAllowedMentions, CreateMessage, EditMessage
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Cadence of card refreshes while a loop is running.
 const CARD_POLL: Duration = Duration::from_secs(30);
 
-/// Compose the card body. `running_pid` is Some while the loop lives; the
-/// closing edit passes None. Pure for testing.
+/// `running_pid` is None only for the closing edit. Kept pure so it is testable
+/// without a gateway.
 pub fn card_text(
     name: &str,
     status_json: &str,

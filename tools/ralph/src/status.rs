@@ -58,8 +58,6 @@ fn build_report(doc: &Document, iteration: u64) -> Report {
     }
 }
 
-/// `ralph status [--json]`. Resolves driving-file paths via `load_base`, reads
-/// the backlog + iteration counter, and prints a snapshot.
 pub fn run(args: &[String]) -> R<i32> {
     let json = args.iter().any(|a| a == "--json");
     // Strip our own flag before config resolution so path lookup is unaffected.
