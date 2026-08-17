@@ -129,7 +129,8 @@ pub fn parse_proposals(raw: &str) -> Result<Vec<Learning>, String> {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
         };
-        if let (Some(slug), Some(title), Some(body)) = (field("slug"), field("title"), field("body"))
+        if let (Some(slug), Some(title), Some(body)) =
+            (field("slug"), field("title"), field("body"))
         {
             out.push(Learning {
                 slug: sanitize_slug(slug),
@@ -172,7 +173,10 @@ pub fn write_learning(dir: &Path, learning: &Learning) -> R<PathBuf> {
         n += 1;
         path = dir.join(format!("{}-{n}.md", learning.slug));
     }
-    fs::write(&path, format!("# {}\n\n{}\n", learning.title, learning.body))?;
+    fs::write(
+        &path,
+        format!("# {}\n\n{}\n", learning.title, learning.body),
+    )?;
     Ok(path)
 }
 
@@ -240,9 +244,7 @@ fn read_tail(path: &Path, max_bytes: usize) -> String {
 fn save_proposals(cfg: &Config, proposals: &[Learning]) -> R<()> {
     let value: Vec<Value> = proposals
         .iter()
-        .map(|l| {
-            serde_json::json!({"slug": l.slug, "title": l.title, "body": l.body})
-        })
+        .map(|l| serde_json::json!({"slug": l.slug, "title": l.title, "body": l.body}))
         .collect();
     fs::write(
         proposals_path(cfg),
@@ -253,8 +255,12 @@ fn save_proposals(cfg: &Config, proposals: &[Learning]) -> R<()> {
 
 fn load_proposals(cfg: &Config) -> R<Vec<Learning>> {
     let path = proposals_path(cfg);
-    let raw = fs::read_to_string(&path)
-        .map_err(|_| format!("no saved proposals ({}) — run `ralph learn` first", path.display()))?;
+    let raw = fs::read_to_string(&path).map_err(|_| {
+        format!(
+            "no saved proposals ({}) — run `ralph learn` first",
+            path.display()
+        )
+    })?;
     parse_proposals(&raw).map_err(|e| e.into())
 }
 
@@ -307,7 +313,10 @@ pub fn run(args: &[String]) -> R<i32> {
     // Mine.
     let run_log = read_tail(&cfg.dir.join("run.log"), RUN_LOG_TAIL_BYTES);
     if run_log.trim().is_empty() {
-        println!("nothing to mine: {} is empty or absent", cfg.dir.join("run.log").display());
+        println!(
+            "nothing to mine: {} is empty or absent",
+            cfg.dir.join("run.log").display()
+        );
         return Ok(1);
     }
     let carry = fs::read_to_string(&cfg.progress).unwrap_or_default();
@@ -331,7 +340,13 @@ pub fn run(args: &[String]) -> R<i32> {
     save_proposals(&cfg, &proposals)?;
     println!("proposed {} learning(s):\n", proposals.len());
     for (i, l) in proposals.iter().enumerate() {
-        println!("{}. {} ({}.md)\n   {}\n", i + 1, l.title, l.slug, l.body.replace('\n', "\n   "));
+        println!(
+            "{}. {} ({}.md)\n   {}\n",
+            i + 1,
+            l.title,
+            l.slug,
+            l.body.replace('\n', "\n   ")
+        );
     }
     println!(
         "apply with `ralph learn --apply` (all) or `ralph learn --apply 1,3` (subset); `ralph learn --discard` drops them"
@@ -365,7 +380,8 @@ mod tests {
 
     #[test]
     fn parse_accepts_plain_and_fenced_json_drops_invalid_entries() {
-        let plain = r#"[{"slug":"a-b","title":"T","body":"B"},{"title":"missing slug","body":"x"}]"#;
+        let plain =
+            r#"[{"slug":"a-b","title":"T","body":"B"},{"title":"missing slug","body":"x"}]"#;
         let got = parse_proposals(plain).unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].slug, "a-b");
@@ -421,7 +437,11 @@ mod tests {
         }
         let block = injection_block(&dir);
         assert!(block.contains("## Learnings"));
-        assert!(block.len() < INJECT_TOTAL_BYTES + 400, "was {}", block.len());
+        assert!(
+            block.len() < INJECT_TOTAL_BYTES + 400,
+            "was {}",
+            block.len()
+        );
         assert!(block.contains("omitted"), "over-budget files must be named");
     }
 

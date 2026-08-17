@@ -327,9 +327,7 @@ impl Document {
         self.tasks
             .iter()
             .enumerate()
-            .filter(|(index, task)| {
-                !task.checked && !has_unchecked_descendant(&self.tasks, *index)
-            })
+            .filter(|(index, task)| !task.checked && !has_unchecked_descendant(&self.tasks, *index))
             .count()
     }
 
@@ -877,9 +875,7 @@ mod tests {
         assert_eq!(closure.pending_leaf_count(), 1);
 
         // Fully complete → nothing pending.
-        let done = Document::parse(&format!(
-            "{SCHEMA_MARKER}\n- [x] **1 — Done.** Verify: y\n"
-        ));
+        let done = Document::parse(&format!("{SCHEMA_MARKER}\n- [x] **1 — Done.** Verify: y\n"));
         assert_eq!(done.pending_leaf_count(), 0);
     }
 

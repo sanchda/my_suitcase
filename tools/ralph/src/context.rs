@@ -357,7 +357,8 @@ mod tests {
 
     #[test]
     fn target_title_is_the_selected_leaf_title() {
-        let backlog = format!("{SCHEMA_MARKER}\n- [ ] **37.2 — Deep Field corridor.** Verify: test\n");
+        let backlog =
+            format!("{SCHEMA_MARKER}\n- [ ] **37.2 — Deep Field corridor.** Verify: test\n");
         let (backlog_path, progress_path) = tmp_files(&backlog, "");
         let ctx = load(&backlog_path, &progress_path);
         assert_eq!(ctx.target.as_deref(), Some("37.2"));
