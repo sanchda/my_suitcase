@@ -108,9 +108,17 @@ context the model will receive. The same reference lives in
   activity): `cat .ralph/live`
 - **Raw stream of the active iteration** (includes thinking): `tail -f .ralph/current.log`
 - **High-level progress:** `tail -f .ralph/run.log`
-- **Stop gracefully** after the current iteration: `touch .ralph/STOP`
+- **Stop gracefully** after the current iteration: `ralph stop` (or
+  `touch .ralph/STOP`). Honored at the boundary, so a long turn finishes first.
+- **Stop now**, without waiting for the turn: `ralph stop --now`. Writes STOP
+  *and* signals the loop, which tears down the `claude` session group — that
+  teardown is the point, since `claude` runs in its own session and a naive kill
+  would orphan it and its subprocesses. Suppresses `--restart` either way.
 - **Resume** later: just re-run `ralph` — the counter in `.ralph/iteration`
   persists.
+- **One loop per repo is enforced.** The loop holds `.ralph/loop.pid` and a
+  second `ralph` in the same repo exits 2 naming the live pid. A pidfile left by
+  a killed loop is reclaimed automatically on the next start.
 - **Launch detached** for overnight runs: `nohup setsid ralph … &`.
 
 Each completed result adds a `perf` line to `run.log` with total, API, and
@@ -121,18 +129,71 @@ local tools/tests visible without mining raw NDJSON.
 - `ralph status [--json]` — a snapshot of the backlog frontier: iteration,
   pending-leaf count, the current selected task, and the next few upcoming
   tasks. `--json` emits one machine-readable line.
-- `ralph backlog add --title "<t>" --verify "<cmd>"` — append a well-formed task
-  (auto-assigned top-level id). Rejected without touching the file if the result
-  would fail schema lint. When the backlog file is absent (a completed arc
-  archived it away), `add` bootstraps a fresh schema-valid file first — the
-  next arc starts from `backlog add` alone.
+- `ralph add [<id>] "<title>" [--verify "<cmd>"]` — queue a task. With no id it
+  takes the next top-level number; an explicit id places a child (`3.1.1` goes
+  under `3.1`, whose parent must exist), and `--under <parent>` picks the next
+  free `<parent>.N` for you. A duplicate id is an error, not a lint dump. Pipe
+  stdin instead of `--verify` to supply a full multi-line body. When the backlog
+  file is absent (a completed arc archived it away), `add` bootstraps a fresh
+  schema-valid file first, so the next arc starts from `add` alone.
+- `ralph done <id>` / `ralph uncheck <id>` — check off or reopen. Neither
+  cascades: a parent with pending children is a container that closes as its own
+  integration step, and checking one that still has unchecked descendants is
+  rejected by lint.
+- `ralph drop <id> [--recursive]` — remove a task. Refuses a subtree without
+  `--recursive`, refuses the selected leaf while a loop runs, and appends what it
+  removed to `.ralph/archive/dropped-<ts>.md` — nothing is ever deleted outright.
 - `ralph model <tier>` — write the one-shot `.ralph/MODEL` override consumed by
   the next iteration. The tier must be on the configured `escalation_ladder`;
   the value is trimmed and matched case-insensitively.
-- `ralph backlog edit --id <id> --title "<t>" --verify "<cmd>"` — replace a
-  task's title and verify in place (children preserved). Same lint-or-revert
-  safety. Both writes are atomic, so they never expose a half-written backlog to
-  a running loop.
+- `ralph backlog add|edit …` — the older flag-style forms, kept as aliases.
+
+Every one of these is schema-checked before it lands: the result is parsed in
+memory and, if it would fail lint, rejected without touching the file.
+
+### Mutations queue while a loop runs
+No CLI command writes `BACKLOG.md` in place. Each one writes a request into
+`.ralph/inbox/` under a unique filename, and the request is applied by whoever
+holds the drain guard:
+
+- **A loop is running** — it drains at the top of each iteration, before routing
+  picks the next leaf. Your command prints `queued (applies at the next iteration
+  boundary)` and the file does not change yet. **This is success, not failure.**
+- **No loop is running** — the command drains for itself immediately, so terminal
+  use stays instant and single-step.
+
+The point is that the backlog can never shift under a running agent, and that
+concurrent writers cannot lose each other's work. Before this, a `/add` landing
+between the agent's read and its write vanished with no error anywhere.
+
+A request that cannot be applied at drain time is moved to
+`.ralph/inbox/rejected/` with its full replayable JSON, and reported to `run.log`
+and the webhook. Enqueue-time linting catches nearly everything first.
+
+## `ralph msg` — a persistent steering session
+`ralph msg "<text>"` talks to a claude session attached to this repo's loop,
+resuming the same conversation each time, so a follow-up like "no, do it the
+other way" lands in context instead of re-establishing it.
+
+```bash
+ralph msg "why did 3.1 fail twice?"
+ralph msg --model opus "think about whether 4 is even the right shape"
+ralph msg --new                  # retire the session; next msg starts fresh
+```
+
+- **It steers; it does not do the work.** Its preamble points it at `ralph
+  status`, `.ralph/live`, `run.log` and the mutation commands above, and tells it
+  to queue work rather than implement it. That is what keeps a session cheap
+  enough to drive from a phone.
+- **`--model` is sticky** — it repins the thread until changed or `--new`, and
+  the active model prints to stderr on every call so a lingering `opus` pin is
+  never an invisible cost. It accepts anything `claude` accepts (`opus`, or a
+  full name like `claude-fable-5`) and is *not* checked against the escalation
+  ladder, which governs the loop rather than this session.
+- Only one `msg` runs at a time; a second is refused, not queued.
+- The session id lives in `.ralph/msg-session` and is recorded only after claude
+  exits cleanly, so a failed first call cannot leave an id that every later
+  resume fails against. Completing an arc retires it along with the backlog.
 
 ## ralphd — Discord control bridge
 `ralphd` is a separate, always-on foreground binary that lets one authorized

@@ -36,8 +36,26 @@ finish, the parent becomes the integration/closure step.
 
 The first `Next: <id> — <step>` in PROGRESS may refine only the selected ID; it
 cannot reorder the backlog. If a leaf is too large for one iteration, add ordered
-child stages with their own `Verify:` contracts and run `ralph lint`. Do not keep
-routing slices only in PROGRESS.
+child stages with their own `Verify:` contracts — `ralph add --under <id>
+"<title>" --verify "<cmd>"` — and run `ralph lint`. Do not keep routing slices
+only in PROGRESS.
+
+## Never edit this file by hand
+
+The running loop owns `BACKLOG.md`. Mutate it only through the CLI, which
+schema-checks the result and rejects anything that would not lint:
+
+```bash
+ralph add [<id>] "<title>" --verify "<cmd>"   # <id> places a child, e.g. 3.1.1
+ralph add --under <parent> "<title>"          # auto-numbers the next <parent>.N
+ralph done <id>                               # check off
+ralph uncheck <id>                            # reopen
+ralph drop <id> [--recursive]                 # remove (archived, not deleted)
+```
+
+While a loop is running these **queue** to `.ralph/inbox/` and apply at the next
+iteration boundary, so the backlog can never shift under a running agent. A hand
+edit has no such protection and is silently overwritten.
 
 ## Validate before running
 

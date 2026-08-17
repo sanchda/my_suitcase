@@ -57,12 +57,15 @@ This is the lesson that takes down machines.
   State: what changed, the exact proof you ran, and any constraint the next
   iteration must respect.
 - Do NOT write PROGRESS or a `Next:` line — the runner owns the handoff and
-  routing. Check off the finished task in the backlog in the same iteration.
+  routing. Close the finished task with `ralph done <id>` in the same iteration;
+  never edit `BACKLOG.md` by hand, since the running loop owns that file.
 
 ## Right-size each leaf
 - Work only the resolved leaf. If it won't fit one iteration, make a `plan` pass:
-  split it into ordered child stages, each with an ID and a real `Verify:`
-  contract, run `ralph lint`, and leave code for the first child.
+  split it into ordered child stages with `ralph add --under <id> "<title>"
+  --verify "<cmd>"`, run `ralph lint`, and leave code for the first child. A
+  stage queued mid-iteration applies at the next boundary, so it will not show
+  up in that `lint` — that is correct, not a failure.
 - A good leaf names a bounded outcome and a runnable verification. See
   `ralph schema`.
 
