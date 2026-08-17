@@ -1,0 +1,50 @@
+# ralphd config — copy to ~/.config/ralphd.toml, or point at it with
+# `--config <path>` / RALPHD_CONFIG. Unknown keys are a hard parse error, so
+# do not invent any; every key ralphd accepts appears below.
+#
+# The bot token is env-only and never belongs in this file:
+#   DISCORD_BOT_TOKEN=… ralphd --config ~/.config/ralphd.toml
+
+# Required (or RALPHD_GUILD_ID; the file wins). The one Discord server whose
+# slash commands ralphd registers. Registration REPLACES that guild's entire
+# command set, so run exactly one ralphd per guild.
+guild = 123456789012345678
+
+# Required (or RALPHD_USER_ID; the file wins). The only user whose commands and
+# button clicks are honored. Everyone else gets an ephemeral refusal.
+user = 234567890123456789
+
+# One [[loop]] per Discord channel; at least one is required. The channel a
+# command arrives in is what selects the loop, so two loops may not share one.
+[[loop]]
+# Required. Label on the pinned status card and in ralphd's own log lines.
+name = "number-grove"
+
+# Required. The channel this loop is driven from.
+channel = 345678901234567890
+
+# Required. Repo the loop runs in — `ralph` is spawned with this as its cwd.
+dir = "/home/me/dev/number_grove"
+
+# Optional (default: none). Forwarded verbatim to `ralph` on /start, so this is
+# the loop's launch profile. A `--dir` or `--config` here also tells ralphd
+# where to read that loop's state and ralph.toml from; relative paths resolve
+# against `dir`.
+args = ["--model", "sonnet"]
+
+# Optional (default: none). Set as DISCORD_WEBHOOK on this loop's child so
+# `ralph`'s own lifecycle posts land in this channel. With no webhook the child
+# runs with the variable cleared and those posts are simply off.
+webhook = "https://discord.com/api/webhooks/111111111111111111/aaaaaaaaaaaa"
+
+# Optional (default: false). Start this loop as soon as ralphd connects.
+autostart = false
+
+[[loop]]
+name = "suitcase"
+channel = 456789012345678901
+dir = "/home/me/suitcase"
+# `--dir` moves this loop's .ralph/ off the repo; ralphd reads the same one.
+args = ["--max-iterations", "40", "--dir", "/var/lib/ralph/suitcase"]
+webhook = "https://discord.com/api/webhooks/222222222222222222/bbbbbbbbbbbb"
+autostart = true

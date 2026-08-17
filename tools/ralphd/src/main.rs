@@ -11,49 +11,89 @@ mod ralph;
 
 use serenity::prelude::*;
 
-const USAGE: &str = "\
-ralphd — Discord control bridge for ralph loops, one channel per loop
+const USAGE: &str = r##"ralphd — Discord control bridge for ralph loops, one channel per loop
 
-Usage:
+One always-on process watching one Discord guild. Each configured channel drives
+one `ralph` loop in one repo, and the channel a command arrives in is what selects
+the loop — there is no --repo argument. Every command shells out to the `ralph`
+CLI and ralphd only *reads* `.ralph/`, so it is never load-bearing: anything you
+can do from Discord you can do from a terminal, and killing ralphd loses nothing.
+
+USAGE
   DISCORD_BOT_TOKEN=<token> ralphd [--config <path>]
-  DISCORD_BOT_TOKEN=<token> ralphd [options] -- [ralph args...]
+  DISCORD_BOT_TOKEN=<token> ralphd --guild <id> --channel <id> --user <id> \
+                                   [--working-dir <path>] [--autostart] \
+                                   [-- <ralph args…>]
 
-The first form drives many loops from a TOML file (default
-~/.config/ralphd.toml); the second is the single-loop shorthand.
+  The first form drives many loops from a TOML file; the second is the
+  single-loop shorthand, kept working unchanged.
 
-  guild = 123
-  user  = 456
+ENVIRONMENT
+  DISCORD_BOT_TOKEN   Required. Bot token — env only, never a flag.
+  DISCORD_WEBHOOK     Optional. Inherited by a lone loop that declares no
+                      `webhook` of its own; with two or more loops it is never
+                      inherited, since one ambient webhook would funnel every
+                      loop's lifecycle posts into a single channel.
 
-  [[loop]]
-  name      = \"number-grove\"
-  channel   = 111
-  dir       = \"/home/me/dev/number_grove\"
-  args      = [\"--model\", \"sonnet\"]
-  webhook   = \"https://discord.com/api/webhooks/…\"   # optional, per loop
-  autostart = false                                   # optional
+CONFIG FILE
+  Precedence, first match wins:
+    1. --config <path>, or RALPHD_CONFIG
+    2. the single-loop flag form, when --channel / RALPHD_CHANNEL_ID is set
+    3. ~/.config/ralphd.toml, if it exists
+  The flag form beating the default path is deliberate — a stale config file
+  cannot hijack a launch that works today.
 
-Options (each also settable via the environment):
-  --config <path>       Multi-loop TOML config           [env RALPHD_CONFIG]
-  --guild <id>          Discord server (guild) id        [env RALPHD_GUILD_ID]
-  --channel <id>        Channel commands are accepted in [env RALPHD_CHANNEL_ID]
-  --user <id>           The one authorized user id       [env RALPHD_USER_ID]
-  --working-dir <path>  Repo the loop runs in (default: .) [env RALPHD_WORKING_DIR]
-  --autostart           Start the loop on connect        [env RALPHD_AUTOSTART]
+    guild = 123        # the one guild
+    user  = 456        # the one authorized user
+
+    [[loop]]
+    name      = "number-grove"
+    channel   = 111
+    dir       = "/home/me/dev/number_grove"
+    args      = ["--model", "sonnet"]                  # optional
+    webhook   = "https://discord.com/api/webhooks/…"   # optional, per loop
+    autostart = false                                  # optional
+
+  ralphd.toml.example is a commented copy of every accepted key. Unknown keys
+  are a hard parse error, and two loops may not claim the same channel.
+
+OPTIONS (each also settable via the environment; the flag wins)
+  --config <path>       Multi-loop TOML config             [RALPHD_CONFIG]
+  --guild <id>          Discord server (guild) id          [RALPHD_GUILD_ID]
+  --channel <id>        Channel commands are accepted in   [RALPHD_CHANNEL_ID]
+  --user <id>           The one authorized user id         [RALPHD_USER_ID]
+  --working-dir <path>  Repo the loop runs in (default .)  [RALPHD_WORKING_DIR]
+  --autostart           Start the loop on connect          [RALPHD_AUTOSTART]
   -h, --help            Show this help
 
-Required environment:
-  DISCORD_BOT_TOKEN     Bot token (env only, never a flag)
+  The last four describe one loop; use the config file for more than one.
+  Everything after a bare `--` is forwarded verbatim to `ralph` on /start.
 
-Everything after `--` is forwarded verbatim to `ralph` when you run /start.
-Slash commands: /start /stop /model /status /next /add /drop /uncheck /done
-/backlog-edit /msg — each acts on the loop that owns the channel you type it in.
+COMMANDS (each acts on the loop that owns the channel you type it in)
+  /start [model]                        ralph <profile args> [--model …]
+  /stop [now]                           ralph stop [--now]
+  /model <tier>                         ralph model <tier>
+  /status, /next                        ralph status --json
+  /add <title> [verify] [id] [under]    ralph add [--under P] [id] <title> …
+  /drop <id> [recursive]                ralph drop <id> [--recursive]
+  /done <id>                            ralph done <id>
+  /uncheck <id>                         ralph uncheck <id>
+  /backlog-edit <id> <title> <verify>   ralph backlog edit …
+  /msg <message> [model] [new]          ralph msg [--new] [--model …] <text>
 
-While a loop runs, ralphd keeps one pinned status card per channel edited in
-place; when a loop it spawned dies abnormally it posts the abort reason with
-Start-again / Start-on-opus buttons. Pinning needs the Manage Messages
-permission. Registration is guild-wide and replaces the whole command set, so
-run exactly ONE ralphd per guild.
-";
+IN THE CHANNEL
+  One pinned status card per loop, edited in place every 30s while it runs and
+  closed with a final past-tense edit when it ends. A loop ralphd spawned that
+  exits abnormally gets a post with the abort reason and Start again / Start on
+  opus buttons. Invite the bot with the `bot` and `applications.commands`
+  scopes; pinning the card also needs the Manage Messages permission.
+
+TRAPS
+  Run exactly ONE ralphd per guild. Registering slash commands replaces the
+  guild's entire command set, so two instances silently unregister each other.
+
+See tools/ralphd/README.md for the rest.
+"##;
 
 #[tokio::main]
 async fn main() {
@@ -79,8 +119,6 @@ async fn main() {
 
     let token = cfg.token.clone();
 
-    // Shared loop handles, keyed by channel: the command handlers and each
-    // loop's START watcher track their loop through it.
     let loop_child: handler::LoopChild =
         std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let watched: Vec<config::LoopConfig> = cfg.loops.values().cloned().collect();
@@ -127,7 +165,6 @@ async fn main() {
             loop_child.clone(),
             client.http.clone(),
         ));
-        // Maintain its pinned live status card while it runs.
         tokio::spawn(card::watch_card(lc, loop_child.clone(), client.http.clone()));
     }
 

@@ -190,10 +190,20 @@ ralph msg --new                  # retire the session; next msg starts fresh
   never an invisible cost. It accepts anything `claude` accepts (`opus`, or a
   full name like `claude-fable-5`) and is *not* checked against the escalation
   ladder, which governs the loop rather than this session.
-- Only one `msg` runs at a time; a second is refused, not queued.
-- The session id lives in `.ralph/msg-session` and is recorded only after claude
-  exits cleanly, so a failed first call cannot leave an id that every later
-  resume fails against. Completing an arc retires it along with the backlog.
+- Only one `msg` runs at a time; a second is refused, not queued (`.ralph/msg.pid`).
+
+The session's two pieces of state both live in `.ralph/` and retire together:
+
+| File | Holds |
+|---|---|
+| `.ralph/msg-session` | the claude session id (a UUID) |
+| `.ralph/msg-model` | the sticky `--model` pin, absent when unset |
+
+Both are written only after claude exits cleanly, so a failed first call cannot
+leave behind an id that every later resume fails against, nor a rejected model
+name that poisons every later message. `--new` archives the id into
+`.ralph/archive/` and clears the pin; completing an arc does the same. If a pin
+seems stuck, `cat .ralph/msg-model` is the whole story.
 
 ## ralphd — Discord control bridge
 `ralphd` is a separate, always-on foreground binary that lets one authorized

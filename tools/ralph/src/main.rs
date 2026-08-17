@@ -40,26 +40,42 @@ pub type R<T> = Result<T, Box<dyn std::error::Error>>;
 const USAGE: &str = "\
 ralph — external autonomous loop for Claude Code (run from the repo root)
 
-Usage: ralph [options]
-       ralph init                Scaffold .ralph/ in the current repo
-       ralph start [options]     Ask a running ralphd to launch the loop (writes START)
-       ralph stop [--now]        Halt after the current task (--now also kills it)
-       ralph hints               Lessons for writing a per-project PROMPT.md
-       ralph schema              Explain the backlog schema and lint workflow
-       ralph lint [options]      Validate backlog schema and task routing
-       ralph brief [options]     Print the runner-resolved iteration brief
-       ralph status [--json]     Print backlog frontier (JSON with --json)
-       ralph add [<id>] <title> [--verify <cmd>]  Queue a task (stdin = full body)
-       ralph add --under <parent> <title>         Queue the next <parent>.N stage
-       ralph drop <id> [--recursive]              Queue a removal (archived, not lost)
-       ralph done <id>                            Queue a check-off
-       ralph uncheck <id>                         Queue a reopen
-       ralph model <tier>        One-shot model override for the next iteration
-       ralph msg [--new] <text>  Steer the loop through a persistent claude session
-       ralph backlog <add|edit> ...  Add or edit a backlog task (schema-checked)
-       ralph learn               Mine run.log for durable lessons (propose only)
-       ralph learn --apply [1,3] Write proposed learnings to .ralph/learnings/
-       ralph learn --discard     Drop the saved proposals
+Usage: ralph [options]             Run the loop here until the backlog completes
+
+Setup and lifecycle
+  ralph init                       Scaffold .ralph/ in the current repo
+  ralph start [options]            Ask a running ralphd to launch the loop
+  ralph stop [--now]               Halt after the current task; --now kills it too
+
+Inspect
+  ralph status [--json]            Backlog frontier: iteration, current, upcoming
+  ralph lint [options]             Validate backlog schema and task routing
+  ralph brief [options]            Print the runner-resolved iteration brief
+
+Backlog — schema-checked, and queued while a loop runs (see below)
+  ralph add [<id>] <title> [--verify <cmd>]
+                                   Queue a task; <id> places a child, e.g. 3.1.1
+  ralph add --under <parent> <title>
+                                   Queue the next free <parent>.N stage
+  ralph done <id>                  Queue a check-off
+  ralph uncheck <id>               Queue a reopen
+  ralph drop <id> [--recursive]    Queue a removal (archived, never deleted)
+  ralph backlog <add|edit> ...     Older flag-style forms, kept as aliases
+
+Steer a running loop
+  ralph model <tier>               One-shot model override for the next iteration
+  ralph msg [--new] <text>         Talk to this loop's persistent claude session
+
+Learn
+  ralph learn                      Mine run.log for durable lessons (propose only)
+  ralph learn --apply [1,3]        Write proposed learnings to .ralph/learnings/
+  ralph learn --discard            Drop the saved proposals
+
+Reference
+  ralph hints                      Lessons for writing a per-project PROMPT.md
+  ralph schema                     The backlog schema and lint workflow
+
+Options
   --prompt <file>          Prompt fed each iteration (default .ralph/PROMPT.md)
   --backlog <file>         Backlog archived on completion (default .ralph/BACKLOG.md)
   --progress <file>        Current hand-off file (default .ralph/PROGRESS.md)
@@ -86,20 +102,25 @@ Config-file-only settings (.ralph/ralph.toml — no flag; see README):
   limit_wait[_max], transient_wait[_max], extra_args,
   budget_usd, budget_window
 
-Backlog mutations never write BACKLOG.md in place. While a loop runs they queue
-to .ralph/inbox/ and apply at the next iteration boundary, so the backlog can
-never shift under a running agent; with no loop running they apply immediately.
+Backlog mutations never write BACKLOG.md in place. While a loop is running they
+queue to .ralph/inbox/ and apply at the next iteration boundary — so `add` and
+friends print `queued …` and the file does not change yet. That is success, not
+a failure to apply; it is what keeps the backlog from shifting under a running
+agent. With no loop running they apply immediately.
 
 Completion closes the arc: BACKLOG and the carry-forward are archived, PROGRESS
 is cleared, and the iteration counter resets. `ralph add` bootstraps a fresh
 backlog when none exists, so the next arc starts from `add`.
 `.ralph/learnings/` persists across arcs.
 
-Control while running:
-  ralph stop                   Halt gracefully after the current iteration
-  touch .ralph/STOP            Same, by hand (also suppresses --restart)
+Watching a running loop:
   cat .ralph/live              Live status of the active iteration
   tail -f .ralph/current.log   Watch the active iteration's raw stream
+  tail -f .ralph/run.log       One line per iteration, plus perf and warnings
+
+One loop per repo: the loop holds .ralph/loop.pid and a second `ralph` here
+exits 2 naming the live pid. A pidfile left by a killed loop is reclaimed on
+the next start. Full documentation in tools/ralph/README.md.
 
 With --restart, only an ungraceful death (killed by a signal: OOM, kill, crash)
 relaunches the loop; graceful halts, completion, and abort are terminal, and a
@@ -186,8 +207,5 @@ fn run() -> R<i32> {
         return Ok(if resolved.has_errors() { 1 } else { 0 });
     }
 
-    // Hand off to the supervisor: it forks the loop as a child and, when
-    // configured, relaunches it after an ungraceful death. It runs the loop
-    // inline when there's nothing to watch.
     supervisor::run(&cfg)
 }

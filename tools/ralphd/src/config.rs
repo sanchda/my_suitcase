@@ -29,8 +29,7 @@ pub struct LoopConfig {
     /// Set explicitly on each spawned child: a single inherited `DISCORD_WEBHOOK`
     /// would funnel every loop's lifecycle posts into one channel.
     pub webhook: Option<String>,
-    /// Start this loop automatically once connected (opt-in). Otherwise it only
-    /// starts on an explicit `/start`.
+    /// Start this loop on connect; otherwise it waits for an explicit `/start`.
     pub autostart: bool,
 }
 
@@ -91,8 +90,8 @@ fn env_truthy(v: &str) -> bool {
     !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
 }
 
-/// Parse `(argv, env)` into a `BotConfig`. `argv` excludes the program name.
-/// `env` looks up an environment variable by name.
+/// `argv` excludes the program name; `env` looks a variable up by name so the
+/// tests can drive the whole precedence chain without touching the process env.
 pub fn parse(argv: &[String], env: impl Fn(&str) -> Option<String>) -> Result<BotConfig, String> {
     // Split at the first bare `--`: before = ralphd flags, after = ralph args.
     let split = argv.iter().position(|a| a == "--");
@@ -357,13 +356,13 @@ mod tests {
         let base = ["--guild", "1", "--channel", "2", "--user", "3"];
         let argv: Vec<String> = base.iter().map(|s| s.to_string()).collect();
         let cfg = parse(&argv, env_map(&[("DISCORD_BOT_TOKEN", "tok")])).unwrap();
-        assert!(!only(&cfg).autostart); // default off
+        assert!(!only(&cfg).autostart);
 
         let mut with_flag = base.to_vec();
         with_flag.push("--autostart");
         let argv: Vec<String> = with_flag.iter().map(|s| s.to_string()).collect();
         let cfg = parse(&argv, env_map(&[("DISCORD_BOT_TOKEN", "tok")])).unwrap();
-        assert!(only(&cfg).autostart); // flag turns it on
+        assert!(only(&cfg).autostart);
 
         let argv: Vec<String> = base.iter().map(|s| s.to_string()).collect();
         let cfg = parse(
@@ -371,13 +370,13 @@ mod tests {
             env_map(&[("DISCORD_BOT_TOKEN", "tok"), ("RALPHD_AUTOSTART", "1")]),
         )
         .unwrap();
-        assert!(only(&cfg).autostart); // env turns it on
+        assert!(only(&cfg).autostart);
         let cfg = parse(
             &argv,
             env_map(&[("DISCORD_BOT_TOKEN", "tok"), ("RALPHD_AUTOSTART", "false")]),
         )
         .unwrap();
-        assert!(!only(&cfg).autostart); // env 'false' stays off
+        assert!(!only(&cfg).autostart);
     }
 
     #[test]
@@ -539,5 +538,22 @@ autostart = true
         assert!(parse(&argv, env_map(&[("DISCORD_BOT_TOKEN", "tok")]))
             .unwrap_err()
             .contains("could not read"));
+    }
+
+    /// `deny_unknown_fields` means a drifted example is a hard error for whoever
+    /// copies it, and nothing else would catch that.
+    #[test]
+    fn the_committed_example_config_still_parses() {
+        let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("ralphd.toml.example");
+        let argv: Vec<String> = ["--config", example.to_str().unwrap()]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let cfg = parse(&argv, env_map(&[("DISCORD_BOT_TOKEN", "tok")]))
+            .unwrap_or_else(|e| panic!("{} does not parse: {e}", example.display()));
+        assert!(
+            cfg.loops.len() >= 2,
+            "the example must keep showing the multi-loop shape"
+        );
     }
 }
