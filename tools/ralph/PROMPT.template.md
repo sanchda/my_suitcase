@@ -19,8 +19,11 @@ verification/self-assessment finds no high-value gap.}}
    the resolved leaf but cannot reroute. Read only narrow referenced ranges when
    the excerpt is insufficient; never dump BACKLOG or PROGRESS wholesale.
 2. If the leaf cannot fit one iteration, make a `plan` pass: add ordered child
-   stages with IDs and `Verify:` contracts to BACKLOG, run `ralph lint`, and
-   leave product code for the selected child.
+   stages with `ralph add --under <id> "<title>" --verify <cmd>` — never by hand,
+   it is the only schema-checked path — and leave product code for the selected
+   child. A mutation made mid-iteration is queued and applies at the next
+   iteration boundary, so a following `ralph lint` will not show it yet; that is
+   correct, the backlog must not shift under you.
 3. Otherwise implement one bounded increment in surrounding style.
 4. Verify with targeted checks while editing and one final relevant check:
    {{PROJECT VERIFICATION CONTRACT: exact commands and success markers.}}
@@ -28,7 +31,8 @@ verification/self-assessment finds no high-value gap.}}
 5. Your end-of-turn summary is the sole handoff to the next iteration: state what
    changed, the exact proof you ran, and any constraint the next iteration must
    respect. Do not write PROGRESS or a `Next:` line — the runner owns the handoff.
-   Check off a finished task in BACKLOG in the same iteration.
+   Close a finished task with `ralph done <id>` in the same iteration; never edit
+   BACKLOG by hand.
 6. End every pass by writing `.ralph/HANDOFF.json` — one JSON object, e.g.
    `{"status": "code", "model": null, "blocked": null}`:
    - `status`: `code` (committed work), `plan`/`review` (non-code progress), or

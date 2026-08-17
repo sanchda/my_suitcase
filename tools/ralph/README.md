@@ -126,6 +126,9 @@ local tools/tests visible without mining raw NDJSON.
   would fail schema lint. When the backlog file is absent (a completed arc
   archived it away), `add` bootstraps a fresh schema-valid file first — the
   next arc starts from `backlog add` alone.
+- `ralph model <tier>` — write the one-shot `.ralph/MODEL` override consumed by
+  the next iteration. The tier must be on the configured `escalation_ladder`;
+  the value is trimmed and matched case-insensitively.
 - `ralph backlog edit --id <id> --title "<t>" --verify "<cmd>"` — replace a
   task's title and verify in place (children preserved). Same lint-or-revert
   safety. Both writes are atomic, so they never expose a half-written backlog to
@@ -133,9 +136,33 @@ local tools/tests visible without mining raw NDJSON.
 
 ## ralphd — Discord control bridge
 `ralphd` is a separate, always-on foreground binary that lets one authorized
-Discord user drive the loop from one channel via native slash commands. It shells
-out to `ralph` and reads/writes `.ralph/`; it is single-tenant by design (one
-guild, one channel, one user id — every other channel/user is refused).
+Discord user drive **one loop per channel** via native slash commands. It shells
+out to `ralph` for everything and only *reads* `.ralph/`, so it is never
+load-bearing: anything you can do from Discord you can do from a terminal, and
+killing ralphd loses nothing.
+
+The channel a command is typed in is what selects the loop — `/status` in
+`#number-grove` means that repo. There is no `--repo` argument.
+
+```toml
+# ~/.config/ralphd.toml   (or --config <path> / RALPHD_CONFIG)
+guild = 123          # one guild
+user  = 456          # the one authorized user
+
+[[loop]]
+name      = "number-grove"
+channel   = 111
+dir       = "/home/me/dev/number_grove"
+args      = ["--model", "sonnet"]                    # forwarded to ralph on /start
+webhook   = "https://discord.com/api/webhooks/…"     # optional, per loop
+autostart = false                                    # optional
+```
+
+```bash
+DISCORD_BOT_TOKEN=… ralphd --config ~/.config/ralphd.toml
+```
+
+The original single-loop flag form still works unchanged as the degenerate case:
 
 ```bash
 DISCORD_BOT_TOKEN=… ralphd \
@@ -145,44 +172,81 @@ DISCORD_BOT_TOKEN=… ralphd \
 
 Run `ralphd --help` (or `ralphd help`) for the full usage. Every setting below
 takes a flag **or** an environment variable (flag wins); the token is env-only.
-Everything after `--` is forwarded verbatim to `ralph` on `/start`.
+An explicit `--config` always wins; otherwise the flag form wins over the
+default config path, so an existing launch is never hijacked by a stale file.
 
 | Setting | Flag | Env |
 |---------|------|-----|
 | Bot token | — (env only) | `DISCORD_BOT_TOKEN` |
+| Config file | `--config <path>` | `RALPHD_CONFIG` |
 | Guild (server) id | `--guild <id>` | `RALPHD_GUILD_ID` |
 | Channel id | `--channel <id>` | `RALPHD_CHANNEL_ID` |
 | Authorized user id | `--user <id>` | `RALPHD_USER_ID` |
 | Working dir (repo, default `.`) | `--working-dir <path>` | `RALPHD_WORKING_DIR` |
 
-Commands: `/start [model]`, `/stop`, `/model <tier>`, `/status`, `/next`,
-`/backlog-add`, `/backlog-edit`, `/btw <message> [model]`. `/start` takes an
-optional model to override the launch default for one run; `/btw` runs a one-off
-yolo `claude` session with your message (optionally on a given model) and posts
-its output back. Loop lifecycle/progress still posts via
-`ralph`'s existing `DISCORD_WEBHOOK` (point it at the same channel); ralphd only
-handles inbound commands and their replies. Invite the bot with the `bot` +
+**Run exactly one ralphd per guild.** Registering slash commands *replaces the
+guild's entire command set*, so two instances in one guild silently unregister
+each other's commands, last one to connect wins. ralphd logs the full list it is
+about to overwrite on connect — if that list contains commands you did not
+expect, another instance is running. Many loops are what the config file is for;
+a second process is not.
+
+**Each loop's `DISCORD_WEBHOOK` is set on its own child.** `ralph` reads the
+webhook from the environment only, so an inherited one would funnel every loop's
+lifecycle posts into whichever single channel ralphd's own environment names.
+Give each `[[loop]]` a `webhook` pointing at its channel; a loop with none runs
+with the variable *cleared* rather than inheriting (a lone loop still inherits
+the ambient one, so single-loop deployments are unchanged).
+
+Commands — each acts on the loop that owns the channel you type it in:
+
+| Command | Shells out to |
+|---|---|
+| `/start [model]` | `ralph <profile args> [--model …]` |
+| `/stop [now]` | `ralph stop` / `ralph stop --now` |
+| `/model <tier>` | `ralph model <tier>` |
+| `/status`, `/next` | `ralph status --json` |
+| `/add <title> [verify] [id] [under]` | `ralph add [--under P] [id] <title> [--verify …]` |
+| `/drop <id> [recursive]` | `ralph drop <id> [--recursive]` |
+| `/uncheck <id>`, `/done <id>` | `ralph uncheck <id>`, `ralph done <id>` |
+| `/backlog-edit <id> <title> <verify>` | `ralph backlog edit …` |
+| `/msg <message> [new]` | `ralph msg [--new] <text>` |
+
+`/start` takes an optional model to override the launch default for one run.
+`/msg` steers the loop through its *persistent* claude session (`.ralph/`-backed,
+so you can start it from your phone and continue from a terminal on the same
+context) and streams its progress back. Invite the bot with the `bot` +
 `applications.commands` scopes (pinning the status card also needs the *Manage
 Messages* permission; without it the card degrades to an ordinary message).
 
 Beyond commands, ralphd maintains channel state on its own:
 
-- **One pinned live status card**, edited every 30s while a loop runs:
-  run-state, iteration, pending count, current + upcoming leaves, the live
-  in-iteration line from `.ralph/live`, and a relative "updated" stamp. When
-  the loop ends the card gets a final past-tense edit and stays as the run's
-  record; the next run deletes it and pins a fresh one — exactly one card,
-  never a pile of status posts.
+- **One pinned live status card per channel**, edited every 30s while that loop
+  runs: loop name, run-state, iteration, pending count, current + upcoming
+  leaves, the live in-iteration line from `.ralph/live`, spend from
+  `.ralph/ledger.jsonl`, and a relative "updated" stamp. When the loop ends the
+  card gets a final past-tense edit and stays as the run's record; the next run
+  deletes it and pins a fresh one — exactly one card, never a pile of status
+  posts.
+- **A budget warning at 80%.** Spend is the sum of *every* ledger line over the
+  repo's `budget_window` (a LIMIT retry appends a second line for the same
+  iteration, and that money was really spent), compared against the same
+  `budget_usd` from that repo's `ralph.toml` that `ralph` enforces — ralphd only
+  surfaces it. No ledger file, or no configured budget, and the line is simply
+  absent.
 - **Actionable failure posts**: when a ralphd-spawned loop exits abnormally,
   ralphd posts the abort reason (pulled from `run.log`) with **Start again** /
   **Start on opus** buttons — the "come look" signal carries its remedies, so
-  you can unblock from your phone. Buttons pass the same single-tenant auth
-  gate as commands.
-- **`/btw` message hygiene**: output is never truncated — it's split into up to
+  you can unblock from your phone. Buttons pass the same auth gate as commands.
+- **`/msg` message hygiene**: output is never truncated — it's split into up to
   4 messages at line boundaries, code fences are closed and reopened across the
   split (never torn), and all mentions are suppressed so a session can't ping
   `@everyone`. The first status edit lands within ~20s and progress updates
-  every minute.
+  every minute; past 14 minutes the live message migrates off the interaction
+  token (which Discord expires at 15) into a plain channel message.
+
+`ralph` owns `loop.pid`: ralphd reads it to answer "is this channel's loop
+running" and to refuse a duplicate `/start`, but never writes it.
 
 ## Completion
 The loop ends when the model's **final text** (from the result envelope's
@@ -208,9 +272,9 @@ All best-effort: a finished run is never turned into a failure by archive
 hiccups.
 
 ### Starting the next arc
-`ralph backlog add` bootstraps a fresh, schema-valid `BACKLOG.md` when the file
+`ralph add` bootstraps a fresh, schema-valid `BACKLOG.md` when the file
 is absent, so the whole cycle works without touching a terminal: complete →
-`/backlog-add …` (repeat as needed) → `/start`. Edit `PROMPT.md` between arcs
+`/add …` (repeat as needed) → `/start`. Edit `PROMPT.md` between arcs
 when the goal or verification contract changes; config, learnings, and the
 webhook carry over as-is.
 
@@ -325,6 +389,14 @@ Checked at iteration boundaries; each halts the loop when hit:
 | Cumulative cost | `--max-cost` / `RALPH_MAX_COST` | 0 (off) |
 | Wall-clock | `--max-duration` / `RALPH_MAX_DURATION` (`8h`/`30m`/`300s`) | 0 (off) |
 | Iterations | `--max-iterations` / `RALPH_MAX_ITER` | 0 (off) |
+| Persisted spend | `budget_usd` + `budget_window` (toml only) | 0 (off) |
+
+`--max-cost` counts one process's spend, so a restart hands the loop a fresh
+allowance. `budget_usd` instead sums `.ralph/ledger.jsonl` — one
+`{"ts","iter","model","cost_usd"}` line appended per iteration — over the
+trailing `budget_window` (`"24h"`, or bare seconds; unset = all time), so it
+survives restarts. A non-finite envelope cost is recorded as `0.0`; an
+unparseable line contributes nothing rather than fabricating a halt.
 
 ## Discord notifications
 Set `DISCORD_WEBHOOK` to a Discord **webhook URL** (from a channel's
@@ -412,6 +484,8 @@ abort_after = 4
 | `escalation_ladder` | — | — | `["haiku","sonnet","opus"]` |
 | `judge_tiers` | `RALPH_JUDGE_TIERS` (comma-sep) | — | `[]` (off) |
 | `judge_model` | `RALPH_JUDGE_MODEL` | — | `sonnet` |
+| `budget_usd` | — | — | `0` (off) |
+| `budget_window` | — | — | `0` (all time) |
 | — | `RALPH_CONFIG` | `--config` | `.ralph/ralph.toml` |
 | — | — | `--once` | run one iteration then exit |
 

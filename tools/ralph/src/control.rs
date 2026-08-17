@@ -10,12 +10,13 @@ use crate::context;
 use crate::notify;
 use crate::state::State;
 use crate::stream::{self, IterStatus, ResultEnvelope};
-use crate::{curate, git, judge, learn, synth, R};
+use crate::{curate, git, inbox, judge, learn, ledger, supervisor, synth, R};
 use std::collections::HashSet;
 use std::io::{BufReader, Write};
+use std::os::raw::c_int;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -210,8 +211,46 @@ struct HbSnapshot {
     tool: Option<String>,
 }
 
+/// The running iteration's `claude` pid, so the SIGTERM handler can reach it.
+static CLAUDE_PID: AtomicU32 = AtomicU32::new(0);
+
+/// Tear down `claude` before dying: it leads its own session (see `run_one`), so
+/// no signal aimed at ralph reaches it and skipping this orphans the whole tree.
+/// Then die by the signal, which is what the supervisor classifies on.
+extern "C" fn terminate(sig: c_int) {
+    // Only `kill` runs before the re-raise — everything here is async-signal-safe.
+    kill_group(CLAUDE_PID.load(Ordering::SeqCst));
+    unsafe {
+        libc::signal(sig, libc::SIG_DFL);
+        libc::raise(sig);
+    }
+}
+
+/// Apply queued backlog mutations. Never fatal: a rejected request is parked in
+/// `inbox/rejected/` and reported, not allowed to take the loop down.
+fn drain_inbox(cfg: &Config, state: &State, notifier: &Option<notify::Notifier>) {
+    match inbox::drain(&cfg.dir, &cfg.backlog) {
+        Ok(outcome) => {
+            for line in &outcome.applied {
+                state.log(&format!("  📥 inbox: {line}"));
+            }
+            for line in &outcome.rejected {
+                state.log(&format!("  ⚠ inbox rejected {line}"));
+                notify::notify(
+                    notifier,
+                    &format!("⚠️ **ralph inbox rejected** — {line} (kept in `inbox/rejected/`)"),
+                );
+            }
+        }
+        Err(e) => state.log(&format!("  ⚠ inbox drain failed: {e}")),
+    }
+}
+
 /// Run the whole loop. Returns the process exit code.
 pub fn run(cfg: &Config) -> R<i32> {
+    // First thing, so a `ralph stop --now` forwarded here can never find the
+    // supervisor's forwarding handler still installed in this process.
+    supervisor::install_handler(libc::SIGTERM, terminate);
     if which("claude").is_none() {
         return Err("claude CLI not found on PATH".into());
     }
@@ -293,6 +332,29 @@ pub fn run(cfg: &Config) -> R<i32> {
             );
             break;
         }
+        // Unlike max_cost_usd this reads the ledger, so a --restart relaunch
+        // does not hand the loop a fresh allowance.
+        if cfg.budget_usd > 0.0 {
+            let spent = ledger::spend_since(&cfg.dir, cfg.budget_window);
+            if spent >= cfg.budget_usd {
+                let window = match cfg.budget_window {
+                    0 => "all time".to_string(),
+                    secs => format!("the last {secs}s"),
+                };
+                state.log(&format!(
+                    "ledger budget reached (${spent:.4} ≥ ${:.4} over {window}) → halting",
+                    cfg.budget_usd
+                ));
+                notify::notify(
+                    &notifier,
+                    &format!(
+                        "⏹️ **ralph halted** — ledger budget ${:.2} reached over {window}",
+                        cfg.budget_usd
+                    ),
+                );
+                break;
+            }
+        }
         if cfg.max_duration > 0 && start.elapsed().as_secs() >= cfg.max_duration {
             state.log(&format!(
                 "wall-clock budget ({}s) reached → halting",
@@ -307,6 +369,10 @@ pub fn run(cfg: &Config) -> R<i32> {
             );
             break;
         }
+
+        // Before routing, so queued work is visible to leaf selection — and on
+        // every iteration, whatever the previous turn did.
+        drain_inbox(cfg, &state, &notifier);
 
         let next = iter + 1;
         let resolved = context::load(&cfg.backlog, &cfg.progress);
@@ -369,6 +435,9 @@ pub fn run(cfg: &Config) -> R<i32> {
             None => (Class::Transient, 0.0, String::new()),
         };
         cost_total += cost;
+        if let Err(e) = ledger::append(&cfg.dir, next, &model, cost) {
+            state.log(&format!("  ⚠ could not append to the spend ledger: {e}"));
+        }
         if let Some(env) = &ran.envelope {
             if env.duration_ms > 0 {
                 let non_api_ms = env.duration_ms.saturating_sub(env.duration_api_ms);
@@ -467,7 +536,9 @@ pub fn run(cfg: &Config) -> R<i32> {
                         let reason = blocked_reason
                             .as_deref()
                             .unwrap_or("needs human intervention (no reason given)");
-                        state.log(&format!("  ⛔ iteration declared itself blocked — {reason}"));
+                        state.log(&format!(
+                            "  ⛔ iteration declared itself blocked — {reason}"
+                        ));
                         notify::notify(&notifier, &format!("⛔ **ralph blocked** — {reason}"));
                         Verdict::Blocked
                     }
@@ -515,7 +586,9 @@ pub fn run(cfg: &Config) -> R<i32> {
                                 ));
                                 notify::notify(
                                     &notifier,
-                                    &format!("🔍 **judge refuted** `{leaf_id}` — reopened · {reason}"),
+                                    &format!(
+                                        "🔍 **judge refuted** `{leaf_id}` — reopened · {reason}"
+                                    ),
                                 );
                                 verdict = Verdict::NoProgress;
                             }
@@ -654,6 +727,10 @@ fn finish_arc(cfg: &Config, state: &State) {
         }
         let _ = std::fs::write(&cfg.progress, "");
     }
+    // A closed arc is the natural boundary for the steering session's context too.
+    if let Some(id) = crate::msg::archive_session(&cfg.dir) {
+        state.log(&format!("  archived msg session {id}"));
+    }
     match state.set_iteration(0) {
         Ok(()) => state.log("  arc closed: carry-forward archived, iteration counter reset"),
         Err(e) => state.log(&format!("  ⚠ could not reset iteration counter: {e}")),
@@ -737,6 +814,7 @@ fn run_one(cfg: &Config, state: &State, n: u64, model: &str, prompt: &str) -> R<
     }
     let mut child = cmd.spawn()?;
     let pid = child.id();
+    CLAUDE_PID.store(pid, Ordering::SeqCst);
 
     let stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
@@ -851,6 +929,8 @@ fn run_one(cfg: &Config, state: &State, n: u64, model: &str, prompt: &str) -> R<
     #[cfg(unix)]
     kill_group(pid);
     let _ = child.wait();
+    // Reaped: the pid can be recycled, so the handler must stop aiming at it.
+    CLAUDE_PID.store(0, Ordering::SeqCst);
     let prompt_result = prompt_thread.join();
     let _ = stderr_thread.join();
     if let Some(w) = watchdog {

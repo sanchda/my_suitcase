@@ -34,6 +34,11 @@ pub struct Config {
     pub extra_args: Vec<String>,
     /// Cumulative cost cap in USD; 0 = off.
     pub max_cost_usd: f64,
+    /// Persisted spend cap in USD, summed from `<dir>/ledger.jsonl` so it
+    /// survives a restart (unlike `max_cost_usd`); 0 = off.
+    pub budget_usd: f64,
+    /// Trailing window the budget is summed over, in seconds; 0 = all time.
+    pub budget_window: u64,
     /// Wall-clock cap in seconds; 0 = off.
     pub max_duration: u64,
     /// Per-iteration timeout in seconds; 0 = off.
@@ -82,6 +87,8 @@ impl Default for Config {
             transient_wait_max: 300,
             extra_args: Vec::new(),
             max_cost_usd: 0.0,
+            budget_usd: 0.0,
+            budget_window: 0,
             max_duration: 0,
             iteration_timeout: 0,
             escalate_after: 2,
@@ -120,6 +127,8 @@ pub struct FileConfig {
     pub transient_wait_max: Option<u64>,
     pub extra_args: Option<ExtraArgs>,
     pub max_cost_usd: Option<f64>,
+    pub budget_usd: Option<f64>,
+    pub budget_window: Option<DurationSpec>,
     /// Accepts a bare number of seconds or a suffixed string (`8h`, `30m`).
     pub max_duration: Option<DurationSpec>,
     pub iteration_timeout: Option<DurationSpec>,
@@ -257,6 +266,12 @@ pub fn apply_file(cfg: &mut Config, f: FileConfig) -> Result<(), String> {
     }
     if let Some(v) = f.max_cost_usd {
         cfg.max_cost_usd = v;
+    }
+    if let Some(v) = f.budget_usd {
+        cfg.budget_usd = v;
+    }
+    if let Some(v) = f.budget_window {
+        cfg.budget_window = v.resolve()?;
     }
     if let Some(v) = f.max_duration {
         cfg.max_duration = v.resolve()?;
@@ -537,6 +552,20 @@ mod tests {
     }
 
     #[test]
+    fn budget_keys_parse_and_default_off() {
+        let mut c = Config::default();
+        assert_eq!(c.budget_usd, 0.0);
+        assert_eq!(c.budget_window, 0);
+        let f: FileConfig = toml::from_str("budget_usd = 40.0\nbudget_window = \"24h\"").unwrap();
+        apply_file(&mut c, f).unwrap();
+        assert_eq!(c.budget_usd, 40.0);
+        assert_eq!(c.budget_window, 86_400);
+        // Bare seconds work too (DurationSpec's integer arm).
+        apply_file(&mut c, toml::from_str("budget_window = 600").unwrap()).unwrap();
+        assert_eq!(c.budget_window, 600);
+    }
+
+    #[test]
     fn unknown_toml_key_rejected() {
         assert!(toml::from_str::<FileConfig>("nonsense = 1").is_err());
     }
@@ -679,10 +708,7 @@ mod tests {
         assert!(!c.restart); // default off
         apply_file(&mut c, toml::from_str("restart = true").unwrap()).unwrap();
         assert!(c.restart); // file sets it
-        apply_env(&mut c, |k| {
-            (k == "RALPH_RESTART").then(|| "0".to_string())
-        })
-        .unwrap();
+        apply_env(&mut c, |k| (k == "RALPH_RESTART").then(|| "0".to_string())).unwrap();
         assert!(!c.restart); // env beat file
         apply_args(&mut c, &["--restart".into(), "true".into()]).unwrap();
         assert!(c.restart); // flag beat env
@@ -692,9 +718,16 @@ mod tests {
     fn heartbeat_precedence_and_duration_parsing() {
         let mut c = Config::default();
         assert_eq!(c.heartbeat_interval, 0); // off by default
-        apply_file(&mut c, toml::from_str(r#"heartbeat_interval = "5m""#).unwrap()).unwrap();
+        apply_file(
+            &mut c,
+            toml::from_str(r#"heartbeat_interval = "5m""#).unwrap(),
+        )
+        .unwrap();
         assert_eq!(c.heartbeat_interval, 300); // file, suffixed duration
-        apply_env(&mut c, |k| (k == "RALPH_HEARTBEAT").then(|| "120".to_string())).unwrap();
+        apply_env(&mut c, |k| {
+            (k == "RALPH_HEARTBEAT").then(|| "120".to_string())
+        })
+        .unwrap();
         assert_eq!(c.heartbeat_interval, 120); // env beat file, bare seconds
         apply_args(&mut c, &["--heartbeat".into(), "10m".into()]).unwrap();
         assert_eq!(c.heartbeat_interval, 600); // flag beat env

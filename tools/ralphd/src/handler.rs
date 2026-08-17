@@ -1,11 +1,11 @@
 //! serenity event handler: register the guild slash commands on ready, then on
-//! each command interaction enforce the single-tenant auth gate and dispatch to
-//! the ralph bridge. Replies are normal channel messages (a shared audit trail);
-//! auth rejections are ephemeral.
+//! each command interaction enforce the auth gate, resolve the loop from the
+//! channel the command arrived in, and dispatch to the ralph bridge. Replies are
+//! normal channel messages (a shared audit trail); auth rejections are ephemeral.
 
-use crate::config::BotConfig;
-use crate::ralph::Ralph;
-use crate::{auth, btw, format, loop_pid, model};
+use crate::config::{BotConfig, LoopConfig};
+use crate::ralph::{Output, Ralph};
+use crate::{auth, format, loop_pid, msg};
 
 use serenity::all::{
     ButtonStyle, ChannelId, CommandOptionType, ComponentInteraction, Context, CreateActionRow,
@@ -14,6 +14,7 @@ use serenity::all::{
     GuildId, Http, Interaction, Ready,
 };
 use serenity::async_trait;
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::{Child, ExitStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,50 +24,52 @@ use std::time::Duration;
 /// Cadence of the `.ralph/START` trigger poll.
 const START_POLL: Duration = Duration::from_secs(3);
 
-/// Shared, thread-safe handle on the loop we spawned — shared between the command
-/// handlers and the START watcher so both track the one loop.
-pub type LoopChild = Arc<Mutex<Option<Child>>>;
+/// Shared, thread-safe handle on the loops we spawned, keyed by channel id —
+/// shared between the command handlers and each loop's START watcher.
+pub type LoopChild = Arc<Mutex<HashMap<u64, Child>>>;
 
 pub struct Handler {
     pub cfg: BotConfig,
-    /// The loop process we spawned this session, kept so we can reap it when it
-    /// exits (std Mutex — never held across an `.await`).
+    /// The loop processes we spawned this session, kept so we can reap them when
+    /// they exit (std Mutex — never held across an `.await`).
     pub loop_child: LoopChild,
     /// Set once we've attempted the opt-in auto-start, so a gateway reconnect
     /// (which re-fires `ready`) never launches a second loop.
     pub autostarted: AtomicBool,
 }
 
-/// Spawn the loop, record its pid, and adopt its child handle (into the shared
-/// `loop_child`). The caller is responsible for the "already running" check.
-/// Returns the new pid. Used by `/start`, auto-start, and the START watcher.
-pub fn launch_and_record(cfg: &BotConfig, loop_child: &LoopChild, extra: &[String]) -> Result<u32, String> {
-    match Ralph::new(cfg).spawn_loop(extra) {
+/// Spawn the loop and adopt its child handle (into the shared `loop_child`).
+/// The caller is responsible for the "already running" check. Returns the new
+/// pid. `ralph` writes `loop.pid` itself, so ralphd must not.
+pub fn launch_and_record(
+    lc: &LoopConfig,
+    loop_child: &LoopChild,
+    extra: &[String],
+) -> Result<u32, String> {
+    match Ralph::new(lc).spawn_loop(extra) {
         Ok(child) => {
             let pid = child.id();
-            let _ = loop_pid::write(&cfg.state_dir, pid);
-            *loop_child.lock().unwrap() = Some(child);
+            loop_child.lock().unwrap().insert(lc.channel_id, child);
             Ok(pid)
         }
         Err(e) => Err(e.to_string()),
     }
 }
 
-/// Reap the loop we spawned if it has exited, clearing its pidfile so a new
-/// start works again. Returns the exit status when a reap happened — the START
-/// watcher turns an abnormal one into a channel post. A cross-session loop is
-/// reparented to init and reaped there, so only this same-session child can
-/// zombie (and only it carries a status).
-pub fn reap_and_clear(cfg: &BotConfig, loop_child: &LoopChild) -> Option<ExitStatus> {
+/// Reap this loop's child if it has exited. Returns the exit status when a reap
+/// happened — the START watcher turns an abnormal one into a channel post. A
+/// cross-session loop is reparented to init and reaped there, so only this
+/// same-session child can zombie (and only it carries a status).
+pub fn reap_finished(lc: &LoopConfig, loop_child: &LoopChild) -> Option<ExitStatus> {
     let mut guard = loop_child.lock().unwrap();
-    if let Some(child) = guard.as_mut() {
-        if let Ok(Some(status)) = child.try_wait() {
-            *guard = None;
-            loop_pid::clear(&cfg.state_dir);
-            return Some(status);
+    let child = guard.get_mut(&lc.channel_id)?;
+    match child.try_wait() {
+        Ok(Some(status)) => {
+            guard.remove(&lc.channel_id);
+            Some(status)
         }
+        _ => None,
     }
-    None
 }
 
 /// The last abort line from `run.log` (timestamp stripped), for the
@@ -102,23 +105,23 @@ fn restart_buttons() -> Vec<CreateActionRow> {
     ])]
 }
 
-/// Background watcher: a separate local process (e.g. a claude session running
-/// `ralph start`) drops `<state_dir>/START`; when it appears and no loop is
-/// running, launch the tracked loop and announce it — no Discord round-trip
-/// needed to start the ralphd-managed loop. Runs for the process lifetime.
-pub async fn watch_start(cfg: BotConfig, loop_child: LoopChild, http: Arc<Http>) {
-    let channel = ChannelId::new(cfg.channel_id);
+/// Background watcher, one per loop: a separate local process (e.g. a claude
+/// session running `ralph start`) drops `<state_dir>/START`; when it appears and
+/// no loop is running, launch this loop and announce it — no Discord round-trip
+/// needed. Runs for the process lifetime.
+pub async fn watch_start(lc: LoopConfig, loop_child: LoopChild, http: Arc<Http>) {
+    let channel = ChannelId::new(lc.channel_id);
     loop {
         tokio::time::sleep(START_POLL).await;
-        let (decision, reaped) = poll_start(&cfg, &loop_child);
+        let (decision, reaped) = poll_start(&lc, &loop_child);
         // An abnormal exit of the loop WE spawned becomes a post with the
         // reason and restart buttons. (A user-command reap can race this and
         // swallow the status — rare at a 3s poll.) Graceful exits are already
         // announced by ralph's own webhook.
         if let Some(status) = reaped.filter(|s| !s.success()) {
-            let reason = last_abort_reason(&cfg.state_dir)
+            let reason = last_abort_reason(&lc.state_dir)
                 .unwrap_or_else(|| format!("no abort line in run.log ({status})"));
-            eprintln!("ralphd: loop exited abnormally — {reason}");
+            eprintln!("ralphd[{}]: loop exited abnormally — {reason}", lc.name);
             let _ = channel
                 .send_message(
                     &http,
@@ -131,17 +134,20 @@ pub async fn watch_start(cfg: BotConfig, loop_child: LoopChild, http: Arc<Http>)
         match decision {
             StartDecision::NoTrigger => {}
             StartDecision::AlreadyRunning(pid) => {
-                eprintln!("ralphd: START ignored — loop already running (pid {pid})");
+                eprintln!(
+                    "ralphd[{}]: START ignored — loop already running (pid {pid})",
+                    lc.name
+                );
             }
-            StartDecision::Launch => match launch_and_record(&cfg, &loop_child, &[]) {
+            StartDecision::Launch => match launch_and_record(&lc, &loop_child, &[]) {
                 Ok(pid) => {
-                    eprintln!("ralphd: START trigger → launched ralph (pid {pid})");
+                    eprintln!("ralphd[{}]: START trigger → launched ralph (pid {pid})", lc.name);
                     let _ = channel
                         .say(&http, format!("🟢 started ralph (pid {pid}) — via `ralph start`"))
                         .await;
                 }
                 Err(e) => {
-                    eprintln!("ralphd: START trigger failed: {e}");
+                    eprintln!("ralphd[{}]: START trigger failed: {e}", lc.name);
                     let _ = channel
                         .say(&http, format!("⚠️ `ralph start` trigger failed: {e}"))
                         .await;
@@ -163,70 +169,73 @@ enum StartDecision {
 /// and decide whether to launch. Returns the reaped exit status (if this poll
 /// reaped one) alongside the decision. Factored out of [`watch_start`] so the
 /// trigger logic is testable without a gateway or a real loop.
-fn poll_start(cfg: &BotConfig, loop_child: &LoopChild) -> (StartDecision, Option<ExitStatus>) {
-    // Keep the pidfile honest so a finished loop can be relaunched.
-    let reaped = reap_and_clear(cfg, loop_child);
-    let marker = cfg.state_dir.join("START");
+fn poll_start(lc: &LoopConfig, loop_child: &LoopChild) -> (StartDecision, Option<ExitStatus>) {
+    let reaped = reap_finished(lc, loop_child);
+    let marker = lc.state_dir.join("START");
     if !marker.exists() {
         return (StartDecision::NoTrigger, reaped);
     }
     // Consume the trigger regardless of outcome so it fires once.
     let _ = std::fs::remove_file(&marker);
-    let decision = match loop_pid::running(&cfg.state_dir) {
+    let decision = match loop_pid::running(&lc.state_dir) {
         Some(pid) => StartDecision::AlreadyRunning(pid),
         None => StartDecision::Launch,
     };
     (decision, reaped)
 }
 
+/// One shelled-out mutation's reply: stdout on success, stderr on rejection.
+fn shell_reply(what: &str, out: std::io::Result<Output>) -> String {
+    match out {
+        Ok(o) if o.ok => {
+            let s = o.stdout.trim();
+            if s.is_empty() {
+                format!("{what} ok")
+            } else {
+                s.to_string()
+            }
+        }
+        Ok(o) => format!("rejected: {}", o.stderr.trim()),
+        Err(e) => format!("{what} failed: {e}"),
+    }
+}
+
 impl Handler {
-    fn ralph(&self) -> Ralph {
-        Ralph::new(&self.cfg)
-    }
-
-    /// Spawn the loop, record its pid, and adopt its child handle. The caller is
-    /// responsible for the "already running" check. Returns the new pid.
-    fn launch_loop(&self, extra: &[String]) -> Result<u32, String> {
-        launch_and_record(&self.cfg, &self.loop_child, extra)
-    }
-
-    /// Opt-in auto-start: launch the loop on connect unless one is already
-    /// running, announcing the outcome in the channel. Guarded by `autostarted`
-    /// so a reconnect can't spawn a duplicate.
+    /// Opt-in auto-start: launch every loop configured for it on connect, unless
+    /// one is already running, announcing each outcome in its channel. Guarded by
+    /// `autostarted` so a reconnect can't spawn duplicates.
     async fn autostart(&self, ctx: &Context) {
         if self.autostarted.swap(true, Ordering::SeqCst) {
             return; // a prior `ready` already handled it this process
         }
-        if let Some(pid) = loop_pid::running(&self.cfg.state_dir) {
-            eprintln!("ralphd: autostart skipped — loop already running (pid {pid})");
-            return;
-        }
-        let channel = ChannelId::new(self.cfg.channel_id);
-        match self.launch_loop(&[]) {
-            Ok(pid) => {
-                eprintln!("ralphd: auto-started ralph (pid {pid})");
-                let _ = channel
-                    .say(&ctx.http, format!("🟢 auto-started ralph (pid {pid})"))
-                    .await;
+        for lc in self.cfg.loops.values().filter(|l| l.autostart) {
+            if let Some(pid) = loop_pid::running(&lc.state_dir) {
+                eprintln!(
+                    "ralphd[{}]: autostart skipped — loop already running (pid {pid})",
+                    lc.name
+                );
+                continue;
             }
-            Err(e) => {
-                eprintln!("ralphd: auto-start failed: {e}");
-                let _ = channel
-                    .say(&ctx.http, format!("⚠️ ralph auto-start failed: {e}"))
-                    .await;
+            let channel = ChannelId::new(lc.channel_id);
+            match launch_and_record(lc, &self.loop_child, &[]) {
+                Ok(pid) => {
+                    eprintln!("ralphd[{}]: auto-started ralph (pid {pid})", lc.name);
+                    let _ = channel
+                        .say(&ctx.http, format!("🟢 auto-started ralph (pid {pid})"))
+                        .await;
+                }
+                Err(e) => {
+                    eprintln!("ralphd[{}]: auto-start failed: {e}", lc.name);
+                    let _ = channel
+                        .say(&ctx.http, format!("⚠️ ralph auto-start failed: {e}"))
+                        .await;
+                }
             }
         }
-    }
-
-    /// Reap the loop we spawned this session if it has exited, clearing its
-    /// pidfile so a new start works again. The status is intentionally dropped
-    /// here — the START watcher owns turning it into a channel post.
-    fn reap_finished_loop(&self) {
-        let _ = reap_and_clear(&self.cfg, &self.loop_child);
     }
 
     /// A button click from an abnormal-exit post: same auth gate as commands,
-    /// then start the loop (optionally on opus).
+    /// then start that channel's loop (optionally on opus).
     async fn handle_component(&self, ctx: &Context, comp: ComponentInteraction) {
         if !auth::authorized(comp.channel_id.get(), comp.user.id.get(), &self.cfg) {
             let deny = CreateInteractionResponse::Message(
@@ -238,8 +247,10 @@ impl Handler {
             return;
         }
         let reply = match comp.data.custom_id.as_str() {
-            "ralphd:start" => self.component_start(&[]),
-            "ralphd:start-opus" => self.component_start(&["--model".into(), "opus".into()]),
+            "ralphd:start" => self.component_start(comp.channel_id.get(), &[]),
+            "ralphd:start-opus" => {
+                self.component_start(comp.channel_id.get(), &["--model".into(), "opus".into()])
+            }
             other => format!("unknown button `{other}`"),
         };
         let _ = comp
@@ -252,88 +263,113 @@ impl Handler {
             .await;
     }
 
-    fn component_start(&self, extra: &[String]) -> String {
-        self.reap_finished_loop();
-        if let Some(pid) = loop_pid::running(&self.cfg.state_dir) {
+    fn component_start(&self, channel_id: u64, extra: &[String]) -> String {
+        let Some(lc) = self.cfg.loops.get(&channel_id) else {
+            return "no loop configured for this channel".into();
+        };
+        reap_finished(lc, &self.loop_child);
+        if let Some(pid) = loop_pid::running(&lc.state_dir) {
             return format!("already running (pid {pid})");
         }
-        match self.launch_loop(extra) {
+        match launch_and_record(lc, &self.loop_child, extra) {
             Ok(pid) if extra.is_empty() => format!("started ralph (pid {pid})"),
             Ok(pid) => format!("started ralph (pid {pid}) — {}", extra.join(" ")),
             Err(e) => format!("failed to start: {e}"),
         }
     }
 
-    /// Turn a command name plus an option resolver into the reply string. `opt`
-    /// resolves a string option by name, keeping the serenity plumbing in
-    /// `interaction_create`.
-    fn dispatch(&self, name: &str, opt: impl Fn(&str) -> Option<String>) -> String {
-        self.reap_finished_loop();
-        let r = self.ralph();
+    /// Turn a command name plus its option resolvers into the reply string, for
+    /// the loop that owns `channel_id`. `opt`/`flag` resolve options by name,
+    /// keeping the serenity plumbing in `interaction_create`.
+    async fn dispatch(
+        &self,
+        channel_id: u64,
+        name: &str,
+        opt: impl Fn(&str) -> Option<String>,
+        flag: impl Fn(&str) -> bool,
+    ) -> String {
+        let Some(lc) = self.cfg.loops.get(&channel_id) else {
+            return "no loop configured for this channel".into();
+        };
+        reap_finished(lc, &self.loop_child);
+        let r = Ralph::new(lc);
+        // Trimmed-empty options read as absent, so an option left blank in the
+        // client never becomes a literal empty argument.
+        let some = |n: &str| opt(n).filter(|v| !v.trim().is_empty());
         match name {
             "start" => {
-                if let Some(pid) = loop_pid::running(&self.cfg.state_dir) {
+                if let Some(pid) = loop_pid::running(&lc.state_dir) {
                     return format!("already running (pid {pid})");
                 }
                 // An optional model overrides the launch profile's default for
                 // this run (appended, so ralph's last-wins parsing picks it up).
-                let extra = match opt("model") {
-                    Some(m) if !m.trim().is_empty() => vec!["--model".into(), m],
-                    _ => Vec::new(),
+                let extra = match some("model") {
+                    Some(m) => vec!["--model".into(), m],
+                    None => Vec::new(),
                 };
-                match self.launch_loop(&extra) {
+                match launch_and_record(lc, &self.loop_child, &extra) {
                     Ok(pid) => format!("started ralph (pid {pid})"),
                     Err(e) => format!("failed to start: {e}"),
                 }
             }
-            "stop" => match r.stop() {
-                Ok(o) if o.ok => "stop requested — halts after the current iteration".into(),
-                Ok(o) => format!("stop failed: {}", o.stderr.trim()),
-                Err(e) => format!("stop failed: {e}"),
-            },
-            "model" => {
-                let raw = opt("tier").unwrap_or_default();
-                match model::validate_tier(&raw) {
-                    Some(tier) => match r.write_model(tier) {
-                        Ok(()) => format!("next iteration → {tier} (one-shot)"),
-                        Err(e) => format!("could not write MODEL: {e}"),
-                    },
-                    None => format!("unknown tier `{raw}` (use haiku, sonnet, or opus)"),
+            "stop" => {
+                let now = flag("now");
+                match r.stop(now).await {
+                    Ok(o) if o.ok && now => "stopping now — the loop was signalled".into(),
+                    Ok(o) if o.ok => "stop requested — halts after the current iteration".into(),
+                    Ok(o) => format!("stop failed: {}", o.stderr.trim()),
+                    Err(e) => format!("stop failed: {e}"),
                 }
             }
-            "status" | "next" => match r.status_json() {
+            // ralph owns the ladder and canonicalizes the tier, so echo its word.
+            "model" => {
+                let tier = some("tier").unwrap_or_default();
+                shell_reply("model", r.model(&tier).await)
+            }
+            "status" | "next" => match r.status_json().await {
                 Ok(o) if o.ok => {
-                    let running = loop_pid::running(&self.cfg.state_dir).is_some();
+                    let running = loop_pid::running(&lc.state_dir).is_some();
                     format::status_message(&o.stdout, running)
                 }
                 Ok(o) => format!("status failed: {}", o.stderr.trim()),
                 Err(e) => format!("status failed: {e}"),
             },
-            "backlog-add" => {
-                let title = opt("title").unwrap_or_default();
-                let verify = opt("verify").unwrap_or_default();
-                match r.backlog_add(&title, &verify) {
-                    Ok(o) if o.ok => o.stdout.trim().to_string(),
-                    Ok(o) => format!("rejected: {}", o.stderr.trim()),
-                    Err(e) => format!("backlog add failed: {e}"),
-                }
+            "add" => {
+                let title = some("title").unwrap_or_default();
+                let out = r
+                    .add(
+                        some("id").as_deref(),
+                        &title,
+                        some("verify").as_deref(),
+                        some("under").as_deref(),
+                    )
+                    .await;
+                shell_reply("add", out)
+            }
+            "drop" => {
+                let id = some("id").unwrap_or_default();
+                shell_reply("drop", r.drop_task(&id, flag("recursive")).await)
+            }
+            "uncheck" => {
+                let id = some("id").unwrap_or_default();
+                shell_reply("uncheck", r.uncheck(&id).await)
+            }
+            "done" => {
+                let id = some("id").unwrap_or_default();
+                shell_reply("done", r.done(&id).await)
             }
             "backlog-edit" => {
-                let id = opt("id").unwrap_or_default();
-                let title = opt("title").unwrap_or_default();
-                let verify = opt("verify").unwrap_or_default();
-                match r.backlog_edit(&id, &title, &verify) {
-                    Ok(o) if o.ok => o.stdout.trim().to_string(),
-                    Ok(o) => format!("rejected: {}", o.stderr.trim()),
-                    Err(e) => format!("backlog edit failed: {e}"),
-                }
+                let id = some("id").unwrap_or_default();
+                let title = some("title").unwrap_or_default();
+                let verify = some("verify").unwrap_or_default();
+                shell_reply("backlog edit", r.backlog_edit(&id, &title, &verify).await)
             }
             other => format!("unknown command `{other}`"),
         }
     }
 }
 
-/// The seven guild slash commands, in registration order.
+/// The guild slash commands, in registration order.
 fn commands() -> Vec<CreateCommand> {
     let req_str = |name: &str, desc: &str| {
         CreateCommandOption::new(CommandOptionType::String, name, desc).required(true)
@@ -341,30 +377,47 @@ fn commands() -> Vec<CreateCommand> {
     let opt_str = |name: &str, desc: &str| {
         CreateCommandOption::new(CommandOptionType::String, name, desc).required(false)
     };
+    let opt_bool = |name: &str, desc: &str| {
+        CreateCommandOption::new(CommandOptionType::Boolean, name, desc).required(false)
+    };
     vec![
         CreateCommand::new("start")
             .description("Start the ralph loop")
             .add_option(opt_str("model", "model override for this run")),
-        CreateCommand::new("stop").description("Gracefully stop after the current iteration"),
+        CreateCommand::new("stop")
+            .description("Stop after the current iteration, or immediately with now")
+            .add_option(opt_bool("now", "signal the running loop instead of waiting")),
         CreateCommand::new("model")
             .description("One-shot model override for the next iteration")
-            .add_option(req_str("tier", "haiku, sonnet, or opus")),
+            .add_option(req_str("tier", "a tier on the escalation ladder")),
         CreateCommand::new("status")
             .description("Loop status: iteration, pending count, current + next tasks"),
         CreateCommand::new("next").description("Show the current and upcoming backlog tasks"),
-        CreateCommand::new("backlog-add")
-            .description("Append a backlog task (validated before saving)")
+        CreateCommand::new("add")
+            .description("Queue a backlog task (validated before saving)")
             .add_option(req_str("title", "task title"))
-            .add_option(req_str("verify", "how to verify the task is done")),
+            .add_option(opt_str("verify", "how to verify the task is done"))
+            .add_option(opt_str("id", "explicit id, e.g. 3.1.1 (inserted under 3.1)"))
+            .add_option(opt_str("under", "parent id — auto-numbers the next child")),
+        CreateCommand::new("drop")
+            .description("Remove a backlog task (archived, never destroyed)")
+            .add_option(req_str("id", "backlog task id"))
+            .add_option(opt_bool("recursive", "also drop its children")),
+        CreateCommand::new("uncheck")
+            .description("Reopen a checked-off backlog task")
+            .add_option(req_str("id", "backlog task id")),
+        CreateCommand::new("done")
+            .description("Check off a backlog task")
+            .add_option(req_str("id", "backlog task id")),
         CreateCommand::new("backlog-edit")
             .description("Edit a backlog task's title and verify (validated before saving)")
             .add_option(req_str("id", "backlog task id"))
             .add_option(req_str("title", "new task title"))
             .add_option(req_str("verify", "new verify criteria")),
-        CreateCommand::new("btw")
-            .description("Run a one-off yolo claude session with your message")
-            .add_option(req_str("message", "what to tell claude"))
-            .add_option(opt_str("model", "model override for this session")),
+        CreateCommand::new("msg")
+            .description("Steer the loop through its persistent claude session")
+            .add_option(req_str("message", "what to tell the session"))
+            .add_option(opt_bool("new", "start a fresh session, archiving the old one")),
     ]
 }
 
@@ -372,18 +425,30 @@ fn commands() -> Vec<CreateCommand> {
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         let guild = GuildId::new(self.cfg.guild_id);
+        // set_commands REPLACES the guild's whole command set, so a second ralphd
+        // in this guild silently unregisters ours (and we unregister its). Name
+        // what we are overwriting so that shows up in the log rather than as
+        // commands mysteriously vanishing.
+        if let Ok(existing) = guild.get_commands(&ctx.http).await {
+            let names: Vec<&str> = existing.iter().map(|c| c.name.as_str()).collect();
+            eprintln!(
+                "ralphd: replacing ALL {} guild commands in {} ({}) — run exactly one ralphd per guild",
+                names.len(),
+                self.cfg.guild_id,
+                names.join(", ")
+            );
+        }
         match guild.set_commands(&ctx.http, commands()).await {
             Ok(cmds) => eprintln!(
-                "ralphd: ready as {} — registered {} guild commands in {}",
+                "ralphd: ready as {} — registered {} guild commands in {} for {} loop(s)",
                 ready.user.name,
                 cmds.len(),
-                self.cfg.guild_id
+                self.cfg.guild_id,
+                self.cfg.loops.len(),
             ),
             Err(e) => eprintln!("ralphd: failed to register guild commands: {e}"),
         }
-        if self.cfg.autostart {
-            self.autostart(&ctx).await;
-        }
+        self.autostart(&ctx).await;
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
@@ -399,8 +464,8 @@ impl EventHandler for Handler {
         let channel_id = command.channel_id.get();
         let user_id = command.user.id.get();
 
-        // Auth gate: refuse anything outside the single configured channel+user
-        // with an ephemeral notice and take no further action.
+        // Auth gate: refuse anything outside the one user and a channel some
+        // loop claims, with an ephemeral notice, and take no further action.
         if !auth::authorized(channel_id, user_id, &self.cfg) {
             let deny = CreateInteractionResponse::Message(
                 CreateInteractionResponseMessage::new()
@@ -411,40 +476,41 @@ impl EventHandler for Handler {
             return;
         }
 
+        let value = |name: &str| command.data.options.iter().find(|o| o.name == name);
         let get = |name: &str| -> Option<String> {
-            command
-                .data
-                .options
-                .iter()
-                .find(|o| o.name == name)
-                .and_then(|o| o.value.as_str())
-                .map(String::from)
+            value(name).and_then(|o| o.value.as_str()).map(String::from)
         };
+        let get_bool =
+            |name: &str| -> bool { value(name).and_then(|o| o.value.as_bool()).unwrap_or(false) };
 
-        // `/btw` runs a full claude session, which far exceeds Discord's 3s ack
+        // `/msg` drives a claude session, which far exceeds Discord's 3s ack
         // window: defer first, then stream the session, keeping one live status
         // message current with token usage and finishing with the cost.
-        if command.data.name == "btw" {
-            let message = get("message").unwrap_or_default();
-            let model = get("model");
-            if message.trim().is_empty() {
+        if command.data.name == "msg" {
+            let text = get("message").unwrap_or_default();
+            if text.trim().is_empty() {
                 return;
             }
+            let Some(lc) = self.cfg.loops.get(&channel_id) else {
+                return;
+            };
             if command.defer(&ctx.http).await.is_err() {
                 return;
             }
-            match self.ralph().spawn_btw(&message, model.as_deref()) {
-                Ok(child) => btw::drive(&ctx, &command, child).await,
+            match Ralph::new(lc).spawn_msg(&text, get_bool("new")) {
+                Ok(child) => msg::drive(&ctx, &command, child).await,
                 Err(e) => {
                     let edit = EditInteractionResponse::new()
-                        .content(format!("could not start claude: {e}"));
+                        .content(format!("could not start the session: {e}"));
                     let _ = command.edit_response(&ctx.http, edit).await;
                 }
             }
             return;
         }
 
-        let reply = self.dispatch(&command.data.name, get);
+        let reply = self
+            .dispatch(channel_id, &command.data.name, get, get_bool)
+            .await;
         let response = CreateInteractionResponse::Message(
             CreateInteractionResponseMessage::new().content(reply),
         );
@@ -459,7 +525,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering as O};
 
-    fn tmp_cfg() -> BotConfig {
+    fn tmp_loop() -> LoopConfig {
         static N: AtomicUsize = AtomicUsize::new(0);
         let dir = std::env::temp_dir().join(format!(
             "ralphd-start-{}-{}",
@@ -468,92 +534,136 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        BotConfig {
-            token: "t".into(),
-            guild_id: 1,
+        LoopConfig {
+            name: "test".into(),
             channel_id: 2,
-            user_id: 3,
             working_dir: dir.clone(),
+            ralph_config: dir.join("ralph.toml"),
             state_dir: dir,
             ralph_args: vec![],
+            webhook: None,
             autostart: false,
         }
     }
 
+    fn no_children() -> LoopChild {
+        Arc::new(Mutex::new(HashMap::new()))
+    }
+
     #[test]
     fn poll_start_no_marker_is_no_trigger() {
-        let cfg = tmp_cfg();
-        let lc: LoopChild = Arc::new(Mutex::new(None));
-        assert_eq!(poll_start(&cfg, &lc), (StartDecision::NoTrigger, None));
+        let lc = tmp_loop();
+        assert_eq!(
+            poll_start(&lc, &no_children()),
+            (StartDecision::NoTrigger, None)
+        );
     }
 
     #[test]
     fn poll_start_launches_and_consumes_marker() {
-        let cfg = tmp_cfg();
-        let lc: LoopChild = Arc::new(Mutex::new(None));
-        std::fs::write(cfg.state_dir.join("START"), "go").unwrap();
-        assert_eq!(poll_start(&cfg, &lc), (StartDecision::Launch, None));
-        assert!(!cfg.state_dir.join("START").exists(), "marker must be consumed");
+        let lc = tmp_loop();
+        std::fs::write(lc.state_dir.join("START"), "go").unwrap();
+        assert_eq!(
+            poll_start(&lc, &no_children()),
+            (StartDecision::Launch, None)
+        );
+        assert!(!lc.state_dir.join("START").exists(), "marker must be consumed");
     }
 
     #[test]
     fn poll_start_skips_when_a_loop_is_running() {
-        let cfg = tmp_cfg();
-        let lc: LoopChild = Arc::new(Mutex::new(None));
-        std::fs::write(cfg.state_dir.join("START"), "go").unwrap();
+        let lc = tmp_loop();
+        std::fs::write(lc.state_dir.join("START"), "go").unwrap();
         // A live pid (our own) recorded in the pidfile reads as "running".
-        loop_pid::write(&cfg.state_dir, std::process::id()).unwrap();
+        loop_pid::write(&lc.state_dir, std::process::id()).unwrap();
         assert_eq!(
-            poll_start(&cfg, &lc),
+            poll_start(&lc, &no_children()),
             (StartDecision::AlreadyRunning(std::process::id()), None)
         );
         assert!(
-            !cfg.state_dir.join("START").exists(),
+            !lc.state_dir.join("START").exists(),
             "marker consumed even when skipped"
         );
     }
 
     #[test]
-    fn reap_returns_the_childs_exit_status() {
-        let cfg = tmp_cfg();
+    fn reap_returns_the_childs_exit_status_and_leaves_the_pidfile_to_ralph() {
+        let lc = tmp_loop();
         // A real short-lived child with a nonzero exit.
         let child = std::process::Command::new("sh")
             .args(["-c", "exit 3"])
             .spawn()
             .unwrap();
-        loop_pid::write(&cfg.state_dir, child.id()).unwrap();
-        let lc: LoopChild = Arc::new(Mutex::new(Some(child)));
-        // Wait for the child to exit, then reap.
+        loop_pid::write(&lc.state_dir, child.id()).unwrap();
+        let lchild: LoopChild = Arc::new(Mutex::new(HashMap::from([(lc.channel_id, child)])));
         let status = loop {
-            if let Some(s) = reap_and_clear(&cfg, &lc) {
+            if let Some(s) = reap_finished(&lc, &lchild) {
                 break s;
             }
             std::thread::sleep(Duration::from_millis(20));
         };
         assert_eq!(status.code(), Some(3));
-        assert!(lc.lock().unwrap().is_none(), "child handle cleared");
-        assert_eq!(loop_pid::read(&cfg.state_dir), None, "pidfile cleared");
+        assert!(
+            !lchild.lock().unwrap().contains_key(&lc.channel_id),
+            "child handle cleared"
+        );
+        assert!(
+            loop_pid::read(&lc.state_dir).is_some(),
+            "ralph owns loop.pid — ralphd must not delete it"
+        );
         // Nothing left to reap.
-        assert_eq!(reap_and_clear(&cfg, &lc), None);
+        assert_eq!(reap_finished(&lc, &lchild), None);
+    }
+
+    #[test]
+    fn reaping_one_loop_leaves_the_others_children_alone() {
+        let a = tmp_loop();
+        let mut b = tmp_loop();
+        b.channel_id = 99;
+        let quick = std::process::Command::new("sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        let slow = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let slow_pid = slow.id();
+        let lchild: LoopChild = Arc::new(Mutex::new(HashMap::from([
+            (a.channel_id, quick),
+            (b.channel_id, slow),
+        ])));
+        loop {
+            if reap_finished(&a, &lchild).is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(reap_finished(&b, &lchild), None, "the other loop still runs");
+        let mut survivor = lchild
+            .lock()
+            .unwrap()
+            .remove(&b.channel_id)
+            .expect("other child retained");
+        assert_eq!(survivor.id(), slow_pid);
+        let _ = survivor.kill();
+        let _ = survivor.wait();
     }
 
     #[test]
     fn abort_reason_is_last_aborted_line_without_timestamp() {
-        let cfg = tmp_cfg();
+        let lc = tmp_loop();
         std::fs::write(
-            cfg.state_dir.join("run.log"),
+            lc.state_dir.join("run.log"),
             "10:00:01 iter 3 → sonnet\n\
              10:05:00 === ralph ABORTED — no progress after 4 iterations (escalated to opus) ===\n\
              10:05:01 tail noise\n",
         )
         .unwrap();
-        let reason = last_abort_reason(&cfg.state_dir).unwrap();
+        let reason = last_abort_reason(&lc.state_dir).unwrap();
         assert_eq!(
             reason,
             "ralph ABORTED — no progress after 4 iterations (escalated to opus)"
         );
         // Absent file → None (caller falls back to the raw exit status).
-        let empty = tmp_cfg();
+        let empty = tmp_loop();
         assert_eq!(last_abort_reason(&empty.state_dir), None);
     }
 }

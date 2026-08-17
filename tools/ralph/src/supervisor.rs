@@ -16,9 +16,11 @@
 use crate::config::Config;
 use crate::notify;
 use crate::state::State;
-use crate::{control, R};
+use crate::{control, pidguard, R};
 use std::io::{self, Write};
 use std::os::raw::c_int;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -28,6 +30,37 @@ const RESTART_BACKOFF_SECS: u64 = 10;
 const MIN_HEALTHY_SECS: u64 = 60;
 /// Consecutive rapid failures before the supervisor gives up on restarting.
 const MAX_RAPID_RESTARTS: u32 = 5;
+
+/// The loop child, for the SIGTERM handler; 0 while no child is running.
+static CHILD_PID: AtomicU32 = AtomicU32::new(0);
+
+/// The single-loop-per-repo pidfile. Holds the *supervisor's* pid: it is the
+/// process a `ralph stop --now` has to reach.
+pub fn pidfile(dir: &Path) -> PathBuf {
+    dir.join("loop.pid")
+}
+
+/// Install `handler` for `sig`. No `SA_RESTART`: `wait_for` already retries
+/// across EINTR, and the other blocking waits are better off interrupted.
+pub fn install_handler(sig: c_int, handler: extern "C" fn(c_int)) {
+    unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = handler as libc::sighandler_t;
+        libc::sigemptyset(&mut sa.sa_mask);
+        libc::sigaction(sig, &sa, std::ptr::null_mut());
+    }
+}
+
+/// Forward a stop signal to the loop child and return, so the death arrives
+/// through the usual `waitpid` path and is classified there.
+extern "C" fn forward_to_child(sig: c_int) {
+    let pid = CHILD_PID.load(Ordering::SeqCst);
+    // pid-to-pid: a hand-launched ralph does not lead its process group, so a
+    // negative target would signal the invoking shell's group.
+    if pid != 0 {
+        unsafe { libc::kill(pid as libc::pid_t, sig) };
+    }
+}
 
 /// Interpreted `waitpid` status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,12 +172,23 @@ fn report_death(notifier: &Option<notify::Notifier>, pid: libc::pid_t, sig: c_in
 
 /// Run the loop under supervision. Returns the process exit code.
 pub fn run(cfg: &Config) -> R<i32> {
+    let path = pidfile(&cfg.dir);
+    // Taken before either path below, and released by its Drop on a graceful exit.
+    let _pidfile = match pidguard::acquire(&path) {
+        Ok(guard) => guard,
+        Err(Some(pid)) => {
+            return Err(format!("a loop is already running in this repo (pid {pid})").into())
+        }
+        Err(None) => return Err(format!("cannot take {}", path.display()).into()),
+    };
+
     // Nothing to supervise (no restart, no webhook to report a death on) → run the
     // loop inline and skip the fork entirely.
     if !cfg.restart && cfg.discord_webhook.trim().is_empty() {
         return control::run(cfg);
     }
 
+    install_handler(libc::SIGTERM, forward_to_child);
     let notifier = notify::Notifier::new(&cfg.discord_webhook);
     let mut guard = RestartGuard::new();
 
@@ -170,7 +214,9 @@ pub fn run(cfg: &Config) -> R<i32> {
                 std::process::exit(code);
             }
             pid => {
+                CHILD_PID.store(pid as u32, Ordering::SeqCst);
                 let status = wait_for(pid)?;
+                CHILD_PID.store(0, Ordering::SeqCst);
                 let lived = start.elapsed();
                 match interpret(status) {
                     // Graceful exit (or panic): propagate, terminal.
@@ -208,6 +254,11 @@ pub fn run(cfg: &Config) -> R<i32> {
                                     if stop {
                                         s.clear_stop();
                                         s.log("supervisor: STOP present → not restarting");
+                                    } else if is_terminating_signal(sig) {
+                                        // A bare `kill -TERM` is not a crash loop.
+                                        s.log(&format!(
+                                            "supervisor: deliberate termination (signal {sig}) → not restarting"
+                                        ));
                                     } else if cfg.restart {
                                         s.log("supervisor: too many rapid crashes → giving up on restart");
                                         notify::notify(
@@ -264,8 +315,14 @@ mod tests {
         // Exit code follows the 128 + signal convention.
         assert_eq!(restart_decision(11, false, false, false), Next::Stop(139));
         // Deliberate-termination signals never restart, even when fully eligible.
-        assert_eq!(restart_decision(libc::SIGINT, true, false, true), Next::Stop(130));
-        assert_eq!(restart_decision(libc::SIGTERM, true, false, true), Next::Stop(143));
+        assert_eq!(
+            restart_decision(libc::SIGINT, true, false, true),
+            Next::Stop(130)
+        );
+        assert_eq!(
+            restart_decision(libc::SIGTERM, true, false, true),
+            Next::Stop(143)
+        );
         // A crash/OOM signal (SIGSEGV) still restarts when eligible.
         assert_eq!(restart_decision(11, true, false, true), Next::Restart);
     }

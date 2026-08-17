@@ -1,6 +1,7 @@
-//! Driving a streaming `/btw` claude session.
+//! Driving the streaming `/msg` session.
 //!
-//! `claude -p --output-format stream-json` emits one NDJSON event per line. We
+//! `ralph msg` passes through the `claude -p --output-format stream-json` it
+//! runs, which emits one NDJSON event per line. We
 //! fold those into live token accounting (a technique inspired by `cctop`, which
 //! surfaces a running session's token usage) and edit a *single* Discord status
 //! message every few minutes with elapsed time and tokens-so-far. When the
@@ -245,7 +246,7 @@ async fn transition(ctx: &Context, command: &CommandInteraction, live: &mut Live
         .await
     {
         Ok(msg) => *live = Live::Channel(msg.id),
-        Err(e) => eprintln!("ralphd: /btw transition to channel message failed: {e}"),
+        Err(e) => eprintln!("ralphd: /msg transition to channel message failed: {e}"),
     }
 }
 
@@ -283,7 +284,7 @@ async fn finalize(ctx: &Context, command: &CommandInteraction, live: &Live, text
             .map(|e| e.to_string()),
     };
     if let Some(e) = err {
-        eprintln!("ralphd: /btw final update failed ({e}); posting result as a new message");
+        eprintln!("ralphd: /msg final update failed ({e}); posting result as a new message");
         let _ = command
             .channel_id
             .send_message(

@@ -1,6 +1,6 @@
-//! Single-loop enforcement via `<state_dir>/loop.pid`. ralphd writes it when it
-//! spawns a loop and consults it (with a liveness probe) to refuse a second
-//! `/start` and to re-adopt a still-running loop after a ralphd restart.
+//! Read-only view of `<state_dir>/loop.pid`. `ralph` owns the file now (it
+//! takes it with `create_new` at startup); ralphd only probes it to refuse a
+//! second `/start` and to see a loop it did not launch.
 
 use std::path::{Path, PathBuf};
 
@@ -21,7 +21,8 @@ pub fn is_alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
-/// Record the running loop's pid.
+/// Stand in for the `ralph` startup guard, which the tests cannot run.
+#[cfg(test)]
 pub fn write(state_dir: &Path, pid: u32) -> std::io::Result<()> {
     std::fs::create_dir_all(state_dir)?;
     std::fs::write(pidfile(state_dir), format!("{pid}\n"))
@@ -45,11 +46,6 @@ pub fn running(state_dir: &Path) -> Option<u32> {
         }
         None => None,
     }
-}
-
-/// Clear the pidfile (best-effort), e.g. after a confirmed stop.
-pub fn clear(state_dir: &Path) {
-    let _ = std::fs::remove_file(pidfile(state_dir));
 }
 
 #[cfg(test)]

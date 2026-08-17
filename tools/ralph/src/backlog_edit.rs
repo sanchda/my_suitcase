@@ -1,10 +1,12 @@
-//! `ralph backlog add|edit` — schema-safe backlog mutation. Both operations are
-//! pure `String -> Result<String, String>` transforms gated by an in-memory
-//! lint: an edit that would make the backlog invalid is REJECTED and never
-//! reaches disk, so a mutation can never crash a running loop (which aborts on
-//! an invalid backlog). Writes are atomic (temp file + rename).
+//! Schema-safe backlog mutation. Every operation is a pure
+//! `String -> Result<String, String>` transform gated by an in-memory lint: an
+//! edit that would make the backlog invalid is REJECTED and never reaches disk,
+//! so a mutation can never crash a running loop (which aborts on an invalid
+//! backlog). Writes are atomic (temp file + rename) and go through the inbox —
+//! see `inbox.rs` for who applies them.
 
-use crate::backlog::{Document, Severity, SCHEMA_MARKER};
+use crate::backlog::{Document, Severity, Task, SCHEMA_MARKER};
+use crate::inbox::Request;
 use crate::R;
 
 /// The skeleton a bootstrapped backlog starts from. `add` appends the first
@@ -35,26 +37,192 @@ fn next_top_level_id(doc: &Document) -> String {
     (max.unwrap_or(0) + 1).to_string()
 }
 
-/// Append a well-formed top-level task; returns `(new_text, new_id)` or the lint
-/// errors that would result.
-pub fn apply_add(current: &str, title: &str, verify: &str) -> Result<(String, String), String> {
+/// Next free `<parent>.N`, counting only direct children.
+fn next_child_id(doc: &Document, parent_id: &str) -> String {
+    let prefix = format!("{parent_id}.");
+    let max = doc
+        .tasks
+        .iter()
+        .filter_map(|t| t.id.strip_prefix(&prefix))
+        .filter(|rest| !rest.contains('.'))
+        .filter_map(|rest| rest.parse::<u64>().ok())
+        .max();
+    format!("{parent_id}.{}", max.unwrap_or(0) + 1)
+}
+
+/// The one-line body form: `--verify` is shorthand for a body of just a contract.
+pub fn verify_body(verify: &str) -> String {
+    format!("Verify: {}", verify.trim())
+}
+
+/// Header plus body at `indent`. Body lines keep their relative shape but are
+/// re-anchored two spaces under the header, per the schema.
+fn task_block(indent: usize, id: &str, title: &str, body: &str) -> String {
+    let pad = " ".repeat(indent);
+    let body = body.trim_matches('\n');
+    let base = body
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    let mut out = format!("{pad}- [ ] **{id} — {}**\n", title.trim());
+    for line in body.lines() {
+        let line = line.trim_end();
+        if line.trim().is_empty() {
+            out.push('\n');
+        } else {
+            out.push_str(&format!("{pad}  {}\n", &line[base.min(line.len())..]));
+        }
+    }
+    out
+}
+
+/// Splice `block` in after `parent`'s subtree, skipping back over trailing blank
+/// lines so the new stage lands snug against its siblings.
+fn insert_after_subtree(current: &str, parent: &Task, block: &str) -> String {
+    let lines: Vec<&str> = current.lines().collect();
+    let mut at = parent.end_line.min(lines.len());
+    while at > parent.line && lines[at - 1].trim().is_empty() {
+        at -= 1;
+    }
+    let mut out = String::new();
+    for line in &lines[..at] {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str(block);
+    for line in &lines[at..] {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// The lint gate every add passes through: a result with errors never returns.
+fn gated(text: String, id: &str) -> Result<(String, String), String> {
+    let doc = Document::parse(&text);
+    if doc.has_errors() {
+        return Err(lint_errors(&doc));
+    }
+    Ok((text, id.to_string()))
+}
+
+fn check_title(title: &str) -> Result<(), String> {
     if title.contains("**") {
         return Err("task title may not contain `**` (it breaks the bold label)".to_string());
     }
-    let doc = Document::parse(current);
-    let id = next_top_level_id(&doc);
+    Ok(())
+}
+
+/// Append a task at the end of the backlog under the next top-level id; returns
+/// `(new_text, new_id)` or the lint errors that would result.
+pub fn apply_add_top(current: &str, title: &str, body: &str) -> Result<(String, String), String> {
+    check_title(title)?;
+    let id = next_top_level_id(&Document::parse(current));
     let mut text = current.trim_end().to_string();
     text.push('\n');
-    text.push_str(&format!(
-        "- [ ] **{id} — {}**\n  Verify: {}\n",
-        title.trim(),
-        verify.trim()
-    ));
-    let new_doc = Document::parse(&text);
+    text.push_str(&task_block(0, &id, title, body));
+    gated(text, &id)
+}
+
+/// Insert an explicitly numbered task as the last child of the parent its id
+/// implies (`3.1.1` → under `3.1`); a dotless id appends at top level.
+pub fn apply_add_with_id(
+    current: &str,
+    id: &str,
+    title: &str,
+    body: &str,
+) -> Result<(String, String), String> {
+    check_title(title)?;
+    let doc = Document::parse(current);
+    if let Some(existing) = doc.tasks.iter().find(|t| t.id == id) {
+        return Err(format!("id {id} already exists (line {})", existing.line));
+    }
+    let Some((parent_id, _)) = id.rsplit_once('.') else {
+        let mut text = current.trim_end().to_string();
+        text.push('\n');
+        text.push_str(&task_block(0, id, title, body));
+        return gated(text, id);
+    };
+    let parent = doc
+        .tasks
+        .iter()
+        .find(|t| t.id == parent_id)
+        .ok_or_else(|| format!("no task with id `{parent_id}` (the parent implied by `{id}`)"))?;
+    let block = task_block(parent.indent + 2, id, title, body);
+    gated(insert_after_subtree(current, parent, &block), id)
+}
+
+/// Add a stage under `parent_id`, numbering it so the caller doesn't have to.
+pub fn apply_add_under(
+    current: &str,
+    parent_id: &str,
+    title: &str,
+    body: &str,
+) -> Result<(String, String), String> {
+    let doc = Document::parse(current);
+    if !doc.tasks.iter().any(|t| t.id == parent_id) {
+        return Err(format!("no task with id `{parent_id}`"));
+    }
+    apply_add_with_id(current, &next_child_id(&doc, parent_id), title, body)
+}
+
+/// Check off one task. Deliberately no cascade: a parent whose last child closes
+/// is a container that still owes its own integration step.
+pub fn apply_done(current: &str, id: &str) -> Result<String, String> {
+    let doc = Document::parse(current);
+    let task = doc
+        .tasks
+        .iter()
+        .find(|t| t.id == id)
+        .ok_or_else(|| format!("no task with id `{id}`"))?;
+    if task.checked {
+        return Err(format!("task `{id}` is already checked"));
+    }
+    let mut lines: Vec<String> = current.lines().map(String::from).collect();
+    let line = &mut lines[task.line - 1];
+    *line = line.replacen("- [ ] ", "- [x] ", 1);
+    let mut out = lines.join("\n");
+    out.push('\n');
+    let new_doc = Document::parse(&out);
     if new_doc.has_errors() {
         return Err(lint_errors(&new_doc));
     }
-    Ok((text, id))
+    Ok(out)
+}
+
+/// Remove a task's own body and its subtree; returns `(new_text, removed_block)`
+/// so the caller can archive what it deleted. Children need `recursive` — a
+/// silent cascade is how work disappears.
+pub fn apply_drop(current: &str, id: &str, recursive: bool) -> Result<(String, String), String> {
+    let doc = Document::parse(current);
+    let index = doc
+        .tasks
+        .iter()
+        .position(|t| t.id == id)
+        .ok_or_else(|| format!("no task with id `{id}`"))?;
+    let children = doc.tasks.iter().filter(|t| t.parent == Some(index)).count();
+    if children > 0 && !recursive {
+        return Err(format!(
+            "task `{id}` has {children} child stage(s) — pass --recursive to drop them too"
+        ));
+    }
+    let task = &doc.tasks[index];
+    let lines: Vec<&str> = current.lines().collect();
+    let start = task.line.saturating_sub(1);
+    let end = task.end_line.min(lines.len());
+    let removed = format!("{}\n", lines[start..end].join("\n"));
+    let mut out = String::new();
+    for line in lines[..start].iter().chain(&lines[end..]) {
+        out.push_str(line);
+        out.push('\n');
+    }
+    let new_doc = Document::parse(&out);
+    if new_doc.has_errors() {
+        return Err(lint_errors(&new_doc));
+    }
+    Ok((out, removed))
 }
 
 /// Un-check task `id` (flip its `[x]` back to `[ ]`), plus any checked ancestor
@@ -106,7 +274,9 @@ pub(crate) fn write_atomic(path: &std::path::Path, new_text: &str) -> R<()> {
     std::fs::create_dir_all(dir)?;
     let tmp = dir.join(format!(
         ".{}.{}.tmp",
-        path.file_name().and_then(|n| n.to_str()).unwrap_or("BACKLOG.md"),
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("BACKLOG.md"),
         std::process::id()
     ));
     std::fs::write(&tmp, new_text)?;
@@ -164,65 +334,39 @@ pub fn apply_edit(current: &str, id: &str, title: &str, verify: &str) -> Result<
     Ok(out)
 }
 
-/// `ralph backlog <add|edit> ...`. Returns exit 0 on success, 1 on a rejected
-/// (invalid-result) mutation, and errors on bad usage / IO.
+/// `ralph backlog <add|edit> ...` — the flag-shaped aliases ralphd still calls.
+/// They queue like every other mutation, so no CLI path writes the backlog in
+/// place.
 pub fn run(args: &[String]) -> R<i32> {
     let sub = args.first().map(String::as_str);
     let rest = args.get(1..).unwrap_or(&[]);
     let cfg = crate::config::load_base(rest)?;
-    // `add` bootstraps a fresh schema-valid backlog when the file is absent
-    // (the previous arc's completion archived it away); `edit` never does —
-    // there is nothing to edit.
-    let (current, bootstrapped) = match std::fs::read_to_string(&cfg.backlog) {
-        Ok(text) => (text, false),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound && sub == Some("add") => {
-            (empty_backlog(), true)
-        }
-        Err(e) => {
-            return Err(format!("{}: cannot read backlog: {e}", cfg.backlog.display()).into())
-        }
+    let current = crate::backlog_cli::current(&cfg.backlog)?;
+    let req = match sub {
+        Some("add") => Request::Add {
+            id: None,
+            under: None,
+            title: flag(rest, "--title")
+                .ok_or("backlog add: --title <text> required")?
+                .to_string(),
+            body: verify_body(
+                flag(rest, "--verify").ok_or("backlog add: --verify <cmd> required")?,
+            ),
+        },
+        Some("edit") => Request::Edit {
+            id: flag(rest, "--id")
+                .ok_or("backlog edit: --id <id> required")?
+                .to_string(),
+            title: flag(rest, "--title")
+                .ok_or("backlog edit: --title <text> required")?
+                .to_string(),
+            verify: flag(rest, "--verify")
+                .ok_or("backlog edit: --verify <cmd> required")?
+                .to_string(),
+        },
+        other => return Err(format!("backlog: expected `add` or `edit`, got {other:?}").into()),
     };
-    match sub {
-        Some("add") => {
-            let title = flag(rest, "--title").ok_or("backlog add: --title <text> required")?;
-            let verify = flag(rest, "--verify").ok_or("backlog add: --verify <cmd> required")?;
-            match apply_add(&current, title, verify) {
-                Ok((new_text, id)) => {
-                    write_atomic(&cfg.backlog, &new_text)?;
-                    if bootstrapped {
-                        println!(
-                            "bootstrapped {} and added task {id}",
-                            cfg.backlog.display()
-                        );
-                    } else {
-                        println!("added task {id}");
-                    }
-                    Ok(0)
-                }
-                Err(errors) => {
-                    eprintln!("backlog add rejected — result would be invalid:\n{errors}");
-                    Ok(1)
-                }
-            }
-        }
-        Some("edit") => {
-            let id = flag(rest, "--id").ok_or("backlog edit: --id <id> required")?;
-            let title = flag(rest, "--title").ok_or("backlog edit: --title <text> required")?;
-            let verify = flag(rest, "--verify").ok_or("backlog edit: --verify <cmd> required")?;
-            match apply_edit(&current, id, title, verify) {
-                Ok(new_text) => {
-                    write_atomic(&cfg.backlog, &new_text)?;
-                    println!("edited task {id}");
-                    Ok(0)
-                }
-                Err(errors) => {
-                    eprintln!("backlog edit rejected:\n{errors}");
-                    Ok(1)
-                }
-            }
-        }
-        other => Err(format!("backlog: expected `add` or `edit`, got {other:?}").into()),
-    }
+    crate::backlog_cli::submit(&cfg, &current, req, "backlog")
 }
 
 #[cfg(test)]
@@ -234,17 +378,26 @@ mod tests {
     fn add_onto_empty_backlog_bootstraps_a_valid_arc() {
         // The exact new-arc path: completion archived BACKLOG.md away, and the
         // first /backlog-add must produce a valid, routable backlog from nothing.
-        let (new_text, id) = apply_add(&empty_backlog(), "First of new arc", "cargo test").unwrap();
+        let (new_text, id) = apply_add_top(
+            &empty_backlog(),
+            "First of new arc",
+            &verify_body("cargo test"),
+        )
+        .unwrap();
         assert_eq!(id, "1");
         let doc = Document::parse(&new_text);
         assert!(!doc.has_errors(), "{:?}", doc.issues);
-        assert_eq!(doc.tasks[doc.selected_index().unwrap()].title, "First of new arc");
+        assert_eq!(
+            doc.tasks[doc.selected_index().unwrap()].title,
+            "First of new arc"
+        );
     }
 
     #[test]
     fn add_appends_valid_task_with_incremented_id() {
         let current = format!("{SCHEMA_MARKER}\n# B\n- [ ] **1 — First.** Verify: y\n");
-        let (new_text, id) = apply_add(&current, "Second thing", "cargo test").unwrap();
+        let (new_text, id) =
+            apply_add_top(&current, "Second thing", &verify_body("cargo test")).unwrap();
         assert_eq!(id, "2");
         let doc = Document::parse(&new_text);
         assert!(!doc.has_errors(), "{:?}", doc.issues);
@@ -256,14 +409,15 @@ mod tests {
     fn add_rejects_placeholder_verify_without_touching_input() {
         // A marked v1 backlog requires a real Verify; "TODO" is a placeholder.
         let current = format!("{SCHEMA_MARKER}\n# B\n- [ ] **1 — First.** Verify: y\n");
-        let err = apply_add(&current, "Bad", "TODO").unwrap_err();
+        let err = apply_add_top(&current, "Bad", &verify_body("TODO")).unwrap_err();
         assert!(err.contains("Verify"), "{err}");
     }
 
     #[test]
     fn add_rejects_double_asterisk_in_title() {
         let current = format!("{SCHEMA_MARKER}\n# B\n- [ ] **1 — First.** Verify: y\n");
-        let err = apply_add(&current, "Support **bold**", "cargo test").unwrap_err();
+        let err =
+            apply_add_top(&current, "Support **bold**", &verify_body("cargo test")).unwrap_err();
         assert!(err.contains("**"), "{err}");
     }
 
@@ -272,7 +426,7 @@ mod tests {
         let current = format!("{SCHEMA_MARKER}\n# B\n- [ ] **1 — First.** Verify: y\n");
         // An embedded newline splits the bold label across lines, so the
         // opening `**` never finds a closing `**` on the same line → parse error.
-        let err = apply_add(&current, "Bad\ntitle", "cargo test").unwrap_err();
+        let err = apply_add_top(&current, "Bad\ntitle", &verify_body("cargo test")).unwrap_err();
         assert!(!err.is_empty());
     }
 
@@ -287,7 +441,10 @@ mod tests {
         let parent = doc.tasks.iter().find(|t| t.id == "1").unwrap();
         assert_eq!(parent.title, "Parent renamed");
         // The child stage is untouched.
-        assert!(doc.tasks.iter().any(|t| t.id == "1.1" && t.title == "Child."));
+        assert!(doc
+            .tasks
+            .iter()
+            .any(|t| t.id == "1.1" && t.title == "Child."));
         assert!(new_text.contains("Verify: new broad"));
     }
 
@@ -318,8 +475,12 @@ mod tests {
     #[test]
     fn uncheck_rejects_pending_or_unknown_task() {
         let current = format!("{SCHEMA_MARKER}\n- [ ] **1 — P.** Verify: y\n");
-        assert!(apply_uncheck(&current, "1").unwrap_err().contains("not checked"));
-        assert!(apply_uncheck(&current, "9").unwrap_err().contains("no task"));
+        assert!(apply_uncheck(&current, "1")
+            .unwrap_err()
+            .contains("not checked"));
+        assert!(apply_uncheck(&current, "9")
+            .unwrap_err()
+            .contains("no task"));
     }
 
     #[test]
@@ -327,5 +488,111 @@ mod tests {
         let current = format!("{SCHEMA_MARKER}\n- [ ] **1 — P.** Verify: y\n");
         let err = apply_edit(&current, "99", "x", "y").unwrap_err();
         assert!(err.contains("99"), "{err}");
+    }
+
+    fn staged() -> String {
+        format!(
+            "{SCHEMA_MARKER}\n# B\n- [ ] **1 — Parent.**\n  Verify: broad\n  - [x] **1.1 — First stage.** Verify: a\n  - [ ] **1.2 — Second stage.** Verify: b\n- [ ] **2 — Later.** Verify: y\n"
+        )
+    }
+
+    #[test]
+    fn explicit_id_lands_as_the_last_child_of_its_implied_parent() {
+        let (new_text, id) =
+            apply_add_with_id(&staged(), "1.3", "Third stage", &verify_body("c")).unwrap();
+        assert_eq!(id, "1.3");
+        let doc = Document::parse(&new_text);
+        assert!(!doc.has_errors(), "{:?}", doc.issues);
+        // Indent is the parent's + 2, and it sits before the next top-level task.
+        assert!(new_text.contains("  - [ ] **1.3 — Third stage**\n    Verify: c\n- [ ] **2"));
+        let parent = doc.tasks.iter().position(|t| t.id == "1").unwrap();
+        assert_eq!(
+            doc.tasks.iter().find(|t| t.id == "1.3").unwrap().parent,
+            Some(parent)
+        );
+    }
+
+    #[test]
+    fn explicit_id_needs_its_parent_and_refuses_a_duplicate() {
+        let err = apply_add_with_id(&staged(), "9.1", "Orphan", &verify_body("c")).unwrap_err();
+        assert!(err.contains("`9`"), "{err}");
+        let err = apply_add_with_id(&staged(), "1.2", "Clash", &verify_body("c")).unwrap_err();
+        assert!(err.contains("already exists (line"), "{err}");
+    }
+
+    #[test]
+    fn under_numbers_the_next_free_stage() {
+        let (_, id) = apply_add_under(&staged(), "1", "Third stage", &verify_body("c")).unwrap();
+        assert_eq!(id, "1.3");
+        let (_, id) = apply_add_under(&staged(), "2", "First stage", &verify_body("c")).unwrap();
+        assert_eq!(id, "2.1");
+        assert!(apply_add_under(&staged(), "9", "x", &verify_body("c"))
+            .unwrap_err()
+            .contains("no task"));
+    }
+
+    #[test]
+    fn a_piped_body_keeps_its_prose_and_its_contract() {
+        let body = "Some constraint.\n\nAnother line.\nVerify: cargo test";
+        let (new_text, _) = apply_add_under(&staged(), "1", "With prose", body).unwrap();
+        let doc = Document::parse(&new_text);
+        assert!(!doc.has_errors(), "{:?}", doc.issues);
+        assert!(
+            new_text.contains("    Some constraint.\n\n    Another line.\n    Verify: cargo test"),
+            "{new_text}"
+        );
+    }
+
+    #[test]
+    fn done_checks_one_task_and_never_its_parent() {
+        let new_text = apply_done(&staged(), "1.2").unwrap();
+        let doc = Document::parse(&new_text);
+        assert!(!doc.has_errors(), "{:?}", doc.issues);
+        assert!(new_text.contains("  - [x] **1.2 — Second stage.**"));
+        // The parent stays open: it is now its own integration step.
+        assert!(new_text.contains("- [ ] **1 — Parent.**"));
+        assert_eq!(doc.tasks[doc.selected_index().unwrap()].id, "1");
+    }
+
+    #[test]
+    fn done_rejects_a_parent_with_pending_stages() {
+        // The existing "checked parent contains an unchecked stage" lint is the
+        // right answer here, not a cascade.
+        let err = apply_done(&staged(), "1").unwrap_err();
+        assert!(err.contains("unchecked stage"), "{err}");
+        assert!(apply_done(&staged(), "1.1")
+            .unwrap_err()
+            .contains("already checked"));
+        assert!(apply_done(&staged(), "9").unwrap_err().contains("no task"));
+    }
+
+    #[test]
+    fn drop_takes_the_subtree_and_hands_it_back_for_archiving() {
+        let (new_text, removed) = apply_drop(&staged(), "1", true).unwrap();
+        let doc = Document::parse(&new_text);
+        assert!(!doc.has_errors(), "{:?}", doc.issues);
+        assert_eq!(doc.tasks.len(), 1);
+        assert_eq!(doc.tasks[0].id, "2");
+        assert!(removed.contains("**1 — Parent.**"));
+        assert!(removed.contains("**1.2 — Second stage.**"));
+    }
+
+    #[test]
+    fn drop_refuses_a_parent_without_recursive_and_an_unknown_id() {
+        let err = apply_drop(&staged(), "1", false).unwrap_err();
+        assert!(err.contains("--recursive"), "{err}");
+        assert!(apply_drop(&staged(), "9", true)
+            .unwrap_err()
+            .contains("no task"));
+    }
+
+    #[test]
+    fn drop_of_a_leaf_leaves_its_siblings_intact() {
+        let (new_text, removed) = apply_drop(&staged(), "1.2", false).unwrap();
+        let doc = Document::parse(&new_text);
+        assert!(!doc.has_errors(), "{:?}", doc.issues);
+        assert!(doc.tasks.iter().any(|t| t.id == "1.1"));
+        assert!(!doc.tasks.iter().any(|t| t.id == "1.2"));
+        assert_eq!(removed.lines().count(), 1);
     }
 }

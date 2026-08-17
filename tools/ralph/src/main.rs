@@ -8,6 +8,7 @@
 //! driving files (PROMPT/VISION/BACKLOG/PROGRESS) are local to the target repo.
 
 mod backlog;
+mod backlog_cli;
 mod backlog_edit;
 mod classify;
 mod config;
@@ -16,13 +17,19 @@ mod control;
 mod curate;
 mod git;
 mod hints;
+mod inbox;
 mod init;
 mod judge;
 mod learn;
+mod ledger;
+mod model;
+mod msg;
 mod notify;
+mod pidguard;
 mod schema;
 mod state;
 mod status;
+mod stop;
 mod stream;
 mod supervisor;
 mod synth;
@@ -36,12 +43,19 @@ ralph — external autonomous loop for Claude Code (run from the repo root)
 Usage: ralph [options]
        ralph init                Scaffold .ralph/ in the current repo
        ralph start [options]     Ask a running ralphd to launch the loop (writes START)
-       ralph stop [options]      Ask a running loop to halt after the current task
+       ralph stop [--now]        Halt after the current task (--now also kills it)
        ralph hints               Lessons for writing a per-project PROMPT.md
        ralph schema              Explain the backlog schema and lint workflow
        ralph lint [options]      Validate backlog schema and task routing
        ralph brief [options]     Print the runner-resolved iteration brief
        ralph status [--json]     Print backlog frontier (JSON with --json)
+       ralph add [<id>] <title> [--verify <cmd>]  Queue a task (stdin = full body)
+       ralph add --under <parent> <title>         Queue the next <parent>.N stage
+       ralph drop <id> [--recursive]              Queue a removal (archived, not lost)
+       ralph done <id>                            Queue a check-off
+       ralph uncheck <id>                         Queue a reopen
+       ralph model <tier>        One-shot model override for the next iteration
+       ralph msg [--new] <text>  Steer the loop through a persistent claude session
        ralph backlog <add|edit> ...  Add or edit a backlog task (schema-checked)
        ralph learn               Mine run.log for durable lessons (propose only)
        ralph learn --apply [1,3] Write proposed learnings to .ralph/learnings/
@@ -69,11 +83,16 @@ Usage: ralph [options]
 
 Config-file-only settings (.ralph/ralph.toml — no flag; see README):
   synth_model, judge_tiers, judge_model, escalation_ladder,
-  limit_wait[_max], transient_wait[_max], extra_args
+  limit_wait[_max], transient_wait[_max], extra_args,
+  budget_usd, budget_window
+
+Backlog mutations never write BACKLOG.md in place. While a loop runs they queue
+to .ralph/inbox/ and apply at the next iteration boundary, so the backlog can
+never shift under a running agent; with no loop running they apply immediately.
 
 Completion closes the arc: BACKLOG and the carry-forward are archived, PROGRESS
-is cleared, and the iteration counter resets. `ralph backlog add` bootstraps a
-fresh backlog when none exists, so the next arc starts from `backlog add`.
+is cleared, and the iteration counter resets. `ralph add` bootstraps a fresh
+backlog when none exists, so the next arc starts from `add`.
 `.ralph/learnings/` persists across arcs.
 
 Control while running:
@@ -118,10 +137,23 @@ fn run() -> R<i32> {
     if argv.first().map(String::as_str) == Some("learn") {
         return learn::run(&argv[1..]);
     }
+    if argv.first().map(String::as_str) == Some("model") {
+        return model::run(&argv[1..]);
+    }
+    if argv.first().map(String::as_str) == Some("msg") {
+        return msg::run(&argv[1..]);
+    }
+    if let Some(sub @ ("add" | "drop" | "done" | "uncheck")) = argv.first().map(String::as_str) {
+        return backlog_cli::run(sub, &argv[1..]);
+    }
+    // `stop` resolves its own config: `--now` would not survive `apply_args`.
+    if argv.first().map(String::as_str) == Some("stop") {
+        return stop::run(&argv[1..]);
+    }
 
     let command = argv.first().map(String::as_str);
-    // `stop`/`start` and the inspect-only commands take flags after the subcommand.
-    let subcommand = matches!(command, Some("brief" | "lint" | "stop" | "start"));
+    // `start` and the inspect-only commands take flags after the subcommand.
+    let subcommand = matches!(command, Some("brief" | "lint" | "start"));
     let inspect_only = matches!(command, Some("brief" | "lint"));
     let args = if subcommand { &argv[1..] } else { &argv[..] };
 
@@ -133,16 +165,6 @@ fn run() -> R<i32> {
         return Ok(0);
     }
     config::validate(&cfg)?;
-
-    if command == Some("stop") {
-        let state = state::State::open(&cfg.dir)?;
-        state.request_stop()?;
-        println!(
-            "ralph: stop requested → {} (loop halts after the current task; suppresses --restart)",
-            cfg.dir.join("STOP").display()
-        );
-        return Ok(0);
-    }
 
     if command == Some("start") {
         let state = state::State::open(&cfg.dir)?;
