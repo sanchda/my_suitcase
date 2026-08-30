@@ -1,0 +1,547 @@
+#!/bin/bash
+# cc-mod -- enable/disable Claude Code config mods declared in the suitcase.
+#
+# A mod is a directory under claude/mods/<name>/ with a mod.json declaring a
+# settings fragment (and optionally file links and enable/disable scripts).
+# Enabling merges the fragment into ~/.claude/settings.json and writes a receipt
+# of exactly what changed; disabling replays that receipt backwards, so entries
+# other mods (or you) added to the same arrays survive, and a key that already
+# had a value gets that value back instead of being deleted.
+#
+# These are NOT Claude Code's native plugins (`/plugin`, enabledPlugins) -- they
+# are local config fragments this repo owns.
+#
+# Env overrides (used by tests):
+#   CC_MOD_DIR        mods directory      (default $SUITCASE/claude/mods)
+#   CLAUDE_SETTINGS   settings file       (default ~/.claude/settings.json)
+#   CC_MOD_STATE      receipts + backups  (default ${XDG_STATE_HOME:-~/.local/state}/cc-mod)
+#
+# Portability: no mapfile, no `head -n -N` -- this has to run under macOS bash 3.2.
+set -uo pipefail
+
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SUITCASE="$(cd "$SELF/.." && pwd)"
+LIB="$SUITCASE/lib"
+MODS_DIR="${CC_MOD_DIR:-$SUITCASE/claude/mods}"
+SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
+STATE="${CC_MOD_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/cc-mod}"
+RECEIPTS="$STATE/receipts"
+BACKUPS="$STATE/backups"
+OPTOUT="$STATE/opted-out"
+KEEP_BACKUPS=10
+DRY_RUN=0
+ENSURE=0
+
+usage() {
+  cat <<'EOF'
+cc-mod -- enable/disable Claude Code config mods from the suitcase
+
+Usage: cc-mod list                     What exists and what is on
+       cc-mod status [<mod>...]        What a mod owns, and whether it still holds
+       cc-mod enable <mod>...|--default|--all
+       cc-mod ensure <mod>...|--default|--all
+       cc-mod disable <mod>...|--all
+       cc-mod reapply                  Re-enable everything already on (after a pull)
+       cc-mod doctor                   Check requirements, drift, stale receipts
+
+enable vs ensure:
+  enable   deliberate. Clears a previous disable, fails loudly if the mod needs
+           something you have not installed, and always re-applies.
+  ensure   for scripts (this is what personalize runs). Respects a previous
+           disable, skips a mod whose requirements are missing, and does nothing
+           at all when the mod is already applied and matches its mod.json.
+
+Options:
+  -n, --dry-run    Print the settings that would be written; change nothing
+  -h, --help       This help
+
+Enabling is idempotent: an already-enabled mod is unapplied and re-applied, so
+its receipt always matches the current mod.json. Receipts, opt-outs, and rolling
+backups of settings.json live under ${XDG_STATE_HOME:-~/.local/state}/cc-mod.
+
+`disable` is remembered: --default and --all skip a mod you turned off until you
+name it explicitly again. Bulk enables also skip (rather than abort on) a mod
+whose requirements are not installed yet.
+EOF
+}
+
+die() { printf 'cc-mod: %s\n' "$*" >&2; exit 1; }
+note() { printf '%s\n' "$*"; }
+
+# --- mods --------------------------------------------------------------------
+
+mod_manifest() { printf '%s/%s/mod.json' "$MODS_DIR" "$1"; }
+receipt_of() { printf '%s/%s.json' "$RECEIPTS" "$1"; }
+known_mod() { [ -f "$(mod_manifest "$1")" ]; }
+enabled() { [ -f "$(receipt_of "$1")" ]; }
+# A mod turned off by hand stays off: bulk enables (--default/--all) skip it until
+# it is named explicitly. Otherwise every personalize run would undo your choice.
+opted_out() { [ -f "$OPTOUT/$1" ]; }
+claude_dir() { dirname "$SETTINGS"; }
+
+all_mods() {
+  [ -d "$MODS_DIR" ] || return 0
+  local dir
+  for dir in "$MODS_DIR"/*/; do
+    [ -f "${dir}mod.json" ] || continue
+    basename "$dir"
+  done
+}
+
+receipt_names() {
+  local receipt
+  for receipt in "$RECEIPTS"/*.json; do
+    [ -f "$receipt" ] || continue
+    basename "$receipt" .json
+  done
+}
+
+# Manifest with {{PLACEHOLDERS}} resolved for this machine.
+resolved_manifest() {
+  local name="$1" manifest vars
+  manifest="$(mod_manifest "$name")"
+  jq empty "$manifest" 2>/dev/null || die "$manifest is not valid JSON"
+  vars="$(jq -n --arg suitcase "$SUITCASE" --arg mod_dir "$MODS_DIR/$name" \
+             --arg home "$HOME" --arg local_bin "$HOME/.local/bin" \
+             '{SUITCASE: $suitcase, MOD_DIR: $mod_dir, HOME: $home, LOCAL_BIN: $local_bin}')"
+  jq -L "$LIB" --argjson vars "$vars" 'include "cc-mod"; subst($vars)' "$manifest"
+}
+
+field() { printf '%s' "$1" | jq -r "$2 // empty"; }
+
+# --- settings ----------------------------------------------------------------
+
+read_settings() {
+  if [ ! -f "$SETTINGS" ]; then
+    printf '{}'
+    return 0
+  fi
+  jq empty "$SETTINGS" >/dev/null 2>&1 ||
+    die "$SETTINGS is not valid JSON -- fix or move it aside first"
+  cat "$SETTINGS"
+}
+
+trim_backups() {
+  local files=() f count excess
+  # Timestamped names, so the glob's own sort is oldest-first.
+  for f in "$BACKUPS"/settings.*.json; do
+    [ -f "$f" ] && files+=("$f")
+  done
+  count="${#files[@]}"
+  excess=$((count - KEEP_BACKUPS))
+  [ "$excess" -gt 0 ] || return 0
+  local i=0
+  while [ "$i" -lt "$excess" ]; do
+    rm -f "${files[$i]}"
+    i=$((i + 1))
+  done
+}
+
+write_settings() {
+  local content="$1" tmp pretty
+  pretty="$(printf '%s' "$content" | jq .)" || die "refusing to write invalid JSON"
+  if [ "$DRY_RUN" = 1 ]; then
+    printf '%s\n' "$pretty"
+    return 0
+  fi
+  mkdir -p "$(dirname "$SETTINGS")" "$BACKUPS"
+  if [ -f "$SETTINGS" ]; then
+    cp "$SETTINGS" "$BACKUPS/settings.$(date +%Y%m%d%H%M%S).json"
+    trim_backups
+  fi
+  tmp="$(mktemp "${SETTINGS}.XXXXXX")"
+  printf '%s\n' "$pretty" >"$tmp"
+  mv -f "$tmp" "$SETTINGS"
+}
+
+# --- links -------------------------------------------------------------------
+# "links": {"agents/foo.md": "assets/foo.md"} symlinks ~/.claude/agents/foo.md at
+# the mod's file. Disable removes it only while it still points at us.
+
+mod_links() {
+  printf '%s' "$1" | jq -r '(.links // {}) | to_entries[] | "\(.key)\t\(.value)"'
+}
+
+link_mod_files() {
+  local name="$1" manifest="$2" dest src target source
+  while IFS=$'\t' read -r dest src; do
+    [ -n "$dest" ] || continue
+    target="$(claude_dir)/$dest"
+    source="$MODS_DIR/$name/$src"
+    [ -e "$source" ] || die "$name: link source missing: $source"
+    if [ "$DRY_RUN" = 1 ]; then
+      note "  link $dest -> $source"
+      continue
+    fi
+    mkdir -p "$(dirname "$target")"
+    if [ -e "$target" ] && [ ! -L "$target" ]; then
+      mv "$target" "$target.pre-cc-mod"
+      note "  moved aside $target -> $target.pre-cc-mod"
+    fi
+    ln -sfn "$source" "$target"
+    note "  link $dest -> $source"
+  done < <(mod_links "$manifest")
+}
+
+unlink_mod_files() {
+  local name="$1" manifest="$2" dest src target source
+  while IFS=$'\t' read -r dest src; do
+    [ -n "$dest" ] || continue
+    target="$(claude_dir)/$dest"
+    source="$MODS_DIR/$name/$src"
+    [ -L "$target" ] || continue
+    [ "$(cd "$(dirname "$target")" && readlink "$target")" = "$source" ] || continue
+    [ "$DRY_RUN" = 1 ] || rm -f "$target"
+    note "  unlink $dest"
+    if [ -e "$target.pre-cc-mod" ] && [ "$DRY_RUN" != 1 ]; then
+      mv "$target.pre-cc-mod" "$target"
+      note "  restored $dest from $dest.pre-cc-mod"
+    fi
+  done < <(mod_links "$manifest")
+}
+
+# --- requirements ------------------------------------------------------------
+
+check_requires() {
+  local name="$1" manifest="$2" missing=() cmd path
+  while IFS= read -r cmd; do
+    [ -n "$cmd" ] || continue
+    command -v "$cmd" >/dev/null 2>&1 || missing+=("command: $cmd")
+  done < <(printf '%s' "$manifest" | jq -r '(.requires.commands // [])[]')
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    case "$path" in "~"*) path="$HOME${path#\~}" ;; esac
+    [ -e "$path" ] || missing+=("file: $path")
+  done < <(printf '%s' "$manifest" | jq -r '(.requires.files // [])[]')
+  while IFS= read -r cmd; do
+    [ -n "$cmd" ] || continue
+    command -v "$cmd" >/dev/null 2>&1 || note "  note: $name works better with $cmd on PATH"
+  done < <(printf '%s' "$manifest" | jq -r '(.requires.optional // [])[]')
+
+  [ "${#missing[@]}" -eq 0 ] && return 0
+  printf 'cc-mod: %s needs:\n' "$name" >&2
+  printf '  %s\n' "${missing[@]}" >&2
+  return 1
+}
+
+run_side_script() {
+  local name="$1" manifest="$2" key="$3" script
+  script="$(field "$manifest" ".$key")"
+  [ -n "$script" ] || return 0
+  script="$MODS_DIR/$name/$script"
+  [ -x "$script" ] || die "$name: $key script is not executable: $script"
+  if [ "$DRY_RUN" = 1 ]; then
+    note "  would run $key: $script"
+    return 0
+  fi
+  note "  run $key: $script"
+  CC_MOD_NAME="$name" SUITCASE="$SUITCASE" "$script" || die "$name: $key script failed"
+}
+
+print_ops() {
+  local ops="$1" prefix="$2"
+  printf '%s' "$ops" | jq -L "$LIB" -r --arg p "$prefix" \
+    'include "cc-mod"; .[] | $p + op_label'
+}
+
+# Disable output: no +/~ sign, since everything listed is being taken away.
+print_ops_removed() {
+  printf '%s' "$1" | jq -L "$LIB" -r 'include "cc-mod"; .[] | "  - " + op_target'
+}
+
+# --- commands ----------------------------------------------------------------
+
+cmd_list() {
+  local name manifest state found=0
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    found=1
+    manifest="$(resolved_manifest "$name")"
+    if enabled "$name"; then
+      state="enabled"
+    elif opted_out "$name"; then
+      state="opted-out"
+    else
+      state="disabled"
+    fi
+    printf '  %-16s %-9s %s\n' "$name" "$state" "$(field "$manifest" .description)"
+  done < <(all_mods)
+  [ "$found" = 1 ] || note "no mods found in $MODS_DIR"
+
+  # A receipt whose mod.json is gone would otherwise be invisible.
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    known_mod "$name" ||
+      printf '  %-16s %-9s %s\n' "$name" "enabled" "(no mod.json; cc-mod disable $name)"
+  done < <(receipt_names)
+}
+
+cmd_status() {
+  local names=() name receipt manifest
+  if [ "$#" -gt 0 ]; then
+    names=("$@")
+  else
+    while IFS= read -r name; do
+      [ -n "$name" ] && names+=("$name")
+    done < <(all_mods)
+  fi
+  [ "${#names[@]}" -gt 0 ] || { note "no mods found in $MODS_DIR"; return 0; }
+
+  for name in "${names[@]}"; do
+    known_mod "$name" || { note "$name: unknown mod"; continue; }
+    if ! enabled "$name"; then
+      note "$name: disabled"
+      continue
+    fi
+    receipt="$(receipt_of "$name")"
+    manifest="$(resolved_manifest "$name")"
+    note "$name: enabled -- $(field "$manifest" .description)"
+    print_ops "$(jq -c '.ops' "$receipt")" "    "
+    read_settings | jq -L "$LIB" -r --argjson ops "$(jq '.ops' "$receipt")" \
+      'include "cc-mod";
+       (missing_ops($ops) | length) as $n
+       | if $n == 0 then "    (holds)"
+         else "    DRIFT: \($n) of \($ops | length) changes are no longer applied"
+         end'
+  done
+}
+
+# Already applied, matching mod.json, with nothing drifted? Then `ensure` has
+# nothing to do -- and must not rewrite the file just to say so.
+already_current() {
+  local name="$1" manifest="$2" receipt planned recorded drift
+  receipt="$(receipt_of "$name")"
+  [ -f "$receipt" ] || return 1
+  planned="$(read_settings | jq -L "$LIB" -c --argjson frag "$(printf '%s' "$manifest" | jq '.settings // {}')" \
+              'include "cc-mod"; op_intent(ops($frag))')" || return 1
+  recorded="$(jq -L "$LIB" -c 'include "cc-mod"; op_intent(.ops)' "$receipt")" || return 1
+  [ "$planned" = "$recorded" ] || return 1
+  drift="$(read_settings | jq -L "$LIB" --argjson ops "$(jq '.ops' "$receipt")" \
+            'include "cc-mod"; missing_ops($ops) | length')" || return 1
+  [ "$drift" = 0 ]
+}
+
+enable_one() {
+  local name="$1" manifest frag settings ops new
+  if ! known_mod "$name"; then
+    [ "$ENSURE" = 1 ] && { note "$name: no such mod, skipped"; return 0; }
+    die "unknown mod: $name (try: cc-mod list)"
+  fi
+  manifest="$(resolved_manifest "$name")"
+  if [ "$ENSURE" = 1 ]; then
+    if opted_out "$name"; then
+      note "$name: left off (you disabled it; \`cc-mod enable $name\` to undo)"
+      return 0
+    fi
+    if ! check_requires "$name" "$manifest" >/dev/null 2>&1; then
+      note "$name: skipped, needs something not installed yet (cc-mod doctor)"
+      return 0
+    fi
+    if already_current "$name" "$manifest"; then
+      note "$name: already current"
+      return 0
+    fi
+  fi
+  check_requires "$name" "$manifest" || die "$name not enabled"
+
+  # Re-enabling unapplies the old receipt first, so the new receipt is the single
+  # source of truth even when mod.json changed underneath it.
+  if enabled "$name"; then
+    if [ "$DRY_RUN" = 1 ]; then
+      note "$name: already enabled (would re-apply)"
+    else
+      disable_one "$name" quiet
+    fi
+  fi
+
+  note "enabling $name"
+  frag="$(printf '%s' "$manifest" | jq '.settings // {}')"
+  settings="$(read_settings)"
+  ops="$(printf '%s' "$settings" | jq -L "$LIB" -c --argjson frag "$frag" \
+          'include "cc-mod"; ops($frag)')" || die "$name: could not plan the merge"
+  new="$(printf '%s' "$settings" | jq -L "$LIB" --argjson ops "$ops" \
+          'include "cc-mod"; apply_ops($ops)')" || die "$name: merge failed"
+
+  print_ops "$ops" "  "
+  link_mod_files "$name" "$manifest"
+  run_side_script "$name" "$manifest" enable
+  write_settings "$new"
+
+  [ "$DRY_RUN" = 1 ] && return 0
+  [ "$ENSURE" = 1 ] || rm -f "$OPTOUT/$name"
+  mkdir -p "$RECEIPTS"
+  jq -n --arg name "$name" --argjson ops "$ops" --arg at "$(date +%Y-%m-%dT%H:%M:%S%z)" \
+    '{mod: $name, applied_at: $at, ops: $ops}' >"$(receipt_of "$name")"
+}
+
+disable_one() {
+  local name="$1" quiet="${2:-}" receipt ops settings new manifest
+  receipt="$(receipt_of "$name")"
+  if [ ! -f "$receipt" ]; then
+    [ -n "$quiet" ] || note "$name: already disabled"
+    return 0
+  fi
+  [ -n "$quiet" ] || note "disabling $name"
+  ops="$(jq -c '.ops' "$receipt")"
+  settings="$(read_settings)"
+  new="$(printf '%s' "$settings" | jq -L "$LIB" --argjson ops "$ops" \
+          'include "cc-mod"; unapply_ops($ops)')" || die "$name: unmerge failed"
+  [ -n "$quiet" ] || print_ops_removed "$ops"
+
+  if known_mod "$name"; then
+    manifest="$(resolved_manifest "$name")"
+    unlink_mod_files "$name" "$manifest"
+    run_side_script "$name" "$manifest" disable
+  fi
+
+  write_settings "$new"
+  if [ "$DRY_RUN" != 1 ]; then
+    rm -f "$receipt"
+    if [ -z "$quiet" ]; then
+      mkdir -p "$OPTOUT"
+      : >"$OPTOUT/$name"
+    fi
+  fi
+}
+
+cmd_enable() {
+  local names=() name bulk=0 skipped=0
+  case "${1:-}" in
+    --all|--default) bulk=1 ;;
+  esac
+  case "${1:-}" in
+    --all)
+      while IFS= read -r name; do
+        [ -n "$name" ] && names+=("$name")
+      done < <(all_mods)
+      ;;
+    --default)
+      while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        [ "$(field "$(resolved_manifest "$name")" '.default')" = "true" ] && names+=("$name")
+      done < <(all_mods)
+      ;;
+    "") die "enable needs a mod name, --default, or --all" ;;
+    *) names=("$@") ;;
+  esac
+  [ "${#names[@]}" -gt 0 ] || { note "nothing to enable"; return 0; }
+  for name in "${names[@]}"; do
+    if [ "$bulk" = 1 ] || [ "$ENSURE" = 1 ]; then
+      if opted_out "$name"; then
+        note "$name: left off (you disabled it; \`cc-mod enable $name\` to undo)"
+        continue
+      fi
+      # A subshell so one mod with unmet requirements does not abort the batch.
+      ( enable_one "$name" ) || { note "$name: skipped"; skipped=$((skipped + 1)); }
+    else
+      enable_one "$name"
+    fi
+  done
+  [ "$skipped" = 0 ] || note "$skipped mod(s) skipped -- fix what they need, then: cc-mod enable --default"
+}
+
+cmd_ensure() {
+  ENSURE=1
+  cmd_enable "$@"
+}
+
+cmd_disable() {
+  local names=() name
+  case "${1:-}" in
+    --all)
+      while IFS= read -r name; do
+        [ -n "$name" ] && names+=("$name")
+      done < <(receipt_names)
+      ;;
+    "") die "disable needs a mod name or --all" ;;
+    *) names=("$@") ;;
+  esac
+  [ "${#names[@]}" -gt 0 ] || { note "nothing to disable"; return 0; }
+  for name in "${names[@]}"; do disable_one "$name"; done
+}
+
+cmd_reapply() {
+  local name any=0
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    if known_mod "$name"; then
+      any=1
+      enable_one "$name"
+    else
+      note "$name: receipt with no mod.json -- disabling"
+      disable_one "$name"
+    fi
+  done < <(receipt_names)
+  [ "$any" = 1 ] || note "nothing enabled to reapply"
+}
+
+cmd_doctor() {
+  local rc=0 name manifest receipt drift
+  if [ -f "$SETTINGS" ] && ! jq empty "$SETTINGS" >/dev/null 2>&1; then
+    note "FAIL $SETTINGS is not valid JSON"
+    return 1
+  fi
+  note "settings: $SETTINGS"
+  note "receipts: $RECEIPTS"
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    manifest="$(resolved_manifest "$name")"
+    if ! enabled "$name"; then
+      if opted_out "$name"; then
+        note "  off  $name (opted out)"
+      else
+        note "  --   $name (disabled)"
+      fi
+      continue
+    fi
+    receipt="$(receipt_of "$name")"
+    drift="$(read_settings | jq -L "$LIB" --argjson ops "$(jq '.ops' "$receipt")" \
+             'include "cc-mod"; missing_ops($ops) | length')"
+    if [ "$drift" != 0 ]; then
+      note "  warn $name has drifted ($drift changes missing) -- cc-mod reapply"
+      rc=1
+    elif check_requires "$name" "$manifest" >/dev/null 2>&1; then
+      note "  ok   $name"
+    else
+      note "  warn $name is enabled but its requirements are missing"
+      rc=1
+    fi
+  done < <(all_mods)
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    known_mod "$name" || {
+      note "  warn receipt for unknown mod $name -- cc-mod disable $name"
+      rc=1
+    }
+  done < <(receipt_names)
+  return "$rc"
+}
+
+# --- main --------------------------------------------------------------------
+
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -n|--dry-run) DRY_RUN=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) args+=("$1") ;;
+  esac
+  shift
+done
+
+command -v jq >/dev/null 2>&1 || die "jq is required"
+[ "${#args[@]}" -gt 0 ] || { usage; exit 2; }
+
+cmd="${args[0]}"
+rest=("${args[@]:1}")
+
+case "$cmd" in
+  list) cmd_list ;;
+  status) cmd_status ${rest[@]+"${rest[@]}"} ;;
+  enable) cmd_enable ${rest[@]+"${rest[@]}"} ;;
+  ensure) cmd_ensure ${rest[@]+"${rest[@]}"} ;;
+  disable) cmd_disable ${rest[@]+"${rest[@]}"} ;;
+  reapply) cmd_reapply ;;
+  doctor) cmd_doctor ;;
+  *) die "unknown command: $cmd (see --help)" ;;
+esac

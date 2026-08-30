@@ -1,0 +1,15 @@
+{
+  "description": "Status line: ccusage cost/burn plus 5h/7d limit bars",
+  "default": true,
+  "requires": {
+    "commands": ["jq"],
+    "files": ["{{SUITCASE}}/bin/cc-statusline"],
+    "optional": ["npx"]
+  },
+  "settings": {
+    "statusLine": {
+      "type": "command",
+      "command": "{{SUITCASE}}/bin/cc-statusline"
+    }
+  }
+}

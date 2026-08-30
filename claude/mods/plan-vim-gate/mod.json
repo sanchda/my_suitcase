@@ -1,0 +1,24 @@
+{
+  "description": "ExitPlanMode gate: review the plan in nvim in a tmux split",
+  "default": true,
+  "requires": {
+    "files": ["{{LOCAL_BIN}}/plan-vim-gate"],
+    "optional": ["tmux", "nvim"]
+  },
+  "settings": {
+    "hooks": {
+      "PermissionRequest": [
+        {
+          "matcher": "ExitPlanMode",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "{{LOCAL_BIN}}/plan-vim-gate",
+              "timeout": 345600
+            }
+          ]
+        }
+      ]
+    }
+  }
+}
