@@ -57,7 +57,7 @@ Rebuild after source changes by re-running that script.
    VISION.md, PROGRESS.md, an `archive/` dir, and the `.gitignore` block
    below). Then fill in every `{{...}}` in `.ralph/PROMPT.md` — the GOAL, the
    verification command, the commit contract.
-2. Flesh out `.ralph/BACKLOG.md` using the v1 schema, optionally add a VISION.
+2. Flesh out `.ralph/BACKLOG.md` using the v2 schema, optionally add a VISION.
    PROGRESS is runner-owned — no need to seed it; the orchestrator writes a
    carry-forward note there after each iteration.
 3. `ralph init` already wrote the `.gitignore` block for you (see below) — no
@@ -360,7 +360,7 @@ Each iteration ends by writing **one** consolidated report, `.ralph/HANDOFF.json
   `review`/`plan`/`blocked` for an intentional non-code pass. Absent is treated
   as `code`.
 - `model` — `haiku` / `sonnet` / `opus`, a **one-shot override** sizing the NEXT
-  iteration; cleared once read. Normally null: a task's own `(tier/…)`
+  iteration; cleared once read. Normally null: a task's own `@tier`
   decoration is the baseline (see below).
 - `blocked` — with `status: blocked`, one line naming exactly what a human must
   clear; it is logged and posted to the webhook so the "come look" signal
@@ -372,9 +372,22 @@ Malformed JSON or invalid field values are warned about and ignored (never
 abort). See the PROMPT template for the exact instructions given to the model.
 
 **Model precedence** (highest first): escalation override → one-shot `.ralph/MODEL`
-→ the resolved leaf's own `(tier/…)` decoration (e.g. `(opus/pedagogy.)` → `opus`;
-first token of the trailing tag, `haiku`/`sonnet`/`opus` only) → the run default.
-So model tier lives with the task in the backlog; the agent need not restate it.
+→ the resolved leaf's own `@tier` decoration → the run default. So model tier
+lives with the task in the backlog; the agent need not restate it.
+
+The decoration sits in a fixed slot on the header line — immediately after the
+label's closing `**`, closed by ` — ` before the prose:
+
+```markdown
+- [ ] **12 — Rework the shared base.** @opus — big, cross-cutting change.
+```
+
+Only `@haiku`, `@sonnet`, and `@opus` are accepted, at most one per task. A task
+with no decoration starts its prose right after the ` — `. Because the slot is
+positional, an `@opus` anywhere else in the body is inert prose, and the
+decoration cannot wrap onto a second line. Anything malformed in the slot — an
+unknown token, a missing ` — `, a second tier — is a hard `ralph lint` error
+that refuses the iteration, never a silent fall back to the default model.
 
 Before every process launch the runner parses the complete backlog, selects the
 next leaf by document order, and appends a bounded brief containing that

@@ -37,9 +37,10 @@ verification/self-assessment finds no high-value gap.}}
    `{"status": "code", "model": null, "blocked": null}`:
    - `status`: `code` (committed work), `plan`/`review` (non-code progress), or
      `blocked`. A `code` pass must commit.
-   - `model`: normally null — the next leaf's own `(tier/…)` decoration sets its
-     model automatically. Set `haiku`/`sonnet`/`opus` only to OVERRIDE that tier
-     for the next pass; it is one-shot, cleared once read.
+   - `model`: normally null — the next leaf's own `@tier` decoration (`@opus —`
+     immediately after its bold label) sets the model automatically. Set
+     `haiku`/`sonnet`/`opus` only to OVERRIDE that tier for the next pass; it is
+     one-shot, cleared once read.
    - `blocked`: when status is `blocked`, one line naming exactly what a human
      must clear. Reserve `blocked` for a genuine dead-end only a human can clear
      (a stop gate awaiting approval, missing authority/credentials, or the same

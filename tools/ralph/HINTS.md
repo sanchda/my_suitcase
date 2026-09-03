@@ -70,8 +70,11 @@ This is the lesson that takes down machines.
   `ralph schema`.
 
 ## Let the loop pick the model; escalate, don't block
-- A leaf's `(tier/…)` decoration sets its model automatically; a one-shot
-  `.ralph/MODEL` overrides only the next pass.
+- A leaf's `@tier` decoration sets its model automatically; it goes right after
+  the label's closing `**`, closed by ` — ` before the prose:
+  `- [ ] **12 — Title.** @opus — prose`. Only `@haiku`/`@sonnet`/`@opus`, only
+  in that slot; anything else there is a hard lint error, not a silent default.
+- A one-shot `.ralph/MODEL` overrides only the next pass.
 - Needing a bigger model is NEVER `blocked` — escalate via decoration/override.
   Reserve `blocked` for a genuine human-only dead-end (approval gate, missing
   credentials/authority, the same failure after escalation). Consecutive blocked

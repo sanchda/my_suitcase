@@ -1,15 +1,16 @@
 //! The deliberately small Markdown schema used by Ralph backlogs.
 //!
-//! Executable work is a checkbox whose bold label is `<id> — <title>`.
-//! Two-space-indented child checkboxes are ordered stages. The first unchecked
-//! task with no unchecked descendants is the next executable leaf.
+//! Executable work is a checkbox whose bold label is `<id> — <title>`,
+//! optionally followed by a `@tier — ` decoration slot. Two-space-indented
+//! child checkboxes are ordered stages. The first unchecked task with no
+//! unchecked descendants is the next executable leaf.
 
 use std::collections::{HashMap, HashSet};
 
-pub const SCHEMA_MARKER: &str = "<!-- ralph-backlog: v1 -->";
+pub const SCHEMA_MARKER: &str = "<!-- ralph-backlog: v2 -->";
 
-/// Model tiers recognized in a task's `(tier/…)` decoration.
-const MODEL_TIERS: [&str; 3] = ["haiku", "sonnet", "opus"];
+/// Model tiers recognized in a task's `@tier` decoration slot.
+pub(crate) const MODEL_TIERS: [&str; 3] = ["haiku", "sonnet", "opus"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
@@ -52,6 +53,7 @@ pub struct Task {
     pub end_line: usize,
     pub own_end_line: usize,
     pub parent: Option<usize>,
+    pub tier: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +129,12 @@ impl Document {
                 }
             };
 
+            // A bad decoration is reported without dropping the task: its id and
+            // title parsed, and deleting it would silently move the routing
+            // target while the author is still fixing the typo.
+            if let Some(message) = &header.decoration_error {
+                issues.push(Issue::error(line_no, message.clone()));
+            }
             if header.indent % 2 != 0 {
                 issues.push(Issue::error(
                     line_no,
@@ -200,6 +208,7 @@ impl Document {
                 end_line: lines.len(),
                 own_end_line: lines.len(),
                 parent,
+                tier: header.tier,
             });
         }
 
@@ -216,7 +225,7 @@ impl Document {
                 Issue::warning(
                     1,
                     format!(
-                        "missing schema marker `{SCHEMA_MARKER}`; parsed as v1 compatibility mode"
+                        "missing schema marker `{SCHEMA_MARKER}`; parsed in compatibility mode"
                     ),
                 ),
             );
@@ -245,6 +254,20 @@ impl Document {
             tasks[index].own_end_line = own_end_line.min(end_line);
         }
 
+        // Pending only, as with the `Verify:` contract check: a completed task's
+        // tier can never route anything again, so demanding it be migrated is
+        // busywork on a historical record rather than a guard against misrouting.
+        for task in tasks.iter().filter(|task| !task.checked) {
+            for (line_no, tier) in leftover_v1_decorations(&lines, task) {
+                issues.push(Issue::error(
+                    line_no,
+                    format!(
+                        "`({tier}…)` is v1 tier syntax that v2 does not honor; move the tier to the `@{tier} — ` slot right after the task's bold label"
+                    ),
+                ));
+            }
+        }
+
         if tasks.is_empty() {
             issues.push(Issue::error(0, "backlog contains no schema tasks"));
         }
@@ -267,7 +290,7 @@ impl Document {
             issues.push(Issue::warning(
                 first.line,
                 format!(
-                    "{} pending task(s) lack a non-placeholder `Verify:` contract; compatibility mode permits this, but v1 strict mode will reject it",
+                    "{} pending task(s) lack a non-placeholder `Verify:` contract; compatibility mode permits this, but a marked backlog will reject it",
                     missing_verify.len()
                 ),
             ));
@@ -364,44 +387,11 @@ impl Document {
         }
     }
 
-    /// The model tier declared in a task's own `(tier/…)` decoration
-    /// (e.g. `(opus/pedagogy.)` → `opus`), or `None`. Advisory routing, not a
-    /// spec field: scans only the task's own body (never a child's), and lets
-    /// the last `(...)` group whose leading token is a known tier win, since
-    /// decorations sit at the body's end.
+    /// The model tier declared in the task's own `@tier` slot
+    /// (e.g. `**1 — Rework.** @opus — …` → `opus`), or `None`. Advisory
+    /// routing, not a spec field.
     pub fn model_hint(&self, index: usize) -> Option<String> {
-        fn paren_groups(line: &str) -> Vec<&str> {
-            let mut out = Vec::new();
-            let mut rest = line;
-            while let Some(open) = rest.find('(') {
-                rest = &rest[open + 1..];
-                match rest.find(')') {
-                    Some(close) => {
-                        out.push(&rest[..close]);
-                        rest = &rest[close + 1..];
-                    }
-                    None => break,
-                }
-            }
-            out
-        }
-        let task = self.tasks.get(index)?;
-        let start = task.line.saturating_sub(1);
-        let end = task.own_end_line.min(self.lines.len());
-        let mut hint = None;
-        for line in &self.lines[start..end] {
-            for group in paren_groups(line) {
-                if let Some(word) = group
-                    .split(|c: char| !c.is_ascii_alphanumeric())
-                    .find(|token| !token.is_empty())
-                {
-                    if MODEL_TIERS.contains(&word) {
-                        hint = Some(word.to_string());
-                    }
-                }
-            }
-        }
-        hint
+        self.tasks.get(index)?.tier.clone()
     }
 
     #[cfg(test)]
@@ -445,6 +435,65 @@ struct Header {
     title: String,
     checked: bool,
     indent: usize,
+    tier: Option<String>,
+    decoration_error: Option<String>,
+}
+
+/// Names the character found where the ` — ` delimiter belongs. An en dash, an
+/// ASCII hyphen and a space-less em dash are the three likely typos, and in a
+/// terminal they are indistinguishable from the real thing — echoing the input
+/// would show the author the character they believe they already typed.
+fn delimiter_error(cursor: &str) -> String {
+    const EXPECTED: &str =
+        "a `@tier` decoration must be followed by ` — ` (em dash, U+2014) before the task prose";
+    match cursor.chars().next() {
+        None => format!("{EXPECTED}; found end of line"),
+        Some('—') => {
+            format!("{EXPECTED}; the em dash is there but the space after it is missing")
+        }
+        Some('–') => format!("{EXPECTED}; found an en dash `–` (U+2013)"),
+        Some('-') => format!("{EXPECTED}; found an ASCII hyphen `-` (U+002D)"),
+        Some(found) => format!("{EXPECTED}; found `{found}`"),
+    }
+}
+
+/// Splits the header text following the label's closing `**` into its optional
+/// `@tier` decoration and the prose after it. The slot is position-anchored and
+/// em-dash terminated, so a typo inside the slot is a lint error rather than a
+/// silently dropped route, and parentheses in the body stay inert. It only fires
+/// on the label's *first* closing `**`: nested bold in a title ends the label
+/// early, and a decoration after that is never reached.
+fn split_decoration(rest: &str) -> Result<(Option<String>, &str), String> {
+    let rest = rest.trim_start();
+    if !rest.starts_with('@') {
+        return Ok((None, rest));
+    }
+    let mut tiers: Vec<&str> = Vec::new();
+    let mut cursor = rest;
+    while let Some(after_at) = cursor.strip_prefix('@') {
+        let end = after_at
+            .find(|ch: char| !ch.is_ascii_alphanumeric())
+            .unwrap_or(after_at.len());
+        let word = &after_at[..end];
+        if !MODEL_TIERS.contains(&word) {
+            return Err(format!(
+                "unknown decoration `@{word}`; expected @haiku, @sonnet, or @opus"
+            ));
+        }
+        tiers.push(word);
+        cursor = after_at[end..].trim_start();
+    }
+    if tiers.len() > 1 {
+        return Err(format!(
+            "conflicting tier decorations `@{}`; a task may declare at most one model tier",
+            tiers.join("` and `@")
+        ));
+    }
+    let prose = cursor
+        .strip_prefix('—')
+        .filter(|after| after.is_empty() || after.starts_with(char::is_whitespace))
+        .ok_or_else(|| delimiter_error(cursor))?;
+    Ok((Some(tiers[0].to_string()), prose.trim_start()))
 }
 
 fn parse_task_line(line: &str) -> Result<Option<Header>, String> {
@@ -483,13 +532,28 @@ fn parse_task_line(line: &str) -> Result<Option<Header>, String> {
         return Err("task checkbox must be `- [ ] ` or `- [x] `".into());
     };
 
-    let label = rest
+    let body = rest
         .strip_prefix("**")
         .ok_or_else(|| "task label must be bold: `**<id> — <title>**`".to_string())?;
-    let close = label
+    let close = body
         .find("**")
         .ok_or_else(|| "task label is missing its closing `**`".to_string())?;
-    let label = &label[..close];
+    // A `**` inside the title would otherwise steal the label's closing
+    // delimiter, silently truncating the title and dropping the tier decoration
+    // with it. The boundary is only unambiguous when nothing runs on from it, so
+    // refuse the line rather than guess which `**` was meant.
+    if let Some(ch) = body[close + 2..].chars().next() {
+        if !ch.is_whitespace() {
+            return Err(format!(
+                "task label's closing `**` must be followed by a space or end of line; found `{ch}` — a title cannot contain `**`"
+            ));
+        }
+    }
+    let label = &body[..close];
+    let (tier, decoration_error) = match split_decoration(&body[close + 2..]) {
+        Ok((tier, _)) => (tier, None),
+        Err(message) => (None, Some(message)),
+    };
     let (id, title) = label
         .split_once(" — ")
         .ok_or_else(|| "task label must be `<id> — <title>` using an em dash".to_string())?;
@@ -511,6 +575,8 @@ fn parse_task_line(line: &str) -> Result<Option<Header>, String> {
         title: title.to_string(),
         checked,
         indent: prefix_len,
+        tier,
+        decoration_error,
     }))
 }
 
@@ -522,9 +588,13 @@ fn has_unchecked_descendant(tasks: &[Task], index: usize) -> bool {
         .any(|task| !task.checked)
 }
 
-fn has_valid_verify(lines: &[String], task: &Task) -> bool {
+/// The task's own lines — header plus prose, excluding child stages — paired
+/// with their offset from the header and with fenced blocks dropped, so an
+/// example inside a fence never speaks for the task that contains it.
+fn unfenced_own_lines<'a>(lines: &'a [String], task: &Task) -> Vec<(usize, &'a str)> {
+    let mut out = Vec::new();
     let mut fence: Option<char> = None;
-    for (offset, line) in lines[task.line.saturating_sub(1)..task.own_end_line]
+    for (offset, line) in lines[task.line.saturating_sub(1)..task.own_end_line.min(lines.len())]
         .iter()
         .enumerate()
     {
@@ -548,7 +618,49 @@ fn has_valid_verify(lines: &[String], task: &Task) -> bool {
             fence = Some('~');
             continue;
         }
+        out.push((offset, line.as_str()));
+    }
+    out
+}
 
+fn paren_groups(line: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut rest = line;
+    while let Some(open) = rest.find('(') {
+        rest = &rest[open + 1..];
+        match rest.find(')') {
+            Some(close) => {
+                out.push(&rest[..close]);
+                rest = &rest[close + 1..];
+            }
+            None => break,
+        }
+    }
+    out
+}
+
+/// v1 read the model tier from a parenthetical anywhere in the task body. Under
+/// v2 a leftover one is inert prose — a route dropped in silence — so it is an
+/// error until migrated. Self-limiting: it cannot fire on a migrated backlog.
+/// The leading token rule is v1's own, so exactly what v1 honored trips it.
+fn leftover_v1_decorations(lines: &[String], task: &Task) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    for (offset, line) in unfenced_own_lines(lines, task) {
+        for group in paren_groups(line) {
+            let leading = group
+                .split(|ch: char| !ch.is_ascii_alphanumeric())
+                .find(|token| !token.is_empty());
+            if let Some(tier) = leading.filter(|token| MODEL_TIERS.contains(token)) {
+                out.push((task.line + offset, tier.to_string()));
+            }
+        }
+    }
+    out
+}
+
+fn has_valid_verify(lines: &[String], task: &Task) -> bool {
+    for (offset, line) in unfenced_own_lines(lines, task) {
+        let trimmed = line.trim_start();
         let value = if let Some(value) = trimmed.strip_prefix("Verify:") {
             Some(value)
         } else if offset == 0 {
@@ -558,7 +670,8 @@ fn has_valid_verify(lines: &[String], task: &Task) -> bool {
                         .find("**")
                         .map(|close| open + 2 + close + 2)
                 })
-                .and_then(|close| line[close..].trim_start().strip_prefix("Verify:"))
+                .and_then(|close| split_decoration(&line[close..]).ok())
+                .and_then(|(_, prose)| prose.strip_prefix("Verify:"))
         } else {
             None
         };
@@ -608,26 +721,246 @@ mod tests {
     #[test]
     fn model_hint_reads_tier_decoration() {
         let text = format!(
-            "{SCHEMA_MARKER}\n# H\n- [ ] **1 — A.** do a thing. (opus/pedagogy.)\n- [ ] **2 — B.** cleanup. (haiku)\n- [ ] **3 — C.** review. (code.)\n- [ ] **4 — D.** big. (opus — shared-base refactor.)\n"
+            "{SCHEMA_MARKER}\n# H\n- [ ] **1 — A.** @opus — do a thing.\n  Verify: y\n- [ ] **2 — B.** @haiku — cleanup.\n  Verify: y\n- [ ] **3 — C.** review.\n  Verify: y\n"
         );
         let doc = Document::parse(&text);
+        assert!(!doc.has_errors(), "{:?}", doc.issues);
         let idx = |id: &str| doc.tasks.iter().position(|t| t.id == id).unwrap();
         assert_eq!(doc.model_hint(idx("1")).as_deref(), Some("opus"));
         assert_eq!(doc.model_hint(idx("2")).as_deref(), Some("haiku"));
-        assert_eq!(doc.model_hint(idx("3")), None); // (code.) is not a tier
-        assert_eq!(doc.model_hint(idx("4")).as_deref(), Some("opus"));
+        assert_eq!(doc.model_hint(idx("3")), None);
     }
 
     #[test]
-    fn model_hint_scopes_to_own_body_and_ignores_prose_parens() {
+    fn parent_and_child_carry_independent_tiers() {
         let text = format!(
-            "{SCHEMA_MARKER}\n- [ ] **1 — Parent.** covers (unchanged) and (new).\n  Verify: broad suite\n  - [ ] **1.1 — Child.** stuff. (opus.)\n    Verify: focused\n"
+            "{SCHEMA_MARKER}\n- [ ] **1 — Parent.** @sonnet — covers both halves.\n  Verify: broad suite\n  - [ ] **1.1 — Child.** @opus — stuff.\n    Verify: focused\n"
         );
         let doc = Document::parse(&text);
+        assert!(!doc.has_errors(), "{:?}", doc.issues);
         let idx = |id: &str| doc.tasks.iter().position(|t| t.id == id).unwrap();
-        // Parent's own body has only non-tier parens; the child's (opus.) must not leak up.
-        assert_eq!(doc.model_hint(idx("1")), None);
+        assert_eq!(doc.model_hint(idx("1")).as_deref(), Some("sonnet"));
         assert_eq!(doc.model_hint(idx("1.1")).as_deref(), Some("opus"));
+    }
+
+    #[test]
+    fn prose_parentheses_are_inert() {
+        let text = format!(
+            "{SCHEMA_MARKER}\n- [ ] **1 — X.** rework (code.) bits.\n  Leave the (unchanged) half alone.\n  Verify: y\n"
+        );
+        let doc = Document::parse(&text);
+        assert!(!doc.has_errors(), "{:?}", doc.issues);
+        assert_eq!(doc.model_hint(0), None);
+    }
+
+    #[test]
+    fn leftover_v1_parenthetical_in_a_body_line_is_an_error() {
+        // The exact shape that regressed: a v1 decoration at the end of a body
+        // line, which v2 would otherwise read as inert prose.
+        let doc = Document::parse(&format!(
+            "{SCHEMA_MARKER}\n- [ ] **1 — X.** do a thing.\n  Rework the base. (opus/pedagogy.)\n  Verify: y\n"
+        ));
+        assert!(doc.has_errors(), "{:?}", doc.issues);
+        let issue = doc
+            .issues
+            .iter()
+            .find(|issue| issue.message.contains("v1 tier syntax"))
+            .expect("v1 leftover reported");
+        assert_eq!(issue.severity, Severity::Error);
+        assert_eq!(issue.line, 3);
+        assert!(issue.message.contains("@opus"), "{}", issue.message);
+    }
+
+    #[test]
+    fn an_ambiguous_label_close_is_an_error_not_a_truncated_title() {
+        // `**` inside a title used to steal the label's closing delimiter, which
+        // silently truncated the title AND dropped the tier with a clean lint.
+        for line in [
+            "- [ ] **1 — Make **all** paths safe.** @opus — big change.",
+            "- [ ] **2 — Fix `**kwargs` handling.** @opus — big change.",
+        ] {
+            let doc = Document::parse(&format!("{SCHEMA_MARKER}\n{line}\n  Verify: y\n"));
+            assert!(doc.has_errors(), "{line} parsed silently: {:?}", doc.issues);
+            assert!(
+                doc.issues
+                    .iter()
+                    .any(|issue| issue.message.contains("closing `**`")),
+                "{line}: {:?}",
+                doc.issues
+            );
+        }
+    }
+
+    #[test]
+    fn bold_in_the_prose_after_the_label_is_still_fine() {
+        // The legitimate case the stricter rule must not break: emphasis in the
+        // prose, well after the label has closed.
+        let doc = Document::parse(&format!(
+            "{SCHEMA_MARKER}\n- [ ] **3 — Plain title.** @opus — this is **very** important.\n  Verify: y\n"
+        ));
+        assert!(!doc.has_errors(), "{:?}", doc.issues);
+        assert_eq!(doc.tasks[0].title, "Plain title.");
+        assert_eq!(doc.model_hint(0).as_deref(), Some("opus"));
+    }
+
+    #[test]
+    fn a_completed_task_keeps_its_v1_parenthetical() {
+        // Migration must not demand edits to historical records: a checked task
+        // will never be routed again, so its stale tier costs nothing.
+        let doc = Document::parse(&format!(
+            "{SCHEMA_MARKER}\n- [x] **1 — Done.** shipped it. (opus/pedagogy.) Verify: y\n- [ ] **2 — Next.** @sonnet — go.\n  Verify: y\n"
+        ));
+        assert!(!doc.has_errors(), "{:?}", doc.issues);
+        assert_eq!(doc.model_hint(1).as_deref(), Some("sonnet"));
+    }
+
+    #[test]
+    fn leftover_v1_parenthetical_on_the_header_line_is_an_error() {
+        let doc = Document::parse(&format!(
+            "{SCHEMA_MARKER}\n- [ ] **1 — X.** big. (opus — shared-base refactor.)\n  Verify: y\n"
+        ));
+        assert!(doc
+            .issues
+            .iter()
+            .any(|issue| issue.message.contains("v1 tier syntax")));
+    }
+
+    #[test]
+    fn a_tier_parenthetical_inside_a_fence_is_not_a_leftover() {
+        let doc = Document::parse(&format!(
+            "{SCHEMA_MARKER}\n- [ ] **1 — X.** do a thing.\n  ```bash\n  echo (opus) # a shell snippet, not a decoration\n  ```\n  Verify: y\n"
+        ));
+        assert!(!doc.has_errors(), "{:?}", doc.issues);
+    }
+
+    #[test]
+    fn a_child_stage_leftover_does_not_charge_its_parent() {
+        let doc = Document::parse(&format!(
+            "{SCHEMA_MARKER}\n- [ ] **1 — Parent.** covers (unchanged) halves.\n  Verify: broad\n  - [ ] **1.1 — Child.** stuff. (opus.)\n    Verify: focused\n"
+        ));
+        let leftovers: Vec<usize> = doc
+            .issues
+            .iter()
+            .filter(|issue| issue.message.contains("v1 tier syntax"))
+            .map(|issue| issue.line)
+            .collect();
+        assert_eq!(leftovers, vec![4]);
+    }
+
+    #[test]
+    fn an_at_sign_in_the_body_is_prose_not_a_decoration() {
+        let text = format!(
+            "{SCHEMA_MARKER}\n- [ ] **1 — X.** do the thing.\n  @opus would be nice, but this line is prose.\n  Verify: y\n"
+        );
+        let doc = Document::parse(&text);
+        assert!(!doc.has_errors(), "{:?}", doc.issues);
+        assert_eq!(doc.model_hint(0), None);
+    }
+
+    #[test]
+    fn misspelled_tier_is_an_error_not_prose() {
+        let doc = Document::parse(&format!(
+            "{SCHEMA_MARKER}\n- [ ] **1 — X.** @opuss — x\n  Verify: y\n"
+        ));
+        assert!(doc.has_errors());
+        assert!(doc
+            .issues
+            .iter()
+            .any(|issue| issue.message.contains("unknown decoration")));
+    }
+
+    #[test]
+    fn tier_decoration_must_be_closed_by_an_em_dash() {
+        let doc = Document::parse(&format!(
+            "{SCHEMA_MARKER}\n- [ ] **1 — X.** @opus big change.\n  Verify: y\n"
+        ));
+        assert!(doc.has_errors());
+        assert!(doc
+            .issues
+            .iter()
+            .any(|issue| issue.message.contains("must be followed by ` — `")));
+    }
+
+    #[test]
+    fn near_miss_delimiters_name_the_character_that_was_found() {
+        let message = |line: &str| {
+            let doc = Document::parse(&format!("{SCHEMA_MARKER}\n{line}\n  Verify: y\n"));
+            doc.issues
+                .iter()
+                .find(|issue| issue.message.contains("`@tier`"))
+                .unwrap_or_else(|| panic!("no delimiter error for {line}"))
+                .message
+                .clone()
+        };
+
+        let en_dash = message("- [ ] **1 — X.** @opus – big change.");
+        assert!(en_dash.contains("en dash"), "{en_dash}");
+        assert!(en_dash.contains("U+2013"), "{en_dash}");
+
+        let hyphen = message("- [ ] **1 — X.** @opus - big change.");
+        assert!(hyphen.contains("hyphen"), "{hyphen}");
+
+        let unspaced = message("- [ ] **1 — X.** @opus—big change.");
+        assert!(unspaced.contains("space"), "{unspaced}");
+        assert!(!unspaced.contains("en dash"), "{unspaced}");
+
+        // Every variant names the character the author was supposed to type.
+        for message in [en_dash, hyphen, unspaced] {
+            assert!(message.contains("U+2014"), "{message}");
+        }
+    }
+
+    #[test]
+    fn two_tier_decorations_are_an_error() {
+        let doc = Document::parse(&format!(
+            "{SCHEMA_MARKER}\n- [ ] **1 — X.** @opus @sonnet — x\n  Verify: y\n"
+        ));
+        assert!(doc.has_errors());
+        assert!(doc
+            .issues
+            .iter()
+            .any(|issue| issue.message.contains("conflicting tier decorations")));
+    }
+
+    #[test]
+    fn a_decoration_error_keeps_the_task_routable() {
+        // A typo in the slot must not delete the task: routing would then point
+        // at the next one and brief a target the author never chose.
+        let doc = Document::parse(&format!(
+            "{SCHEMA_MARKER}\n- [ ] **1 — First.** @opuss — x\n  Verify: y\n- [ ] **2 — Second.**\n  Verify: y\n"
+        ));
+        assert!(doc.has_errors());
+        assert_eq!(
+            doc.tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            vec!["1", "2"]
+        );
+        assert_eq!(doc.tasks[0].title, "First.");
+        assert_eq!(doc.tasks[0].tier, None);
+        assert_eq!(doc.tasks[doc.selected_index().unwrap()].id, "1");
+        assert!(doc
+            .issues
+            .iter()
+            .any(|issue| issue.line == 2 && issue.message.contains("unknown decoration")));
+    }
+
+    #[test]
+    fn v1_marker_is_unsupported() {
+        let doc = Document::parse("<!-- ralph-backlog: v1 -->\n- [ ] **1 — Work.** Verify: test\n");
+        assert!(doc.has_errors());
+        assert!(doc
+            .issues
+            .iter()
+            .any(|issue| issue.message.contains("unsupported") && issue.message.contains("v2")));
+    }
+
+    #[test]
+    fn tier_decoration_may_precede_an_inline_verify() {
+        let doc = Document::parse(&format!(
+            "{SCHEMA_MARKER}\n- [ ] **1 — X.** @opus — Verify: cargo test\n"
+        ));
+        assert!(!doc.has_errors(), "{:?}", doc.issues);
+        assert_eq!(doc.model_hint(0).as_deref(), Some("opus"));
+        assert!(has_valid_verify(&doc.lines, &doc.tasks[0]));
     }
 
     #[test]
@@ -794,16 +1127,6 @@ mod tests {
         let excerpt = doc.own_excerpt(0, 4_000);
         assert!(!excerpt.contains("Later phase"));
         assert!(!excerpt.contains("not task 1"));
-    }
-
-    #[test]
-    fn unknown_schema_version_is_an_error() {
-        let doc = Document::parse("<!-- ralph-backlog: v9 -->\n- [ ] **1 — Work.** Verify: test\n");
-        assert!(doc.has_errors());
-        assert!(doc
-            .issues
-            .iter()
-            .any(|issue| issue.message.contains("unsupported")));
     }
 
     #[test]

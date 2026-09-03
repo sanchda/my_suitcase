@@ -1,12 +1,12 @@
-# Ralph backlog schema v1
+# Ralph backlog schema v2
 
 `.ralph/BACKLOG.md` is the ordered source of truth. Start it with:
 
 ```markdown
-<!-- ralph-backlog: v1 -->
+<!-- ralph-backlog: v2 -->
 # Backlog
 
-- [ ] **12 — Ship weighted selection.**
+- [ ] **12 — Ship weighted selection.** @opus — cross-cutting.
   Describe the outcome and constraints.
   Verify: cargo test
   - [x] **12.1 — Emit weights.**
@@ -27,6 +27,26 @@
   free prose under a heading is not injected into child briefs. Indent each child
   exactly two spaces and prefix its ID with `<parent-id>.`.
 - Checkboxes route work. Put task-looking examples inside fenced code blocks.
+
+## Model tier
+
+Any task — a leaf or a staged parent — may name the model it wants in a fixed
+slot immediately after the closing `**`, closed by an em dash before the prose:
+
+```markdown
+- [ ] **12 — Rework the shared base.** @opus — big, cross-cutting change.
+  Verify: cargo test
+```
+
+Only `@haiku`, `@sonnet`, and `@opus` are accepted, at most one per task, and
+only in that slot — an `@opus` anywhere else is prose. A misspelling, a delimiter
+that is not ` — `, or a leftover v1 parenthetical such as `(opus/pedagogy.)` in
+the body is a lint error rather than a silently dropped route.
+
+The slot is position-anchored, so task prose may not begin with `@`: in
+`**1 — Notify the team.** @channel — ping everyone.` the `@channel` is read as a
+decoration and rejected. Rephrase so `@` is not the first token — `**1 — Notify
+the team.** Ping @channel before the release.`
 
 ## Selection and staging
 
@@ -66,5 +86,5 @@ ralph                      # validates again before every iteration
 ```
 
 `ralph lint` exits 0 when there are no errors (warnings are allowed) and 1 for
-schema errors. A marked v1 backlog requires valid `Verify:` contracts. Ralph
+schema errors. A marked backlog requires valid `Verify:` contracts. Ralph
 will not launch an iteration while schema errors remain.

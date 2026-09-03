@@ -35,19 +35,26 @@ const RALPH_TOML_STUB: &str = "\
 # extra_args = [\"--safe-mode\", \"--tools\", \"Bash,Edit,Read,Write\"]
 ";
 
-const BACKLOG_STUB: &str = "\
-<!-- ralph-backlog: v1 -->
+/// Built from `SCHEMA_MARKER` so the scaffold can never drift from the parser.
+fn backlog_stub() -> String {
+    format!(
+        "{}\n\
 # Backlog
 
 Ordered work list — the loop takes the first pending executable leaf. The
 runner injects a carry-forward note from the previous iteration; it may
-clarify the selected leaf but cannot reorder work. See `ralph schema`;
-validate with `ralph lint` and inspect with `ralph brief`.
+clarify the selected leaf but cannot reorder work. An optional `@haiku` /
+`@sonnet` / `@opus` decoration right after the bold label, closed by ` — `,
+routes that leaf to a model tier. See `ralph schema`; validate with
+`ralph lint` and inspect with `ralph brief`.
 
 - [ ] **1 — First item.**
   Describe the bounded outcome.
-  Verify: {{exact command and success condition}}
-";
+  Verify: {{{{exact command and success condition}}}}
+",
+        crate::backlog::SCHEMA_MARKER
+    )
+}
 
 const VISION_STUB: &str = "\
 # Vision
@@ -96,10 +103,11 @@ pub fn run_in(root: &Path) -> R<Report> {
     };
     fs::create_dir_all(root.join(".ralph/archive"))?;
 
+    let backlog_stub = backlog_stub();
     let files: [(&str, &str); 6] = [
         (".ralph/PROMPT.md", PROMPT_TEMPLATE),
         (".ralph/ralph.toml", RALPH_TOML_STUB),
-        (".ralph/BACKLOG.md", BACKLOG_STUB),
+        (".ralph/BACKLOG.md", &backlog_stub),
         (".ralph/VISION.md", VISION_STUB),
         (".ralph/PROGRESS.md", PROGRESS_STUB),
         (".ralph/archive/.gitkeep", ""),

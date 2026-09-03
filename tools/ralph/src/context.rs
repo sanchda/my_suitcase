@@ -29,7 +29,7 @@ pub struct IterationContext {
     pub target: Option<String>,
     /// The selected leaf's title (the bolded one-liner), for human status lines.
     pub target_title: Option<String>,
-    /// The resolved leaf's own `(tier/…)` model decoration, if any.
+    /// The resolved leaf's own `@tier` model decoration, if any.
     pub model_hint: Option<String>,
     pub diagnostics: Vec<Diagnostic>,
     backlog_label: String,
@@ -207,9 +207,9 @@ fn build_suffix(
 
     let mut out = String::new();
     let schema_mode = if doc.schema_present {
-        "v1 backlog schema"
+        "v2 backlog schema"
     } else {
-        "v1 compatibility mode"
+        "unmarked backlog, compatibility mode"
     };
     out.push_str("<!-- ralph-resolved-brief: v1 -->\n");
     out.push_str("## Resolved target (authoritative)\n\n");

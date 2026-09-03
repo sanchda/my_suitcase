@@ -130,6 +130,45 @@ impl Thrash {
     }
 }
 
+/// The tier an iteration runs on, plus a log line when the leaf's own `@tier`
+/// decoration had to be discarded.
+struct ModelChoice {
+    model: String,
+    note: Option<String>,
+}
+
+/// Resolve the tier for one iteration. `override_model` is the already-applied
+/// escalation / one-shot `.ralph/MODEL` decision; `hint` is the leaf's `@tier`.
+///
+/// A decoration naming a real tier that the operator left off
+/// `escalation_ladder` is valid schema, so lint passes it — lint cannot see
+/// config. Routing is the only place that discrepancy is visible, so it reports
+/// the drop rather than quietly running the task on the default model.
+fn choose_model(cfg: &Config, override_model: Option<String>, hint: Option<&str>) -> ModelChoice {
+    if let Some(model) = override_model {
+        return ModelChoice { model, note: None };
+    }
+    let hint = hint.map(str::trim).filter(|h| !h.is_empty());
+    match hint {
+        Some(tier) if cfg.escalation_ladder.iter().any(|t| t == tier) => ModelChoice {
+            model: tier.to_string(),
+            note: None,
+        },
+        Some(tier) => ModelChoice {
+            model: cfg.model.clone(),
+            note: Some(format!(
+                "  ⚠ task declares @{tier}, absent from escalation_ladder [{}] → running {}",
+                cfg.escalation_ladder.join(", "),
+                cfg.model
+            )),
+        },
+        None => ModelChoice {
+            model: cfg.model.clone(),
+            note: None,
+        },
+    }
+}
+
 /// Format the end-of-iteration webhook report. The perf fields come from the
 /// result envelope and are omitted when it's absent.
 fn iteration_report(
@@ -381,17 +420,15 @@ pub fn run(cfg: &Config) -> R<i32> {
             .into());
         }
         // Model precedence: escalation > a one-shot `.ralph/MODEL` override the
-        // agent wrote > the resolved leaf's own `(tier/…)` decoration > default.
-        let model = thrash
-            .forced_model()
-            .or_else(|| state.take_model(&cfg.escalation_ladder))
-            .or_else(|| {
-                resolved
-                    .model_hint
-                    .clone()
-                    .filter(|m| cfg.escalation_ladder.iter().any(|t| t == m))
-            })
-            .unwrap_or_else(|| cfg.model.clone());
+        // agent wrote > the resolved leaf's own `@tier` decoration > default.
+        let choice = choose_model(
+            cfg,
+            thrash
+                .forced_model()
+                .or_else(|| state.take_model(&cfg.escalation_ladder)),
+            resolved.model_hint.as_deref(),
+        );
+        let model = choice.model;
         // Learnings ride the stable base: they change rarely, so the
         // prompt-cache prefix survives across iterations.
         let mut base_prompt = std::fs::read_to_string(&cfg.prompt)?;
@@ -405,6 +442,9 @@ pub fn run(cfg: &Config) -> R<i32> {
             "iter {next} → {model} (effort={}, target={target})",
             effort_for(cfg, &model).unwrap_or_else(|| "inherited".into()),
         ));
+        if let Some(note) = &choice.note {
+            state.log(note);
+        }
         // Post the leaf's title too, so the channel says what it's working on.
         let task_label = match &resolved.target_title {
             Some(title) => format!("{target} — {title}"),
@@ -1221,6 +1261,42 @@ mod tests {
             t.record(Verdict::NoProgress, "opus"),
             Action::Escalate("opus".into())
         );
+    }
+
+    #[test]
+    fn model_choice_prefers_override_then_decoration_then_default() {
+        let cfg = Config::default();
+        // An escalation / one-shot override outranks the leaf's decoration.
+        let forced = choose_model(&cfg, Some("opus".into()), Some("haiku"));
+        assert_eq!(forced.model, "opus");
+        assert!(forced.note.is_none());
+        // A decoration the ladder carries routes the iteration.
+        assert_eq!(choose_model(&cfg, None, Some("haiku")).model, "haiku");
+        // No decoration → configured default.
+        assert_eq!(choose_model(&cfg, None, None).model, cfg.model);
+    }
+
+    #[test]
+    fn decoration_off_the_configured_ladder_is_reported_not_silent() {
+        let cfg = Config {
+            model: "haiku".into(),
+            escalation_ladder: vec!["sonnet".into()],
+            ..Config::default()
+        };
+        let choice = choose_model(&cfg, None, Some("opus"));
+        assert_eq!(choice.model, "haiku");
+        let note = choice
+            .note
+            .expect("dropping a declared tier must be logged");
+        assert!(note.contains("opus"), "names the declared tier: {note}");
+        assert!(note.contains("sonnet"), "names the ladder: {note}");
+        assert!(
+            note.contains("haiku"),
+            "names the model actually used: {note}"
+        );
+        // An absent or blank decoration is not a drop worth reporting.
+        assert!(choose_model(&cfg, None, Some("  ")).note.is_none());
+        assert!(choose_model(&cfg, None, None).note.is_none());
     }
 
     fn arg_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {

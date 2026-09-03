@@ -70,7 +70,7 @@ impl State {
 
     /// Read `.ralph/MODEL` and clear it. The agent's directive is a one-shot
     /// override for the *next* pass only, so a stale value never sticks and the
-    /// resolved leaf's own `(tier/…)` decoration governs by default.
+    /// resolved leaf's own `@tier` decoration governs by default.
     pub fn take_model(&self, allowed: &[String]) -> Option<String> {
         let picked = self.read_model(allowed);
         let _ = fs::remove_file(self.path("MODEL"));

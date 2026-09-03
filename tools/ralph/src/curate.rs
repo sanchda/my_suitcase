@@ -1,6 +1,6 @@
 //! Opportunistic BACKLOG curation: lift the fully-completed leading sections out
 //! of the live backlog into `archive/BACKLOG-completed.md`, keeping the live file
-//! scoped to pending work. Safe because the v1 backlog has no id cross-references
+//! scoped to pending work. Safe because the backlog has no id cross-references
 //! (selection is pure document order), so a prefix lift preserves every
 //! invariant. Best-effort: any failure is a no-op that leaves the backlog intact.
 

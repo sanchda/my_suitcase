@@ -465,6 +465,23 @@ pub fn load_base(args: &[String]) -> crate::R<Config> {
 }
 
 /// Validate cross-field invariants after the full merge.
+/// Both tier lists share the backlog schema's vocabulary. A tier the schema
+/// cannot spell in a `@tier` decoration never matches anything at runtime, so an
+/// unchecked typo does not fail — it silently disables the feature: an unknown
+/// `judge_tiers` entry turns adversarial judging off while still reading as
+/// configured.
+fn validate_tiers(field: &str, tiers: &[String]) -> Result<(), String> {
+    for tier in tiers {
+        if !crate::backlog::MODEL_TIERS.contains(&tier.as_str()) {
+            return Err(format!(
+                "invalid {field} entry '{tier}': expected one of {}",
+                crate::backlog::MODEL_TIERS.join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn validate(cfg: &Config) -> Result<(), String> {
     if cfg.abort_after < cfg.escalate_after {
         return Err(format!(
@@ -475,6 +492,8 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
     if cfg.escalation_ladder.is_empty() {
         return Err("escalation_ladder must not be empty".into());
     }
+    validate_tiers("escalation_ladder", &cfg.escalation_ladder)?;
+    validate_tiers("judge_tiers", &cfg.judge_tiers)?;
     if !matches!(
         cfg.effort.as_str(),
         "auto" | "inherit" | "low" | "medium" | "high" | "xhigh" | "max"
@@ -759,6 +778,45 @@ mod tests {
     fn restart_flag_rejects_bad_value() {
         let mut c = Config::default();
         assert!(apply_args(&mut c, &["--restart".into(), "please".into()]).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_tiers_the_schema_does_not_know() {
+        let c = Config {
+            escalation_ladder: vec!["haiku".into(), "fable".into()],
+            ..Config::default()
+        };
+        let err = validate(&c).unwrap_err();
+        assert!(err.contains("fable"), "{err}");
+        assert!(err.contains("opus"), "must list the valid set: {err}");
+        assert!(validate(&Config::default()).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_unknown_judge_tiers() {
+        // A typo here fails open: judging silently never fires, so the run looks
+        // configured for a check-off audit it is not actually getting.
+        let c = Config {
+            judge_tiers: vec!["fable".into()],
+            ..Config::default()
+        };
+        let err = validate(&c).unwrap_err();
+        assert!(err.contains("judge_tiers"), "{err}");
+        assert!(err.contains("fable"), "{err}");
+        assert!(validate(&Config {
+            judge_tiers: vec!["opus".into()],
+            ..Config::default()
+        })
+        .is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_empty_ladder() {
+        let c = Config {
+            escalation_ladder: Vec::new(),
+            ..Config::default()
+        };
+        assert!(validate(&c).is_err());
     }
 
     #[test]

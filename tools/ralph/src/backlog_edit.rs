@@ -294,7 +294,7 @@ fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
 
 /// Replace a task's OWN body (header + own prose, excluding child stages) with a
 /// regenerated `- [ ] **id — title**` / `Verify:` pair at the same indent and
-/// checked state. v1 scope: text replacement only — no re-parenting/reordering.
+/// checked state. Scope: text replacement only — no re-parenting/reordering.
 pub fn apply_edit(current: &str, id: &str, title: &str, verify: &str) -> Result<String, String> {
     let doc = Document::parse(current);
     let task = doc
@@ -407,7 +407,7 @@ mod tests {
 
     #[test]
     fn add_rejects_placeholder_verify_without_touching_input() {
-        // A marked v1 backlog requires a real Verify; "TODO" is a placeholder.
+        // A marked backlog requires a real Verify; "TODO" is a placeholder.
         let current = format!("{SCHEMA_MARKER}\n# B\n- [ ] **1 — First.** Verify: y\n");
         let err = apply_add_top(&current, "Bad", &verify_body("TODO")).unwrap_err();
         assert!(err.contains("Verify"), "{err}");
