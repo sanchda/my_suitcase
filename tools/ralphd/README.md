@@ -85,7 +85,13 @@ no `[[loop]]` at all or two loops claiming one channel.
 
 A `--dir` or `--config` inside `args` also tells ralphd where that loop's state
 and `ralph.toml` live, so the card reads the same files the loop writes; relative
-paths resolve against `dir`, matching `ralph`.
+paths resolve against `dir`, matching `ralph`. Every shelled-out command is aimed
+there too, as `RALPH_DIR` / `RALPH_CONFIG` on the child — `ralph` honors those
+flags from argv only for the loop itself, `stop` and `msg`, so the environment is
+what makes `/status`, `/add` and the rest act on the relocated state dir. A
+`--backlog` travels the same way as `RALPH_BACKLOG`, since `ralph` resolves the
+backlog independently of the state dir. A loop whose `args` relocate nothing is
+left alone, so a `dir` in its `ralph.toml` still decides.
 
 The bot token is env-only and never appears in the file:
 
@@ -145,12 +151,15 @@ can start a loop without any Discord round-trip.
 While a loop runs, ralphd keeps **one pinned message per channel**, edited in
 place every 30s: loop name and pid, run state, iteration, pending count, current
 and upcoming leaves, the live in-iteration line from `.ralph/live`, spend from
-`.ralph/ledger.jsonl`, and a relative "updated" stamp.
+`.ralph/ledger.jsonl`, and a relative "updated" stamp. The watcher sleeps before
+its first poll, so the card appears up to 30s after the loop starts.
 
 When the loop ends the card gets a final past-tense edit and stays as that run's
-record. The next run deletes it (which unpins it) and pins a fresh one — exactly
-one card per channel, never a pile of status posts. If pinning fails the card
-degrades to an ordinary message and keeps updating.
+record. The next run deletes it (which unpins it) and pins a fresh one — one card
+per channel, never a pile of status posts. That holds within one ralphd process:
+the card's message id is only held in memory, so a restarted ralphd pins a fresh
+card and leaves its predecessor's behind to be unpinned by hand. If pinning fails
+the card degrades to an ordinary message and keeps updating.
 
 **Budget warning at 80%.** Spend is the sum of *every* ledger line inside the
 repo's `budget_window`, compared against the `budget_usd` in that repo's
@@ -162,7 +171,8 @@ budget, and the line is simply absent.
 ## Abnormal-exit posts
 
 When a loop that **ralphd itself spawned** exits nonzero, ralphd posts the abort
-reason — the last `ABORTED` line from `run.log` — with two buttons:
+reason — the last `ABORTED` line in the trailing 16 KiB of `run.log` — with two
+buttons:
 
 - **Start again** — restart with the loop's configured args.
 - **Start on opus** — restart with `--model opus` appended.
@@ -177,15 +187,16 @@ there, so it has no exit status to report — it just stops appearing as running
 ## `/msg` output hygiene
 
 `/msg` drives a persistent claude session that far outlives Discord's 3s ack
-window, so ralphd defers the interaction and keeps one live message current:
-first edit within ~20s, then every minute with elapsed time, step count and
-tokens so far. Past 14 minutes the live message migrates off the interaction
-token (Discord expires it at 15) into a plain channel message that never does.
+window, so ralphd defers the interaction and keeps one live message current: the
+placeholder is replaced immediately, the first progress line lands ~20s in, then
+every minute with elapsed time, step count and tokens so far. Past 14 minutes the
+live message migrates off the interaction token (Discord expires it at 15) into a
+plain channel message that never does.
 
-The result is never truncated. It is split into at most 4 messages at line
-boundaries, code fences are closed and reopened with their language tag across a
-split rather than torn, and all mentions are suppressed so a session cannot ping
-`@everyone`.
+The result is split at line boundaries into at most 4 messages of 2000 chars, and
+anything past the fourth is dropped with a `… (N more message(s) omitted)` note.
+Code fences are closed and reopened with their language tag across a split rather
+than torn, and all mentions are suppressed so a session cannot ping `@everyone`.
 
 ## Setup
 

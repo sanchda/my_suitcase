@@ -385,7 +385,10 @@ fn commands() -> Vec<CreateCommand> {
             .add_option(req_str("tier", "a tier on the escalation ladder")),
         CreateCommand::new("status")
             .description("Loop status: iteration, pending count, current + next tasks"),
-        CreateCommand::new("next").description("Show the current and upcoming backlog tasks"),
+        // One dispatch arm serves both, so say so rather than promise a
+        // different view of the backlog than /status gives.
+        CreateCommand::new("next")
+            .description("Alias for /status: iteration, pending count, current + next tasks"),
         CreateCommand::new("add")
             .description("Queue a backlog task (validated before saving)")
             .add_option(req_str("title", "task title"))

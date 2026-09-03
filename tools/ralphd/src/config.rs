@@ -59,7 +59,7 @@ struct FileLoop {
 /// The loop's state dir defaults to `<working-dir>/.ralph`, but a `--dir <path>`
 /// in the forwarded ralph args moves it, so ralphd must read the same one ralph
 /// writes. A relative `--dir` resolves against working_dir, matching ralph.
-fn resolve_state_dir(working_dir: &Path, args: &[String]) -> PathBuf {
+pub fn resolve_state_dir(working_dir: &Path, args: &[String]) -> PathBuf {
     match forwarded_path(args, "--dir") {
         Some(dir) if dir.is_absolute() => dir,
         Some(dir) => working_dir.join(dir),
@@ -69,7 +69,7 @@ fn resolve_state_dir(working_dir: &Path, args: &[String]) -> PathBuf {
 
 /// Same resolution for `ralph.toml`, which ralph defaults to `.ralph/ralph.toml`
 /// *relative to its cwd* rather than to `--dir`.
-fn resolve_ralph_config(working_dir: &Path, args: &[String]) -> PathBuf {
+pub fn resolve_ralph_config(working_dir: &Path, args: &[String]) -> PathBuf {
     match forwarded_path(args, "--config") {
         Some(p) if p.is_absolute() => p,
         Some(p) => working_dir.join(p),
@@ -77,7 +77,7 @@ fn resolve_ralph_config(working_dir: &Path, args: &[String]) -> PathBuf {
     }
 }
 
-fn forwarded_path(args: &[String], flag: &str) -> Option<PathBuf> {
+pub fn forwarded_path(args: &[String], flag: &str) -> Option<PathBuf> {
     args.iter()
         .position(|a| a == flag)
         .and_then(|i| args.get(i + 1))

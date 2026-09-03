@@ -4,7 +4,7 @@
 //! loops polling on a 30s cadence, `Command::output()` on a gateway worker can
 //! stall the heartbeat and blow Discord's 3s interaction-ack window.
 
-use crate::config::LoopConfig;
+use crate::config::{self, LoopConfig};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 
@@ -13,6 +13,9 @@ pub struct Ralph {
     working_dir: PathBuf,
     ralph_args: Vec<String>,
     webhook: Option<String>,
+    /// Environment aiming the short calls at this loop's own state dir and
+    /// `ralph.toml`; see [`relocation`].
+    relocation: Vec<(&'static str, PathBuf)>,
 }
 
 /// Result of a short `ralph` invocation.
@@ -26,19 +29,60 @@ fn argv<const N: usize>(parts: [&str; N]) -> Vec<String> {
     parts.iter().map(|s| s.to_string()).collect()
 }
 
+/// A loop launched with `--dir` / `--config` / `--backlog` needs the short calls
+/// aimed at the same places, or `/status` reports on `<repo>/.ralph` while the
+/// loop lives in `/var/lib/ralph/x`. Re-passing the flags does not achieve that:
+/// only the loop itself, `stop` and `msg` read them from argv — `status`, `add`,
+/// `done`, `uncheck`, `drop`, `model` and `backlog edit` resolve their paths
+/// through ralph's `load_base`, which consults the config file and the
+/// environment and silently ignores a `--dir` sitting in argv. The `RALPH_*`
+/// variables are the one channel every subcommand honors.
+///
+/// `dir` and `backlog` are independent in ralph, so relocating one never moves
+/// the other and each has to be forwarded on its own.
+///
+/// Only when the loop's own args move them: a loop that relocates nothing must
+/// keep inheriting ralphd's environment — and any `dir` in its `ralph.toml` —
+/// exactly as the spawned loop child does.
+fn relocation(cfg: &LoopConfig) -> Vec<(&'static str, PathBuf)> {
+    let mut env = Vec::new();
+    if config::forwarded_path(&cfg.ralph_args, "--dir").is_some() {
+        env.push(("RALPH_DIR", cfg.state_dir.clone()));
+    }
+    if config::forwarded_path(&cfg.ralph_args, "--config").is_some() {
+        env.push(("RALPH_CONFIG", cfg.ralph_config.clone()));
+    }
+    // Not pre-resolved by config.rs: ralphd never reads the backlog itself.
+    if let Some(p) = config::forwarded_path(&cfg.ralph_args, "--backlog") {
+        let p = if p.is_absolute() {
+            p
+        } else {
+            cfg.working_dir.join(p)
+        };
+        env.push(("RALPH_BACKLOG", p));
+    }
+    env
+}
+
 impl Ralph {
     pub fn new(cfg: &LoopConfig) -> Self {
         Ralph {
             working_dir: cfg.working_dir.clone(),
             ralph_args: cfg.ralph_args.clone(),
             webhook: cfg.webhook.clone(),
+            relocation: relocation(cfg),
         }
     }
 
     async fn run(&self, args: Vec<String>) -> std::io::Result<Output> {
         let dir = self.working_dir.clone();
+        let env = self.relocation.clone();
         tokio::task::spawn_blocking(move || {
-            let out = Command::new("ralph").args(&args).current_dir(&dir).output()?;
+            let out = Command::new("ralph")
+                .args(&args)
+                .envs(env.iter().map(|(k, v)| (*k, v)))
+                .current_dir(&dir)
+                .output()?;
             Ok(Output {
                 ok: out.status.success(),
                 stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -190,6 +234,7 @@ impl Ralph {
         // human-readable default would leave it with nothing to parse.
         cmd.arg("--stream-json")
             .arg(text)
+            .envs(self.relocation.iter().map(|(k, v)| (*k, v)))
             .current_dir(&self.working_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -201,22 +246,64 @@ impl Ralph {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    /// A loop as `config.rs` would resolve it from `args`.
+    fn loop_with(args: &[&str]) -> LoopConfig {
+        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        LoopConfig {
+            name: "grove".into(),
+            channel_id: 2,
+            state_dir: config::resolve_state_dir(Path::new("/repo"), &args),
+            ralph_config: config::resolve_ralph_config(Path::new("/repo"), &args),
+            working_dir: PathBuf::from("/repo"),
+            ralph_args: args,
+            webhook: Some("https://hook".into()),
+            autostart: false,
+        }
+    }
 
     #[test]
     fn new_captures_the_loops_launch_profile() {
-        let cfg = LoopConfig {
-            name: "grove".into(),
-            channel_id: 2,
-            working_dir: PathBuf::from("/repo"),
-            state_dir: PathBuf::from("/repo/.ralph"),
-            ralph_config: PathBuf::from("/repo/.ralph/ralph.toml"),
-            ralph_args: vec!["--model".into(), "opus".into()],
-            webhook: Some("https://hook".into()),
-            autostart: false,
-        };
-        let r = Ralph::new(&cfg);
+        let r = Ralph::new(&loop_with(&["--model", "opus"]));
         assert_eq!(r.working_dir, PathBuf::from("/repo"));
         assert_eq!(r.ralph_args, vec!["--model".to_string(), "opus".to_string()]);
         assert_eq!(r.webhook.as_deref(), Some("https://hook"));
+    }
+
+    #[test]
+    fn short_calls_are_aimed_at_a_relocated_state_dir() {
+        let r = Ralph::new(&loop_with(&["--dir", "/var/lib/ralph/x"]));
+        assert_eq!(
+            r.relocation,
+            vec![("RALPH_DIR", PathBuf::from("/var/lib/ralph/x"))]
+        );
+        // A relative --dir travels resolved, since the callee's own default is
+        // relative to its cwd and would otherwise be re-relativized.
+        let r = Ralph::new(&loop_with(&["--dir", "state"]));
+        assert_eq!(r.relocation, vec![("RALPH_DIR", PathBuf::from("/repo/state"))]);
+
+        let r = Ralph::new(&loop_with(&["--config", "/etc/ralph.toml"]));
+        assert_eq!(
+            r.relocation,
+            vec![("RALPH_CONFIG", PathBuf::from("/etc/ralph.toml"))]
+        );
+
+        // ralph resolves `backlog` independently of `dir`, so a loop that moves
+        // only the backlog still needs it forwarded on its own.
+        let r = Ralph::new(&loop_with(&["--backlog", "docs/PLAN.md"]));
+        assert_eq!(
+            r.relocation,
+            vec![("RALPH_BACKLOG", PathBuf::from("/repo/docs/PLAN.md"))]
+        );
+    }
+
+    #[test]
+    fn a_loop_that_relocates_nothing_is_left_alone() {
+        // No --dir/--config means ralph's own resolution (its config file, then
+        // ralphd's environment) must keep deciding — pinning the defaults here
+        // would override a `dir` set in the repo's ralph.toml.
+        assert!(Ralph::new(&loop_with(&["--model", "opus"])).relocation.is_empty());
+        assert!(Ralph::new(&loop_with(&[])).relocation.is_empty());
     }
 }
