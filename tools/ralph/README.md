@@ -100,8 +100,16 @@ Run `ralph schema` for the complete, version-matched authoring reference. In
 short: tasks are ordered Markdown checkboxes with unique IDs and `Verify:`
 contracts; two-space-indented children are explicit stages. `ralph lint`
 validates and selects the next leaf, while `ralph brief` shows the bounded
-context the model will receive. The same reference lives in
-[BACKLOG.schema.md](BACKLOG.schema.md).
+context the model will receive. That reference is
+[BACKLOG.schema.md](BACKLOG.schema.md), compiled into the binary — editing it
+takes effect only after a rebuild.
+
+The runner curates as it goes: after each successful iteration the maximal
+leading run of fully-completed top-level sections is lifted out of the live
+backlog and appended to `.ralph/archive/BACKLOG-completed.md`, keeping the file
+scoped to pending work. Selection is pure document order, so a prefix lift
+changes no routing. Best-effort and conservative — it never touches an invalid
+backlog, and never leaves one behind.
 
 ## Watching / controlling a running loop
 - **Live status of the active iteration** (tool, elapsed, output tokens, last
@@ -114,6 +122,9 @@ context the model will receive. The same reference lives in
   *and* signals the loop, which tears down the `claude` session group — that
   teardown is the point, since `claude` runs in its own session and a naive kill
   would orphan it and its subprocesses. Suppresses `--restart` either way.
+- **Start via ralphd** without Discord: `ralph start` writes `.ralph/START`, the
+  symmetric counterpart to STOP. A running ralphd consumes the marker and
+  launches the loop; with no ralphd watching, nothing happens.
 - **Resume** later: just re-run `ralph` — the counter in `.ralph/iteration`
   persists.
 - **One loop per repo is enforced.** The loop holds `.ralph/loop.pid` and a
@@ -322,13 +333,18 @@ running" and to refuse a duplicate `/start`, but never writes it.
 ## Completion
 The loop ends when the model's **final text** (from the result envelope's
 `.result`, which excludes thinking) contains the marker token on its own line,
-default `RALPH_COMPLETE`. Your `PROMPT.md` must instruct the model to emit it
-only when the whole goal is genuinely done and verified.
+default `RALPH_COMPLETE`, **and** the backlog agrees. Your `PROMPT.md` must
+instruct the model to emit it only when the whole goal is genuinely done and
+verified.
+
+The backlog is the gate: the runner re-resolves it after the turn, and a marker
+that arrives while a pending task or a schema error remains is discarded with
+`⚠ completion marker ignored: <reason>` and the loop simply continues.
 
 ### Completion closes the arc
-On completion, the runner moves the backlog file into
-`.ralph/archive/BACKLOG-<timestamp>.md` — `git mv` + a commit when the backlog
-is tracked, a plain filesystem rename otherwise — and then closes out the arc:
+On completion, the runner moves whatever backlog remains into
+`.ralph/archive/BACKLOG-<timestamp>.md` — a plain filesystem rename that never
+touches git — and then closes out the arc:
 
 - the carry-forward is archived to `.ralph/archive/PROGRESS-<timestamp>.md` and
   `PROGRESS.md` is cleared, so the next arc's first iteration never reads the
@@ -373,7 +389,9 @@ abort). See the PROMPT template for the exact instructions given to the model.
 
 **Model precedence** (highest first): escalation override → one-shot `.ralph/MODEL`
 → the resolved leaf's own `@tier` decoration → the run default. So model tier
-lives with the task in the backlog; the agent need not restate it.
+lives with the task in the backlog; the agent need not restate it. An active
+escalation short-circuits the rest, so a pending `.ralph/MODEL` is *not* consumed
+while one holds — it survives to the next non-escalated iteration.
 
 The decoration sits in a fixed slot on the header line — immediately after the
 label's closing `**`, closed by ` — ` before the prose:
@@ -485,12 +503,19 @@ unparseable line contributes nothing rather than fabricating a halt.
 ## Discord notifications
 Set `DISCORD_WEBHOOK` to a Discord **webhook URL** (from a channel's
 *Integrations → Webhooks* — it already targets that channel, so no channel id is
-needed) and the loop posts lifecycle events to it: start, model escalation,
-abort (no-progress **or** a hard `blocked` gate — the "come look" signal),
-completion, and any budget/STOP halt. Unset = disabled. Posts go out via `curl`
-with a 10s timeout and all errors swallowed, so a slow or down webhook never
-stalls or fails the loop. Per-iteration results are **not** posted (they'd be
-noisy); watch `.ralph/current.log` for that.
+needed) and the loop posts lifecycle events to it: start, each iteration's
+launch and its one-line result (cost, tokens, turns, timing, summary), model
+escalation, contract breaches, abort (no-progress **or** a hard `blocked` gate —
+the "come look" signal), completion, and any budget/STOP halt. Unset = disabled.
+Posts go out via `curl` with a 10s timeout and all errors swallowed, so a slow or
+down webhook never stalls or fails the loop. For the raw stream of a turn in
+flight, watch `.ralph/current.log`.
+
+`--heartbeat <dur>` (`heartbeat_interval`, off by default) adds *in-turn*
+progress posts every interval while an iteration runs — elapsed, output tokens,
+event count, current tool — so a long turn is visibly alive. It posts from its
+own thread, so a slow webhook never stalls stream consumption, and it is inert
+without a webhook.
 
 A `SIGKILL` (e.g. the OOM killer) gives ralph no chance to post its own outcome,
 so at startup it also double-forks a tiny detached **watchdog** (only when a
@@ -549,6 +574,7 @@ abort_after = 4
 |---|---|---|---|
 | `model` | `RALPH_MODEL` | `--model` | `sonnet` |
 | `fallback_model` | `RALPH_FALLBACK_MODEL` | `--fallback-model` | `sonnet` |
+| `synth_model` | — | — | `sonnet` |
 | `effort` | `RALPH_EFFORT` | `--effort` | `auto` |
 | `max_iterations` | `RALPH_MAX_ITER` | `--max-iterations` | `0` |
 | `max_cost_usd` | `RALPH_MAX_COST` | `--max-cost` | `0` |
@@ -562,6 +588,8 @@ abort_after = 4
 | `progress` | `RALPH_PROGRESS` | `--progress` | `.ralph/PROGRESS.md` |
 | `dir` | `RALPH_DIR` | `--dir` | `.ralph` |
 | `yolo` | `RALPH_YOLO` | `--no-yolo` | `true` |
+| `restart` | `RALPH_RESTART` | `--restart` | `false` |
+| `heartbeat_interval` | `RALPH_HEARTBEAT` | `--heartbeat` | `0` (off) |
 | `limit_wait` / `_max` | `RALPH_LIMIT_WAIT[_MAX]` | — | 300 / 3600 |
 | `transient_wait` / `_max` | `RALPH_TRANSIENT_WAIT[_MAX]` | — | 10 / 300 |
 | `extra_args` | `RALPH_EXTRA_ARGS` | — | — |
@@ -572,6 +600,10 @@ abort_after = 4
 | `budget_window` | — | — | `0` (all time) |
 | — | `RALPH_CONFIG` | `--config` | `.ralph/ralph.toml` |
 | — | — | `--once` | run one iteration then exit |
+
+`escalation_ladder` and `judge_tiers` may name only `haiku`, `sonnet`, or
+`opus` — the tiers a backlog `@tier` slot can spell. Anything else is a startup
+error, not a silently inert entry.
 
 `--dangerously-skip-permissions` is on by default (`--no-yolo` disables) — an
 unattended loop can't answer permission prompts, so run on a branch/worktree you
@@ -598,7 +630,7 @@ cargo build --release
 ```
 Modules: `backlog` (schema/lint) · `context` (bounded brief) · `config` ·
 `stream` (NDJSON) · `classify` · `control` (loop, thrash, budgets, timeout) ·
-`state` (`.ralph/`, HANDOFF) · `git` (baseline, contract audit) · `judge`
-(adversarial check-off gate) · `learn` (`ralph learn`) · `init` (`ralph init`
-scaffolding). See
+`state` (`.ralph/`, HANDOFF) · `curate` (completed-section sweep) · `git`
+(baseline, contract audit) · `judge` (adversarial check-off gate) · `learn`
+(`ralph learn`) · `init` (`ralph init` scaffolding). See
 `docs/superpowers/specs/2026-07-17-ralph-rust-design.md` for the original design.

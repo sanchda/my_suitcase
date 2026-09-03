@@ -54,11 +54,11 @@ Ralph selects the first unchecked task with no unchecked descendants, in
 document order. A parent with pending children is a container; after its children
 finish, the parent becomes the integration/closure step.
 
-The first `Next: <id> — <step>` in PROGRESS may refine only the selected ID; it
-cannot reorder the backlog. If a leaf is too large for one iteration, add ordered
-child stages with their own `Verify:` contracts — `ralph add --under <id>
-"<title>" --verify "<cmd>"` — and run `ralph lint`. Do not keep routing slices
-only in PROGRESS.
+PROGRESS is a runner-owned carry-forward note, injected verbatim with no `Next:`
+parsing and no id matching: it may clarify the selected task, never reroute. If
+a leaf is too large for one iteration, add ordered child stages with their own
+`Verify:` contracts — `ralph add --under <id> "<title>" --verify "<cmd>"` — and
+run `ralph lint`. Do not keep routing slices only in PROGRESS.
 
 ## Never edit this file by hand
 
