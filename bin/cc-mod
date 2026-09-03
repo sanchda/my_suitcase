@@ -200,6 +200,21 @@ unlink_mod_files() {
   done < <(mod_links "$manifest")
 }
 
+# Does every declared link still exist and still point at us? A links-only mod
+# plans no settings ops, so without this `ensure` would call it current forever
+# and never re-create a link that was deleted.
+links_hold() {
+  local name="$1" manifest="$2" dest src target source
+  while IFS=$'\t' read -r dest src; do
+    [ -n "$dest" ] || continue
+    target="$(claude_dir)/$dest"
+    source="$MODS_DIR/$name/$src"
+    [ -L "$target" ] || return 1
+    [ "$(cd "$(dirname "$target")" && readlink "$target")" = "$source" ] || return 1
+  done < <(mod_links "$manifest")
+  return 0
+}
+
 # --- requirements ------------------------------------------------------------
 
 check_requires() {
@@ -297,6 +312,11 @@ cmd_status() {
     manifest="$(resolved_manifest "$name")"
     note "$name: enabled -- $(field "$manifest" .description)"
     print_ops "$(jq -c '.ops' "$receipt")" "    "
+    while IFS=$'\t' read -r dest _; do
+      [ -n "$dest" ] || continue
+      printf '    link %s\n' "$dest"
+    done < <(mod_links "$manifest")
+    links_hold "$name" "$manifest" || note "    DRIFT: a link is missing or no longer points here"
     read_settings | jq -L "$LIB" -r --argjson ops "$(jq '.ops' "$receipt")" \
       'include "cc-mod";
        (missing_ops($ops) | length) as $n
@@ -312,6 +332,7 @@ already_current() {
   local name="$1" manifest="$2" receipt planned recorded drift
   receipt="$(receipt_of "$name")"
   [ -f "$receipt" ] || return 1
+  links_hold "$name" "$manifest" || return 1
   planned="$(read_settings | jq -L "$LIB" -c --argjson frag "$(printf '%s' "$manifest" | jq '.settings // {}')" \
               'include "cc-mod"; op_intent(ops($frag))')" || return 1
   recorded="$(jq -L "$LIB" -c 'include "cc-mod"; op_intent(.ops)' "$receipt")" || return 1

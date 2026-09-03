@@ -93,7 +93,12 @@ Writing one
   batch, so a fresh box that hasn't built a binary yet still gets everything else.
 - `links` symlinks files into `~/.claude/` (relative to the settings file). An
   existing real file is moved to `<name>.pre-cc-mod` and restored on disable.
-  A link is only removed while it still points at this mod.
+  A link is only removed while it still points at this mod. A directory source
+  works too, which is how a mod ships a skill: `"links": {"skills/ralph":
+  "skill"}` puts `claude/mods/ralph-skill/skill/` on `~/.claude/skills/ralph`,
+  so a `git pull` updates the skill with no reinstall. `ensure` checks that
+  declared links still point here, so a deleted one is re-created even when the
+  mod has no `settings` at all.
 - `enable` / `disable` scripts are optional escape hatches for anything
   declarative JSON can't express. They run with `$CC_MOD_NAME` and `$SUITCASE`.
 - Placeholders in any string: `{{SUITCASE}}`, `{{MOD_DIR}}`, `{{HOME}}`,

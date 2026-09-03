@@ -1,0 +1,10 @@
+{
+  "description": "Skill: driving a ralph autonomous loop",
+  "default": true,
+  "requires": {
+    "files": ["{{LOCAL_BIN}}/ralph"]
+  },
+  "links": {
+    "skills/ralph": "skill"
+  }
+}

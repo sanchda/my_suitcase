@@ -1,0 +1,10 @@
+{
+  "description": "Skill: the ralphd Discord control bridge",
+  "default": true,
+  "requires": {
+    "files": ["{{LOCAL_BIN}}/ralphd"]
+  },
+  "links": {
+    "skills/ralphd": "skill"
+  }
+}

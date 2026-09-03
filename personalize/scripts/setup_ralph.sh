@@ -61,3 +61,7 @@ if [ -f "$RALPHD_DIR/Cargo.toml" ]; then
 fi
 
 echo "Ensure ~/.local/bin is on your PATH, then run 'ralph --help' from a target repo."
+# The matching Claude skills (claude/mods/{ralph,ralphd}-skill) are default mods,
+# so zz_setup_claude_mods.sh installs them after this script has built the
+# binaries they require. Standalone: cc-mod ensure ralph-skill ralphd-skill
+echo "Claude skills: cc-mod ensure ralph-skill ralphd-skill (personalize does this for you)."

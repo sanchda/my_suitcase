@@ -252,6 +252,25 @@ cc disable linky
 assert_contains "$(cat "$ROOT/claude/agents/tester.md")" "yours" "original restored"
 teardown
 
+# A links-only mod plans no settings ops, so "nothing changed" is not enough to
+# call it current -- ensure has to look at the links themselves.
+test_case "ensure heals a deleted link on a links-only mod"
+mod skilly '{
+  "description": "links a skill directory",
+  "links": {"skills/demo": "skill"}
+}'
+mkdir -p "$CC_MOD_DIR/skilly/skill"
+echo "demo" >"$CC_MOD_DIR/skilly/skill/SKILL.md"
+cc enable skilly
+is_link "$ROOT/claude/skills/demo" "symlink created"
+out="$(cc_out ensure skilly)"
+assert_contains "$out" "already current" "intact links are still a no-op"
+rm -f "$ROOT/claude/skills/demo"
+cc ensure skilly
+is_link "$ROOT/claude/skills/demo" "ensure re-created the deleted link"
+assert_contains "$(cat "$ROOT/claude/skills/demo/SKILL.md")" "demo" "link resolves to the mod's dir"
+teardown
+
 # --- drift ------------------------------------------------------------------
 test_case "doctor reports drift and reapply fixes it"
 mod hooky "$HOOK_MOD"
