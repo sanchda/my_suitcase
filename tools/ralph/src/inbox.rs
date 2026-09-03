@@ -204,6 +204,36 @@ fn archive_drop(base: &Path, blocks: &[String]) -> R<()> {
     Ok(())
 }
 
+/// Drop any queued check-off of `id`, returning how many were discarded.
+///
+/// The agent closes its own leaf with `ralph done <id>`, which — like every CLI
+/// mutation — only queues while the loop runs. So at judge time the leaf is still
+/// unchecked on disk and the judge's `apply_uncheck` is a no-op, and the queued
+/// check-off then lands at the next drain and silently re-closes the very leaf the
+/// judge reopened. Without this the refutation is cosmetic: routing never
+/// re-selects the leaf and the loop moves on as if the judge had passed it.
+pub fn discard_done(base: &Path, id: &str) -> R<usize> {
+    if pending(base)?.is_empty() {
+        return Ok(0);
+    }
+    // Same guard as `drain`, so this can never delete a file mid-replay.
+    let Ok(_guard) = pidguard::acquire(&drain_pidfile(base)) else {
+        return Ok(0);
+    };
+    let mut discarded = 0;
+    for path in pending(base)? {
+        let queued = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Request>(&raw).ok());
+        if matches!(queued, Some(Request::Done { id: ref q }) if q == id)
+            && std::fs::remove_file(&path).is_ok()
+        {
+            discarded += 1;
+        }
+    }
+    Ok(discarded)
+}
+
 /// Apply the whole queue in order, under the drain guard. A busy guard yields an
 /// empty outcome: the holder is applying the same requests, and draining is
 /// idempotent over the queue either way.
@@ -414,6 +444,37 @@ mod tests {
         );
         let doc = Document::parse(&std::fs::read_to_string(&backlog).unwrap());
         assert!(!doc.has_errors(), "{:?}", doc.issues);
+    }
+
+    // The bug this guards: `ralph done <id>` only queues while the loop runs, so at judge
+    // time the leaf is still unchecked on disk. A refutation that does not also drop the
+    // queued check-off is undone by the very next drain.
+    #[test]
+    fn discard_done_drops_only_the_matching_check_off() {
+        let tmp = std::env::temp_dir().join(format!("ralph-discard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(dir(&tmp)).unwrap();
+
+        enqueue(&tmp, &Request::Done { id: "2.2".into() }).unwrap();
+        enqueue(&tmp, &Request::Done { id: "3".into() }).unwrap();
+        enqueue(&tmp, &Request::Uncheck { id: "2.2".into() }).unwrap();
+        enqueue(&tmp, &add("keep me")).unwrap();
+
+        assert_eq!(discard_done(&tmp, "2.2").unwrap(), 1);
+        // Only 2.2's check-off goes; another leaf's, and other request kinds, survive.
+        assert_eq!(discard_done(&tmp, "2.2").unwrap(), 0);
+
+        let left: Vec<Request> = pending(&tmp)
+            .unwrap()
+            .iter()
+            .map(|p| serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap())
+            .collect();
+        assert_eq!(left.len(), 3);
+        assert!(left.contains(&Request::Done { id: "3".into() }));
+        assert!(left.contains(&Request::Uncheck { id: "2.2".into() }));
+        assert!(!left.contains(&Request::Done { id: "2.2".into() }));
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

@@ -436,9 +436,14 @@ iteration that RAN on a listed tier gets a one-shot judge pass on
 `Verify:` contract), the agent's end-of-turn summary (labeled *claims,
 unverified*), and the iteration's commits + diff, and is told to **refute if
 uncertain**. On refute, the runner mechanically un-checks the leaf (and any
-ancestor the check-off closed) with the usual lint-or-reject safety, posts the
-reason, and counts the iteration as no-progress — so routing re-selects the
-same leaf, and a repeat refutation escalates the tier like any other stall.
+ancestor the check-off closed) with the usual lint-or-reject safety, **discards
+the agent's own queued `ralph done` for that leaf**, posts the reason, and counts
+the iteration as no-progress — so routing re-selects the same leaf, and a repeat
+refutation escalates the tier like any other stall. That discard is what makes
+the reopen stick: the agent closes its leaf through the same queue as every other
+CLI mutation, so at judge time the check-off is still pending rather than applied,
+and draining it at the next iteration boundary would silently re-close the leaf
+the judge just reopened.
 The harness itself fails **open**: a missing/hung/garbled judge call passes the
 iteration rather than stalling the loop (skepticism belongs in the judgment,
 availability in the harness).

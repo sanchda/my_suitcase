@@ -620,6 +620,18 @@ pub fn run(cfg: &Config) -> R<i32> {
                                 state.log(&format!(
                                     "  ⚖ judge REFUTED {leaf_id} — reopened; counts as no-progress: {reason}"
                                 ));
+                                // The agent's own `ralph done` is still sitting in the inbox;
+                                // draining it next iteration would re-close the leaf the judge
+                                // just reopened, making every refutation a no-op.
+                                match inbox::discard_done(&cfg.dir, leaf_id) {
+                                    Ok(n) if n > 0 => state.log(&format!(
+                                        "  ⚖ discarded {n} queued check-off(s) of {leaf_id}"
+                                    )),
+                                    Ok(_) => {}
+                                    Err(e) => state.log(&format!(
+                                        "  ⚠ could not discard queued check-off of {leaf_id}: {e}"
+                                    )),
+                                }
                                 notify::notify(
                                     &notifier,
                                     &format!(
