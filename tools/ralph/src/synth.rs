@@ -4,7 +4,7 @@
 //! it. Any failure returns the baseline — there is no separate fallback path.
 
 use crate::config::Config;
-use std::io::{Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -12,7 +12,7 @@ use std::thread;
 use std::time::Duration;
 
 const MAX_CARRY_FORWARD_BYTES: usize = 1_200;
-/// Coarse wall-clock cap for the one-shot synth call; a hung `claude` is killed.
+/// Coarse wall-clock cap for the one-shot synth call; a hung worker is killed.
 const SYNTH_TIMEOUT_SECS: u64 = 120;
 
 /// Assemble the synthesizer prompt from this turn's summary, the upcoming leaves,
@@ -83,31 +83,42 @@ pub fn synthesize_with(
 }
 
 /// The real `run` for [`synthesize_with`], at the configured synth model.
-pub fn run_claude(cfg: &Config, prompt: &str) -> Option<String> {
-    run_claude_oneshot(&cfg.synth_model, SYNTH_TIMEOUT_SECS, prompt)
+pub fn run(cfg: &Config, prompt: &str) -> Option<String> {
+    run_oneshot(cfg, &cfg.synth_model, SYNTH_TIMEOUT_SECS, prompt)
 }
 
-/// One-shot `claude -p --model <model>`, prompt on stdin, plain text stdout.
+/// One-shot backend call, prompt on stdin, returning the final response text.
 /// Shared by the handoff synthesizer, the adversarial judge, and `ralph learn`.
 /// Returns None on spawn/exit failure OR if the call outlives `timeout_secs`
 /// (watchdog kills the process tree). Stdin is written on a separate thread so
 /// a full stdin pipe can't deadlock against a full stdout one.
-pub fn run_claude_oneshot(model: &str, timeout_secs: u64, prompt: &str) -> Option<String> {
-    let mut cmd = Command::new("claude");
-    cmd.args([
-        "-p",
-        "--model",
-        model,
-        "--output-format",
-        "text",
-        "--no-session-persistence",
-        "--exclude-dynamic-system-prompt-sections",
-    ])
-    .stdin(Stdio::piped())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::null());
+pub fn run_oneshot(cfg: &Config, model: &str, timeout_secs: u64, prompt: &str) -> Option<String> {
+    let selection = crate::backend::resolve(cfg, model);
+    let codex = selection.backend == crate::backend::Backend::Codex;
+    let mut cmd = Command::new(selection.backend.executable());
+    if codex {
+        cmd.args(crate::backend::codex_args(
+            &selection,
+            Some("read-only"),
+            true,
+        ));
+        cmd.arg("-");
+    } else {
+        cmd.args([
+            "-p",
+            "--model",
+            selection.model.as_deref().unwrap_or(model),
+            "--output-format",
+            "text",
+            "--no-session-persistence",
+            "--exclude-dynamic-system-prompt-sections",
+        ]);
+    }
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
     // Own process group so the watchdog's negative-pid SIGKILL reaps the whole
-    // tree (claude + any subprocess) rather than orphaning a hung child.
+    // tree (worker + any subprocess) rather than orphaning a hung child.
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -123,7 +134,6 @@ pub fn run_claude_oneshot(model: &str, timeout_secs: u64, prompt: &str) -> Optio
     let prompt_bytes = prompt.as_bytes().to_vec();
     let writer = thread::spawn(move || {
         let _ = stdin.write_all(&prompt_bytes);
-        // Drop closes stdin so claude sees EOF and produces its output.
     });
 
     // Watchdog: SIGKILL the group if the call outlives the coarse timeout.
@@ -146,21 +156,27 @@ pub fn run_claude_oneshot(model: &str, timeout_secs: u64, prompt: &str) -> Optio
         }
     });
 
-    // Read stdout to EOF on this thread (unblocks on child exit or the kill).
-    let mut buf = String::new();
-    let read_ok = stdout.read_to_string(&mut buf).is_ok();
+    let output = if codex {
+        crate::stream::consume(
+            BufReader::new(stdout),
+            &mut std::io::sink(),
+            &mut crate::stream::IterStatus::new(0, model),
+            |_| {},
+        )
+        .map(|envelope| envelope.filter(|e| !e.is_error).map(|e| e.result))
+    } else {
+        let mut text = String::new();
+        stdout.read_to_string(&mut text).map(|_| Some(text))
+    };
     let status = child.wait().ok();
     done.store(true, Ordering::SeqCst);
     let _ = writer.join();
     let _ = watchdog.join();
 
-    if killed.load(Ordering::SeqCst) || !read_ok {
+    if killed.load(Ordering::SeqCst) || !status.is_some_and(|s| s.success()) {
         return None;
     }
-    match status {
-        Some(s) if s.success() => Some(buf),
-        _ => None,
-    }
+    output.ok().flatten()
 }
 
 #[cfg(test)]

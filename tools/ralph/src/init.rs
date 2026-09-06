@@ -17,9 +17,11 @@ const GITIGNORE_BLOCK: &str = "\
 const RALPH_TOML_STUB: &str = "\
 # ralph config — all keys optional; uncomment to override defaults.
 # See `ralph --help` and tools/ralph/README.md.
+# backend = \"auto\" # auto, claude, or codex (alias openai)
 # model = \"sonnet\"
 # fallback_model = \"sonnet\"
 # synth_model = \"sonnet\" # handoff summarizer; its cost is NOT counted toward max_cost_usd
+# Codex reports tokens, not USD cost; use duration/iteration limits with Codex.
 # max_cost_usd = 25.0            # per run; resets when the loop restarts
 # budget_usd = 100.0             # rolling cap from .ralph/ledger.jsonl, survives restarts
 # budget_window = \"24h\"          # window for budget_usd; unset sums all time
@@ -33,6 +35,9 @@ const RALPH_TOML_STUB: &str = "\
 # extra_args = [\"--add-dir\", \"/some/path\"]
 # Self-contained prompt only: omit hooks/plugins/MCP/memory and unused tools.
 # extra_args = [\"--safe-mode\", \"--tools\", \"Bash,Edit,Read,Write\"]
+# Optional model mapping; backlog @tiers remain unchanged:
+# [tier_models]
+# opus = \"gpt-5.4\"
 ";
 
 /// Built from `SCHEMA_MARKER` so the scaffold can never drift from the parser.

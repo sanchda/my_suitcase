@@ -30,7 +30,9 @@ pub enum Decision {
 /// Should this iteration be judged? Only when the feature is enabled and the
 /// model that ran the iteration is one of the configured judge tiers.
 pub fn wants_judgment(cfg: &Config, model: &str) -> bool {
-    cfg.judge_tiers.iter().any(|t| t == model)
+    cfg.judge_tiers
+        .iter()
+        .any(|t| t == model || cfg.tier_models.get(t).is_some_and(|m| m == model))
 }
 
 /// Assemble the adversarial prompt. Kept pure for testing.
@@ -92,7 +94,7 @@ pub fn judge_iteration(
 
     let label = format!("{leaf_id} — {leaf_title}");
     let prompt = build_prompt(&label, &excerpt, summary, &diff);
-    let raw = synth::run_claude_oneshot(&cfg.judge_model, JUDGE_TIMEOUT_SECS, &prompt)?;
+    let raw = synth::run_oneshot(cfg, &cfg.judge_model, JUDGE_TIMEOUT_SECS, &prompt)?;
     match parse_decision(&raw) {
         Decision::Pass => None,
         Decision::Refuted(reason) => {

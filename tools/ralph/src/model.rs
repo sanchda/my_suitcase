@@ -1,13 +1,11 @@
-//! `ralph model <tier>` — write the one-shot `.ralph/MODEL` override that
-//! `State::take_model` consumes on the next iteration. Lives here, not in
-//! ralphd, so the file format has exactly one owner.
+//! `ralph model <name>` — write the one-shot `.ralph/MODEL` override that
+//! `State::take_model` consumes on the next iteration.
 
 use crate::state::State;
 use crate::R;
 
 /// The ladder entry `raw` names (trimmed, case-insensitive), else `None`.
-/// Returns the ladder's own spelling because `State::read_model` matches it
-/// exactly.
+/// Returns the ladder's canonical spelling.
 pub fn validate_tier<'a>(raw: &str, ladder: &'a [String]) -> Option<&'a str> {
     let normalized = raw.trim().to_ascii_lowercase();
     if normalized.is_empty() {
@@ -19,24 +17,62 @@ pub fn validate_tier<'a>(raw: &str, ladder: &'a [String]) -> Option<&'a str> {
         .map(String::as_str)
 }
 
-/// `ralph model <tier>`. Exit 0 on success, 1 on an unknown tier.
+/// Preserve canonical tier spelling, while allowing concrete CLI model IDs.
+/// The backend CLI checks model availability.
+pub fn normalize_model(raw: &str, ladder: &[String]) -> Option<String> {
+    let raw = raw.trim();
+    if let Some(tier) = validate_tier(raw, ladder) {
+        return Some(tier.into());
+    }
+    let lower = raw.to_ascii_lowercase();
+    if crate::backend::is_tier(&lower) {
+        return Some(lower);
+    }
+    crate::backend::valid_model(raw).then(|| raw.into())
+}
+
+/// `ralph model <name>`. Exit 0 on success, 1 on a malformed model identifier.
 pub fn run(args: &[String]) -> R<i32> {
-    let tier = args
+    const USAGE: &str = "usage: ralph model <name> [--dir <path>] [--config <file>]";
+    if args
         .first()
-        .filter(|a| !a.starts_with('-'))
-        .ok_or("usage: ralph model <tier>")?;
+        .is_some_and(|a| matches!(a.as_str(), "--help" | "-h"))
+    {
+        println!("{USAGE}");
+        return Ok(0);
+    }
+    let tier = args.first().filter(|a| !a.starts_with('-')).ok_or(USAGE)?;
     let rest = args.get(1..).unwrap_or(&[]);
-    let cfg = crate::config::load_base(rest)?;
-    match validate_tier(tier, &cfg.escalation_ladder) {
+    let mut cfg = crate::config::load_base(rest)?;
+    let mut flags = rest.iter();
+    while let Some(flag) = flags.next() {
+        match flag.as_str() {
+            "--dir" | "--config" => {
+                let value = flags
+                    .next()
+                    .ok_or_else(|| format!("{flag} needs a value"))?;
+                if flag == "--dir" {
+                    cfg.dir = value.into();
+                }
+            }
+            "--help" | "-h" => {
+                println!("{USAGE}");
+                return Ok(0);
+            }
+            _ => return Err(format!("unknown arg: {flag}").into()),
+        }
+    }
+    match normalize_model(tier, &cfg.escalation_ladder) {
         Some(canonical) => {
-            State::open(&cfg.dir)?.write_model(canonical);
+            // Surface write failures to the CLI rather than reporting a lost override.
+            State::open(&cfg.dir)?;
+            std::fs::write(cfg.dir.join("MODEL"), format!("{canonical}\n"))?;
             println!("ralph: next iteration will run `{canonical}` (one-shot override)");
             Ok(0)
         }
         None => {
             eprintln!(
-                "ralph: unknown model tier '{tier}' — expected one of: {}",
-                cfg.escalation_ladder.join(", ")
+                "ralph: invalid model name '{tier}' — expected a tier or a single model identifier"
             );
             Ok(1)
         }

@@ -1,6 +1,6 @@
 # ralph — external autonomous loop
 
-Runs `claude -p` in a loop, **fresh context each iteration**, feeding a stable
+Runs `claude -p` or OpenAI’s `codex exec` in a loop, **fresh context each iteration**, feeding a stable
 base prompt plus a bounded current-task brief until a completion marker appears.
 This is the "pure Ralph" (Geoffrey Huntley) external form — each call starts
 cold and stays cheap, so it suits context-expensive / thinking models.
@@ -42,7 +42,7 @@ nothing under `.ralph/` is tracked.
 ## Install
 
 Build and install via the suitcase personalize script (requires the Rust
-toolchain; `claude` must be authenticated on PATH at runtime):
+toolchain; the selected `claude` or `codex` CLI must be authenticated on PATH at runtime):
 
 ```bash
 $SUITCASE/personalize/scripts/setup_ralph.sh
@@ -74,6 +74,69 @@ Rebuild after source changes by re-running that script.
    Test a single pass first with `ralph --once`.
 
 Run **one `ralph` per worktree** — each loop drives the repo it is launched in.
+
+### Choose a backend and model
+
+```bash
+ralph --model opus --once                 # Claude Opus
+ralph -m gpt-5.4 --once                    # OpenAI via Codex (auto-detected)
+ralph --backend codex --model gpt-5.4      # explicit backend
+ralph --backend codex                     # use Codex’s configured default model
+ralph model gpt-5.4                       # one-shot override for the next iteration
+ralph msg --backend codex --model gpt-5.4 "review the plan"
+```
+
+`--model` (also `-m`) accepts a tier alias or a concrete model identifier.
+It sets the run default; task decorations and escalation still take precedence,
+as before. `ralph model <name>` is the one-shot override and can select `opus`
+even when it is absent from the escalation ladder. Model availability is checked
+by the backend CLI, so new model names do not require a Ralph release.
+
+`backend` defaults to `auto`: `gpt-*`, `chatgpt-*`, `codex-*`, and `o1`/`o3`/`o4`
+model names (including suffixed variants) select Codex; other names select Claude.
+Use `--backend codex` for custom OpenAI model names. `openai` is an alias for
+`codex`, and `anthropic` for `claude`. An explicit backend governs the run’s
+worker, synthesizer, judge, and learning calls. Authentication comes from the
+selected CLI’s existing login.
+
+The **backlog schema stays v2**. Its `@haiku`, `@sonnet`, and `@opus` decorations
+remain the low, medium, and high tiers. On Codex, an unmapped tier uses the run’s
+concrete model (or Codex’s configured default) with that tier’s reasoning effort.
+You can optionally assign concrete models to tiers in `.ralph/ralph.toml`:
+
+```toml
+backend = "codex"
+model = "gpt-5.4"
+effort = "auto"
+
+[tier_models]
+haiku = "gpt-5.4"
+sonnet = "gpt-5.4"
+opus = "gpt-5.4"
+```
+
+Replace those model IDs with models available to your account when you want
+escalation to change the model as well as effort. With no mapping, Claude’s
+existing tier behavior is unchanged. `synth_model` and `judge_model` accept the
+same tiers or model IDs and also have `--synth-model` / `--judge-model` flags on
+loop launches. `effort = "inherit"` uses the CLI’s settings; Codex translates
+Ralph’s `max` effort to `xhigh`.
+
+Codex iterations use `exec --json --ephemeral`; steering sessions use persistent
+threads and `exec resume`. Native Codex events are kept in iteration logs and
+converted to Ralph’s existing `last-result.json` envelope. Completion uses only
+the last completed assistant message, excluding reasoning and tool output.
+See the official [Codex noninteractive interface](https://developers.openai.com/codex/noninteractive/).
+
+Codex’s documented event stream reports tokens but **does not report USD cost**.
+Its ledger entries retain the existing schema with `cost_usd = 0` meaning
+unreported, not free. Ralph rejects `max_cost_usd` / `budget_usd` on Codex turns
+rather than silently ignoring a budget. Use iteration and wall-clock limits.
+`fallback_model` is Claude-only because Codex has no equivalent flag.
+`extra_args` are passed to the selected worker CLI unchanged; use arguments that
+CLI supports. `--no-yolo` runs Codex in `workspace-write` with approvals disabled
+for unattended operation; otherwise Ralph uses Codex’s bypass flag. Codex helper
+calls use a read-only sandbox.
 
 ### `ralph init`
 Scaffolds `.ralph/` in the current repo: writes `PROMPT.md` (from the
@@ -154,9 +217,9 @@ local tools/tests visible without mining raw NDJSON.
 - `ralph drop <id> [--recursive]` — remove a task. Refuses a subtree without
   `--recursive`, refuses the selected leaf while a loop runs, and appends what it
   removed to `.ralph/archive/dropped-<ts>.md` — nothing is ever deleted outright.
-- `ralph model <tier>` — write the one-shot `.ralph/MODEL` override consumed by
-  the next iteration. The tier must be on the configured `escalation_ladder`;
-  the value is trimmed and matched case-insensitively.
+- `ralph model <name>` — write the one-shot `.ralph/MODEL` override consumed by
+  the next iteration. Accepts tiers and concrete model IDs; tier aliases are
+  trimmed and matched case-insensitively. Supports `--dir` and `--config`.
 - `ralph backlog add|edit …` — the older flag-style forms, kept as aliases.
 
 Every one of these is schema-checked before it lands: the result is parsed in
@@ -182,7 +245,7 @@ A request that cannot be applied at drain time is moved to
 and the webhook. Enqueue-time linting catches nearly everything first.
 
 ## `ralph msg` — a persistent steering session
-`ralph msg "<text>"` talks to a claude session attached to this repo's loop,
+`ralph msg "<text>"` talks to an agent session attached to this repo's loop,
 resuming the same conversation each time, so a follow-up like "no, do it the
 other way" lands in context instead of re-establishing it.
 
@@ -203,18 +266,27 @@ ralph msg --new                  # retire the session; next msg starts fresh
   ladder, which governs the loop rather than this session.
 - Only one `msg` runs at a time; a second is refused, not queued (`.ralph/msg.pid`).
 
-The session's two pieces of state both live in `.ralph/` and retire together:
+The session state lives in `.ralph/` and retires together:
 
 | File | Holds |
 |---|---|
-| `.ralph/msg-session` | the claude session id (a UUID) |
+| `.ralph/msg-session` | the Claude session or Codex thread id (a UUID) |
 | `.ralph/msg-model` | the sticky `--model` pin, absent when unset |
+| `.ralph/msg-backend` | the session’s backend; absent on legacy Claude sessions |
 
-Both are written only after claude exits cleanly, so a failed first call cannot
+Session state is written only after the backend returns a successful result, so a failed first call cannot
 leave behind an id that every later resume fails against, nor a rejected model
 name that poisons every later message. `--new` archives the id into
 `.ralph/archive/` and clears the pin; completing an arc does the same. If a pin
 seems stuck, `cat .ralph/msg-model` is the whole story.
+
+The session’s backend stays with the conversation, including when repinning a
+custom model name. An explicit `msg --backend` or a recognized concrete model
+from another family selects a different backend; loop config supplies the
+backend for new conversations. Changing a steering session’s backend starts a
+fresh conversation and archives the previous session only after the new call
+succeeds. `--stream-json` keeps
+the existing assistant/result event format for consumers such as ralphd.
 
 ## ralphd — Discord control bridge
 `ralphd` is a separate, always-on foreground binary that lets one authorized
@@ -375,7 +447,7 @@ Each iteration ends by writing **one** consolidated report, `.ralph/HANDOFF.json
 - `status` — this iteration's type: `code` (a normal committing iteration), or
   `review`/`plan`/`blocked` for an intentional non-code pass. Absent is treated
   as `code`.
-- `model` — `haiku` / `sonnet` / `opus`, a **one-shot override** sizing the NEXT
+- `model` — a tier (`haiku` / `sonnet` / `opus`) or concrete model ID, a **one-shot override** sizing the NEXT
   iteration; cleared once read. Normally null: a task's own `@tier`
   decoration is the baseline (see below).
 - `blocked` — with `status: blocked`, one line naming exactly what a human must
@@ -411,7 +483,7 @@ Before every process launch the runner parses the complete backlog, selects the
 next leaf by document order, and appends a bounded brief containing that
 leaf plus PROGRESS's carry-forward note injected verbatim — no `Next:`
 parsing, no id matching. The base prompt remains first and stable for caching.
-Ralph also passes `--no-session-persistence` (iterations are deliberately
+For Claude, Ralph also passes `--no-session-persistence` (iterations are deliberately
 fresh) and `--exclude-dynamic-system-prompt-sections` (better prompt-cache
 reuse).
 
@@ -577,9 +649,11 @@ abort_after = 4
 
 | Key (toml) | Env | Flag | Default |
 |---|---|---|---|
-| `model` | `RALPH_MODEL` | `--model` | `sonnet` |
+| `backend` | `RALPH_BACKEND` | `--backend` | `auto` |
+| `tier_models` | — | — | `{}` (optional tier → model mapping) |
+| `model` | `RALPH_MODEL` | `--model` / `-m` | `sonnet` |
 | `fallback_model` | `RALPH_FALLBACK_MODEL` | `--fallback-model` | `sonnet` |
-| `synth_model` | — | — | `sonnet` |
+| `synth_model` | — | `--synth-model` | `sonnet` |
 | `effort` | `RALPH_EFFORT` | `--effort` | `auto` |
 | `max_iterations` | `RALPH_MAX_ITER` | `--max-iterations` | `0` |
 | `max_cost_usd` | `RALPH_MAX_COST` | `--max-cost` | `0` |
@@ -600,7 +674,7 @@ abort_after = 4
 | `extra_args` | `RALPH_EXTRA_ARGS` | — | — |
 | `escalation_ladder` | — | — | `["haiku","sonnet","opus"]` |
 | `judge_tiers` | `RALPH_JUDGE_TIERS` (comma-sep) | — | `[]` (off) |
-| `judge_model` | `RALPH_JUDGE_MODEL` | — | `sonnet` |
+| `judge_model` | `RALPH_JUDGE_MODEL` | `--judge-model` | `sonnet` |
 | `budget_usd` | — | — | `0` (off) |
 | `budget_window` | — | — | `0` (all time) |
 | — | `RALPH_CONFIG` | `--config` | `.ralph/ralph.toml` |
@@ -608,7 +682,8 @@ abort_after = 4
 
 `escalation_ladder` and `judge_tiers` may name only `haiku`, `sonnet`, or
 `opus` — the tiers a backlog `@tier` slot can spell. Anything else is a startup
-error, not a silently inert entry.
+error, not a silently inert entry. `tier_models` uses the same three keys but
+accepts concrete model IDs as values; it does not change the backlog grammar.
 
 `--dangerously-skip-permissions` is on by default (`--no-yolo` disables) — an
 unattended loop can't answer permission prompts, so run on a branch/worktree you
@@ -625,15 +700,16 @@ omits project instructions, hooks, plugins, MCP servers, skills, and auto-memory
 so use it only when PROMPT carries every required project/verification rule.
 
 ## Requirements
-- The `claude` CLI on PATH (authenticated).
+- The selected `claude` or `codex` CLI on PATH (authenticated).
 - The Rust toolchain to build (via the personalize script).
+- Python 3 and git to run the offline subprocess integration tests.
 
 ## Development
 ```bash
 cargo test          # backlog/context/config/stream/state/git/thrash
 cargo build --release
 ```
-Modules: `backlog` (schema/lint) · `context` (bounded brief) · `config` ·
+Modules: `backend` (CLI/model routing) · `backlog` (schema/lint) · `context` (bounded brief) · `config` ·
 `stream` (NDJSON) · `classify` · `control` (loop, thrash, budgets, timeout) ·
 `state` (`.ralph/`, HANDOFF) · `curate` (completed-section sweep) · `git`
 (baseline, contract audit) · `judge` (adversarial check-off gate) · `learn`

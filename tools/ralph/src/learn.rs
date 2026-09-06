@@ -322,7 +322,7 @@ pub fn run(args: &[String]) -> R<i32> {
     let existing = existing_titles(&dir);
     let prompt = build_mine_prompt(&run_log, &carry, &existing);
     eprintln!("mining run.log with {} …", cfg.synth_model);
-    let raw = synth::run_claude_oneshot(&cfg.synth_model, LEARN_TIMEOUT_SECS, &prompt)
+    let raw = synth::run_oneshot(&cfg, &cfg.synth_model, LEARN_TIMEOUT_SECS, &prompt)
         .ok_or("miner call failed or timed out")?;
     let proposals = match parse_proposals(&raw) {
         Ok(p) => p,

@@ -19,7 +19,7 @@ pub struct State {
 pub struct Handoff {
     /// Iteration type: `code`, `plan`, `review`, or `blocked`.
     pub status: Option<String>,
-    /// One-shot model override for the NEXT iteration (validated tier).
+    /// One-shot model override for the NEXT iteration (tier or model ID).
     pub model: Option<String>,
     /// Human-readable dead-end reason accompanying `status: blocked`.
     pub blocked: Option<String>,
@@ -51,17 +51,17 @@ impl State {
         Ok(())
     }
 
-    /// The agent's requested next model tier, validated against `allowed`.
+    /// The agent's requested next model, canonicalizing tiers from `allowed`.
     /// Returns `None` (and logs a warning) for absent/empty/invalid values so a
-    /// typo never aborts the loop.
+    /// malformed value never aborts the loop.
     pub fn read_model(&self, allowed: &[String]) -> Option<String> {
         let raw = fs::read_to_string(self.path("MODEL")).ok()?;
-        let m: String = raw.split_whitespace().collect();
+        let m = raw.trim();
         if m.is_empty() {
             return None;
         }
-        if allowed.iter().any(|a| a == &m) {
-            Some(m)
+        if let Some(model) = crate::model::normalize_model(m, allowed) {
+            Some(model)
         } else {
             self.log(&format!("  ⚠ ignoring invalid .ralph/MODEL ('{m}')"));
             None
@@ -113,12 +113,12 @@ impl State {
             }
             ok
         });
-        let model = field("model").map(str::to_string).filter(|m| {
-            let ok = allowed_models.iter().any(|a| a == m);
-            if !ok {
+        let model = field("model").and_then(|m| {
+            let model = crate::model::normalize_model(m, allowed_models);
+            if model.is_none() {
                 self.log(&format!("  ⚠ ignoring invalid HANDOFF model ('{m}')"));
             }
-            ok
+            model
         });
         let blocked = field("blocked").map(str::to_string);
         Some(Handoff {
@@ -300,7 +300,7 @@ mod tests {
         assert_eq!(s.read_model(&allowed), None); // absent
         fs::write(s.path("MODEL"), "  opus \n").unwrap();
         assert_eq!(s.read_model(&allowed), Some("opus".into()));
-        fs::write(s.path("MODEL"), "gpt5").unwrap();
+        fs::write(s.path("MODEL"), "bad model").unwrap();
         assert_eq!(s.read_model(&allowed), None); // invalid ignored
     }
 
@@ -338,7 +338,7 @@ mod tests {
         // Invalid field values are dropped individually, not fatally.
         fs::write(
             s.path("HANDOFF.json"),
-            r#"{"status": "heroic", "model": "gpt5"}"#,
+            r#"{"status": "heroic", "model": "bad model"}"#,
         )
         .unwrap();
         let h = s.take_handoff(&allowed).unwrap();

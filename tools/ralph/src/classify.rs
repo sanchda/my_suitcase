@@ -56,6 +56,15 @@ const FATAL_WORDS: &[&str] = &[
     "no access",
     "does not exist",
     "it may not exist",
+    "not supported",
+    "unsupported model",
+    "model_not_found",
+    "invalid_request_error",
+    "invalid model",
+    "unauthorized",
+    "forbidden",
+    "unexpected argument",
+    "error loading configuration",
 ];
 
 /// Classify an outcome. `status` is the envelope's `api_error_status` (None when

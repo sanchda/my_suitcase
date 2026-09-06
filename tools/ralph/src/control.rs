@@ -4,6 +4,7 @@
 //! The thrash tracker ([`Thrash`]) is a pure state machine tested in isolation;
 //! the loop wires it to real subprocesses, git, and the runtime dir.
 
+use crate::backend::{self, Backend};
 use crate::classify::{classify, Class};
 use crate::config::Config;
 use crate::context;
@@ -52,6 +53,7 @@ pub struct Thrash {
     escalate_after: u32,
     abort_after: u32,
     ladder: Vec<String>,
+    tier_models: std::collections::BTreeMap<String, String>,
     streak: u32,
     blocked_streak: u32,
     escalation_idx: Option<usize>,
@@ -68,6 +70,7 @@ impl Thrash {
             escalate_after: cfg.escalate_after,
             abort_after: cfg.abort_after,
             ladder: cfg.escalation_ladder.clone(),
+            tier_models: cfg.tier_models.clone(),
             streak: 0,
             blocked_streak: 0,
             escalation_idx: None,
@@ -119,6 +122,21 @@ impl Thrash {
                     let cur = self
                         .escalation_idx
                         .or_else(|| self.ladder.iter().position(|m| m == resolved_model))
+                        .or_else(|| {
+                            let mut matches = self
+                                .ladder
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, tier)| {
+                                    self.tier_models
+                                        .get(*tier)
+                                        .is_some_and(|m| m == resolved_model)
+                                })
+                                .map(|(index, _)| index);
+                            matches.next().filter(|_| matches.next().is_none())
+                        })
+                        // Unmapped or ambiguous concrete models start at medium effort.
+                        .or_else(|| self.ladder.iter().position(|m| m == "sonnet"))
                         .unwrap_or(0);
                     let next = (cur + 1).min(self.ladder.len() - 1);
                     self.escalation_idx = Some(next);
@@ -248,15 +266,15 @@ struct HbSnapshot {
     tool: Option<String>,
 }
 
-/// The running iteration's `claude` pid, so the SIGTERM handler can reach it.
-static CLAUDE_PID: AtomicU32 = AtomicU32::new(0);
+/// The running worker's pid, so the SIGTERM handler can reach it.
+static WORKER_PID: AtomicU32 = AtomicU32::new(0);
 
 /// Tear down `claude` before dying: it leads its own session (see `run_one`), so
 /// no signal aimed at ralph reaches it and skipping this orphans the whole tree.
 /// Then die by the signal, which is what the supervisor classifies on.
 extern "C" fn terminate(sig: c_int) {
     // Only `kill` runs before the re-raise — everything here is async-signal-safe.
-    kill_group(CLAUDE_PID.load(Ordering::SeqCst));
+    kill_group(WORKER_PID.load(Ordering::SeqCst));
     unsafe {
         libc::signal(sig, libc::SIG_DFL);
         libc::raise(sig);
@@ -288,9 +306,6 @@ pub fn run(cfg: &Config) -> R<i32> {
     // First thing, so a `ralph stop --now` forwarded here can never find the
     // supervisor's forwarding handler still installed in this process.
     supervisor::install_handler(libc::SIGTERM, terminate);
-    if which("claude").is_none() {
-        return Err("claude CLI not found on PATH".into());
-    }
     if !cfg.prompt.exists() {
         return Err(format!("prompt file not found: {}", cfg.prompt.display()).into());
     }
@@ -656,9 +671,8 @@ pub fn run(cfg: &Config) -> R<i32> {
                     // Synth is a small second model call per successful turn; its cost
                     // isn't counted toward max_cost_usd, and it can block up to
                     // SYNTH_TIMEOUT_SECS.
-                    let carry = synth::synthesize_with(&text, &upcoming, &prev, |p| {
-                        synth::run_claude(cfg, p)
-                    });
+                    let carry =
+                        synth::synthesize_with(&text, &upcoming, &prev, |p| synth::run(cfg, p));
                     if std::fs::write(&cfg.progress, carry).is_err() {
                         state.log("  ⚠ could not write carry-forward to PROGRESS");
                     }
@@ -830,26 +844,37 @@ fn newly_dirty_warn(state: &State, repo: &Path) {
     }
 }
 
-/// Spawn and drive one `claude` iteration.
+/// Spawn an iteration and collect its result.
 fn run_one(cfg: &Config, state: &State, n: u64, model: &str, prompt: &str) -> R<Ran> {
     let log_path = state.new_iter_log(n)?;
 
-    let args = claude_args(cfg, model);
+    let selection = backend::resolve(cfg, model);
+    backend::check_cost_budget(cfg, &selection)?;
+    if which(selection.backend.executable()).is_none() {
+        return Err(format!("{} CLI not found on PATH", selection.backend.executable()).into());
+    }
+    state.log(&format!(
+        "  backend={} model={}",
+        selection.backend.executable(),
+        selection.model.as_deref().unwrap_or("configured default")
+    ));
+    let args = if selection.backend == Backend::Codex {
+        let mut args =
+            backend::codex_args(&selection, (!cfg.yolo).then_some("workspace-write"), true);
+        args.extend(cfg.extra_args.iter().cloned());
+        args.push("-".into());
+        args
+    } else {
+        claude_args(cfg, model)
+    };
 
-    let mut cmd = Command::new("claude");
+    let mut cmd = Command::new(selection.backend.executable());
     cmd.args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    // Run claude in its OWN session (setsid): it leads a fresh process group AND
-    // session, so the WHOLE tree (claude + every tool subprocess it spawns, e.g. a
-    // Godot instance) can be killed as a unit — the timeout watchdog reclaims a
-    // hung iteration and we sweep it after every iteration — while a group-kill
-    // stays strictly inside claude's subtree and can NEVER climb back up to ralph.
-    // (A bare setpgid left ralph and claude one accidental `kill -9 -<pgid>` away
-    // from taking each other, and ralphd, down; a new session is the hard wall.)
-    // Trade-off: claude no longer shares ralph's controlling terminal, so a Ctrl-C
-    // to ralph does not propagate to it.
+    // A separate session lets timeout/stop signals kill the worker and its
+    // descendants without reaching Ralph or its caller.
     #[cfg(unix)]
     unsafe {
         use std::os::unix::process::CommandExt;
@@ -862,7 +887,7 @@ fn run_one(cfg: &Config, state: &State, n: u64, model: &str, prompt: &str) -> R<
     }
     let mut child = cmd.spawn()?;
     let pid = child.id();
-    CLAUDE_PID.store(pid, Ordering::SeqCst);
+    WORKER_PID.store(pid, Ordering::SeqCst);
 
     let stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
@@ -872,11 +897,26 @@ fn run_one(cfg: &Config, state: &State, n: u64, model: &str, prompt: &str) -> R<
     let stderr_log = log_path.clone();
     let stderr_thread = thread::spawn(move || {
         use std::io::{BufRead, Write};
-        if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&stderr_log) {
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+        let mut diagnostic = String::new();
+        let mut log = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&stderr_log)
+            .ok();
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if let Some(f) = &mut log {
                 let _ = writeln!(f, "{line}");
             }
+            diagnostic.push_str(&line);
+            diagnostic.push('\n');
+            if diagnostic.len() > 16_384 {
+                let mut cut = diagnostic.len() - 16_384;
+                while !diagnostic.is_char_boundary(cut) {
+                    cut += 1;
+                }
+                diagnostic.drain(..cut);
+            }
         }
+        diagnostic
     });
 
     // Watchdog: kill the child's process group if it outlives the timeout.
@@ -968,19 +1008,16 @@ fn run_one(cfg: &Config, state: &State, n: u64, model: &str, prompt: &str) -> R<
         }
     })?;
 
-    // Signal the watchdog to stop, then sweep the child's whole process group
-    // before reaping: SIGKILL anything the agent left alive (a lingering headed
-    // Godot, an X server, a stray python) so nothing survives into the next
-    // iteration. claude is a zombie holding its pid until we wait(), so the pgid
-    // is still unambiguously ours here. No-op (ESRCH) when the group is empty.
+    // Sweep descendants before reaping the worker so its process-group ID
+    // cannot be reused while cleanup is in progress.
     done.store(true, Ordering::SeqCst);
     #[cfg(unix)]
     kill_group(pid);
     let _ = child.wait();
     // Reaped: the pid can be recycled, so the handler must stop aiming at it.
-    CLAUDE_PID.store(0, Ordering::SeqCst);
+    WORKER_PID.store(0, Ordering::SeqCst);
     let prompt_result = prompt_thread.join();
-    let _ = stderr_thread.join();
+    let diagnostic = stderr_thread.join().unwrap_or_default();
     if let Some(w) = watchdog {
         let _ = w.join();
     }
@@ -989,13 +1026,29 @@ fn run_one(cfg: &Config, state: &State, n: u64, model: &str, prompt: &str) -> R<
     }
 
     let killed = killed.load(Ordering::SeqCst);
-    let envelope = if killed { None } else { envelope };
+    let envelope = if killed {
+        None
+    } else if selection.backend == Backend::Codex
+        && envelope.is_none()
+        && !diagnostic.trim().is_empty()
+    {
+        Some(stream::error_envelope(diagnostic.trim()))
+    } else {
+        envelope
+    };
     state.write_live_status(&format!("iter {n} finished (killed={killed})\n"));
     if !killed {
         match prompt_result {
             Ok(Ok(())) => {}
+            Ok(Err(error))
+                if error.kind() == std::io::ErrorKind::BrokenPipe
+                    && envelope.as_ref().is_some_and(|e| e.is_error) => {}
             Ok(Err(error)) => {
-                return Err(format!("writing iteration prompt to claude: {error}").into())
+                return Err(format!(
+                    "writing iteration prompt to {}: {error}",
+                    selection.backend.executable()
+                )
+                .into())
             }
             Err(_) => return Err("iteration prompt writer panicked".into()),
         }
@@ -1006,7 +1059,9 @@ fn run_one(cfg: &Config, state: &State, n: u64, model: &str, prompt: &str) -> R<
 /// Construct the exact Claude CLI arguments. Ralph iterations are intentionally
 /// fresh, so session persistence is wasted; moving dynamic system sections
 /// improves prompt-cache reuse without removing their content.
-fn claude_args(cfg: &Config, model: &str) -> Vec<String> {
+fn claude_args(cfg: &Config, requested: &str) -> Vec<String> {
+    let selection = backend::resolve(cfg, requested);
+    let model = selection.model.as_deref().unwrap_or(requested);
     let mut args: Vec<String> = vec![
         "-p".into(),
         "--output-format".into(),
@@ -1020,10 +1075,11 @@ fn claude_args(cfg: &Config, model: &str) -> Vec<String> {
     }
     args.push("--model".into());
     args.push(model.to_string());
-    let fb = &cfg.fallback_model;
-    if !fb.is_empty() && fb != model {
-        args.push("--fallback-model".into());
-        args.push(fb.clone());
+    let fallback = backend::resolve(cfg, &cfg.fallback_model);
+    if fallback.backend == Backend::Claude {
+        if let Some(fb) = fallback.model.filter(|fb| !fb.is_empty() && fb != model) {
+            args.extend(["--fallback-model".into(), fb]);
+        }
     }
     if !has_extra_flag(&cfg.extra_args, "--no-session-persistence") {
         args.push("--no-session-persistence".into());
@@ -1032,7 +1088,7 @@ fn claude_args(cfg: &Config, model: &str) -> Vec<String> {
         args.push("--exclude-dynamic-system-prompt-sections".into());
     }
     if extra_effort(&cfg.extra_args).is_none() {
-        if let Some(effort) = configured_effort(&cfg.effort, model) {
+        if let Some(effort) = selection.effort {
             args.push("--effort".into());
             args.push(effort);
         }
@@ -1041,28 +1097,8 @@ fn claude_args(cfg: &Config, model: &str) -> Vec<String> {
     args
 }
 
-fn configured_effort(configured: &str, model: &str) -> Option<String> {
-    match configured {
-        "inherit" => None,
-        "auto" => {
-            let model = model.to_ascii_lowercase();
-            Some(
-                if model.contains("haiku") {
-                    "low"
-                } else if model.contains("opus") {
-                    "high"
-                } else {
-                    "medium"
-                }
-                .into(),
-            )
-        }
-        other => Some(other.to_string()),
-    }
-}
-
 fn effort_for(cfg: &Config, model: &str) -> Option<String> {
-    extra_effort(&cfg.extra_args).or_else(|| configured_effort(&cfg.effort, model))
+    extra_effort(&cfg.extra_args).or_else(|| backend::resolve(cfg, model).effort)
 }
 
 fn extra_effort(args: &[String]) -> Option<String> {
@@ -1097,15 +1133,10 @@ fn context_warning_key(warning: &str) -> String {
 
 /// Kill the process group led by `pid` with SIGKILL. The child is spawned as
 /// its own group leader (see `run_one`), so the negative-pid target reaps
-/// `claude` and every subprocess it started — reclaiming a truly hung iteration.
+/// the worker and its subprocesses.
 fn kill_group(pid: u32) {
-    // SIGKILL the whole process group led by `pid`, via the syscall directly.
-    //
-    // Do NOT shell out to `kill -9 -<pid>`: it's fragile (PATH may have no `kill`
-    // binary) and, worse, some `kill` implementations mis-parse the negative pgid
-    // and fall back to `kill(0, SIGKILL)` — which signals the *caller's own*
-    // process group, i.e. ralph itself (and, when it shares a group, ralphd).
-    // A pid of 0 would make the syscall do the same, so guard against it.
+    // A negative PID addresses the worker's process group. Zero would address
+    // Ralph's own group, so reject it.
     if pid == 0 {
         return;
     }

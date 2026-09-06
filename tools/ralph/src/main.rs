@@ -1,4 +1,4 @@
-//! ralph — external autonomous loop for Claude Code.
+//! ralph — external autonomous loop for Claude Code and Codex.
 //!
 //! Each iteration is a fresh `claude -p` process fed a stable base prompt plus a
 //! schema-resolved current-task brief; continuity lives in files, not context.
@@ -7,6 +7,7 @@
 //! See `docs/superpowers/specs/` for the design and `README.md` for usage. The
 //! driving files (PROMPT/VISION/BACKLOG/PROGRESS) are local to the target repo.
 
+mod backend;
 mod backlog;
 mod backlog_cli;
 mod backlog_edit;
@@ -38,7 +39,7 @@ mod synth;
 pub type R<T> = Result<T, Box<dyn std::error::Error>>;
 
 const USAGE: &str = "\
-ralph — external autonomous loop for Claude Code (run from the repo root)
+ralph — external autonomous loop for Claude Code and Codex (run from the repo root)
 
 Usage: ralph [options]             Run the loop here until the backlog completes
 
@@ -63,8 +64,8 @@ Backlog — schema-checked, and queued while a loop runs (see below)
   ralph backlog <add|edit> ...     Older flag-style forms, kept as aliases
 
 Steer a running loop
-  ralph model <tier>               One-shot model override for the next iteration
-  ralph msg [--new] <text>         Talk to this loop's persistent claude session
+  ralph model <name>               One-shot model override for the next iteration
+  ralph msg [--new] <text>         Talk to this loop's persistent agent session
 
 Learn
   ralph learn                      Mine run.log for durable lessons (propose only)
@@ -79,7 +80,10 @@ Options
   --prompt <file>          Prompt fed each iteration (default .ralph/PROMPT.md)
   --backlog <file>         Backlog archived on completion (default .ralph/BACKLOG.md)
   --progress <file>        Current hand-off file (default .ralph/PROGRESS.md)
-  --model <name>           Default model tier (default sonnet)
+  --model, -m <name>       Default tier or concrete model (default sonnet)
+  --backend <name>         auto (default), claude, or codex (alias openai)
+  --synth-model <name>     Carry-forward / learning model
+  --judge-model <name>     Adversarial judge model
   --effort <level>         auto, inherit, low, medium, high, xhigh, or max
   --fallback-model <name>  Overloaded-fallback model (\"\" disables)
   --max-iterations <n>     Stop after n iterations (0 = unlimited)
@@ -94,11 +98,11 @@ Options
   --restart <bool>         Relaunch the loop after an ungraceful death (default false)
   --heartbeat <dur>        Post live per-iteration status this often (0 = off)
   --once                   Run a single iteration then exit (testing)
-  --no-yolo                Do NOT pass --dangerously-skip-permissions
+  --no-yolo                Use the backend's normal permissions (Codex: workspace-write)
   -h, --help               This help
 
 Config-file-only settings (.ralph/ralph.toml — no flag; see README):
-  synth_model, judge_tiers, judge_model, escalation_ladder,
+  tier_models, judge_tiers, escalation_ladder,
   limit_wait[_max], transient_wait[_max], extra_args,
   budget_usd, budget_window
 

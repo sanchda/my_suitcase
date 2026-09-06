@@ -11,6 +11,8 @@ use std::path::PathBuf;
 /// Fully-resolved runtime configuration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
+    pub backend: crate::backend::Backend,
+    pub tier_models: std::collections::BTreeMap<String, String>,
     pub model: String,
     pub fallback_model: String,
     /// Model used by the handoff synthesizer (distills carry-forward notes).
@@ -69,6 +71,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
+            backend: crate::backend::Backend::Auto,
+            tier_models: Default::default(),
             model: "sonnet".into(),
             fallback_model: "sonnet".into(),
             synth_model: "sonnet".into(),
@@ -109,6 +113,8 @@ impl Default for Config {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FileConfig {
+    pub backend: Option<crate::backend::Backend>,
+    pub tier_models: Option<std::collections::BTreeMap<String, String>>,
     pub model: Option<String>,
     pub fallback_model: Option<String>,
     pub synth_model: Option<String>,
@@ -213,6 +219,12 @@ fn split_args(s: &str) -> Vec<String> {
 }
 
 pub fn apply_file(cfg: &mut Config, f: FileConfig) -> Result<(), String> {
+    if let Some(v) = f.backend {
+        cfg.backend = v;
+    }
+    if let Some(v) = f.tier_models {
+        cfg.tier_models = v;
+    }
     if let Some(v) = f.model {
         cfg.model = v;
     }
@@ -323,6 +335,9 @@ pub fn apply_env<F: Fn(&str) -> Option<String>>(cfg: &mut Config, get: F) -> Res
             }
         };
     }
+    if let Some(v) = get("RALPH_BACKEND") {
+        cfg.backend = crate::backend::Backend::parse(&v)?;
+    }
     set_str!("RALPH_MODEL", cfg.model);
     set_str!("RALPH_FALLBACK_MODEL", cfg.fallback_model);
     set_parse!("RALPH_MAX_ITER", cfg.max_iterations, u64);
@@ -393,7 +408,10 @@ pub fn apply_args(cfg: &mut Config, args: &[String]) -> Result<bool, String> {
         };
         match a.as_str() {
             "--prompt" => cfg.prompt = PathBuf::from(next()?),
-            "--model" => cfg.model = next()?,
+            "--model" | "-m" => cfg.model = next()?,
+            "--backend" => cfg.backend = crate::backend::Backend::parse(&next()?)?,
+            "--synth-model" => cfg.synth_model = next()?,
+            "--judge-model" => cfg.judge_model = next()?,
             "--fallback-model" => cfg.fallback_model = next()?,
             "--max-iterations" => {
                 cfg.max_iterations = next()?.parse().map_err(|_| "bad --max-iterations")?
@@ -494,6 +512,18 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
     }
     validate_tiers("escalation_ladder", &cfg.escalation_ladder)?;
     validate_tiers("judge_tiers", &cfg.judge_tiers)?;
+    for tier in cfg.tier_models.keys() {
+        validate_tiers("tier_models", std::slice::from_ref(tier))?;
+    }
+    for model in [&cfg.model, &cfg.synth_model, &cfg.judge_model]
+        .into_iter()
+        .chain(cfg.tier_models.values())
+        .chain((!cfg.fallback_model.is_empty()).then_some(&cfg.fallback_model))
+    {
+        if !crate::backend::valid_model(model) {
+            return Err(format!("invalid model name '{model}'"));
+        }
+    }
     if !matches!(
         cfg.effort.as_str(),
         "auto" | "inherit" | "low" | "medium" | "high" | "xhigh" | "max"
@@ -509,6 +539,40 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backend_and_model_precedence_and_mapping_validation() {
+        use crate::backend::Backend;
+        let mut cfg = Config::default();
+        apply_file(
+            &mut cfg,
+            toml::from_str("backend = 'openai'\n[tier_models]\nopus = 'gpt-test'\n").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(cfg.backend, Backend::Codex);
+        assert_eq!(cfg.tier_models["opus"], "gpt-test");
+        apply_env(&mut cfg, |key| {
+            (key == "RALPH_BACKEND").then(|| "claude".into())
+        })
+        .unwrap();
+        assert_eq!(cfg.backend, Backend::Claude);
+        apply_args(
+            &mut cfg,
+            &[
+                "--backend".into(),
+                "codex".into(),
+                "-m".into(),
+                "gpt-custom".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(cfg.backend, Backend::Codex);
+        assert_eq!(cfg.model, "gpt-custom");
+        assert!(validate(&cfg).is_ok());
+        cfg.tier_models.insert("opuss".into(), "gpt-test".into());
+        assert!(validate(&cfg).unwrap_err().contains("tier_models"));
+        assert!(toml::from_str::<FileConfig>("backend = 'typo'").is_err());
+    }
 
     #[test]
     fn duration_suffixes() {

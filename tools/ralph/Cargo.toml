@@ -2,7 +2,7 @@
 name = "ralph"
 version = "0.1.0"
 edition = "2021"
-description = "External autonomous loop for Claude Code — fresh-context iterations with budgets, timeouts, and no-progress escalation."
+description = "External autonomous loop for Claude Code and Codex — fresh-context iterations with budgets, timeouts, and no-progress escalation."
 
 [[bin]]
 name = "ralph"

@@ -4,7 +4,10 @@
 //! the other way" lands in the same context instead of re-establishing it. The
 //! session steers the loop through this same CLI and carries no tools of its own.
 
-use crate::{config, pidguard, R};
+use crate::{
+    backend::{self, Backend},
+    config, pidguard, stream, R,
+};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -17,13 +20,13 @@ Send <text> to this repo's steering session, resuming it (or creating it on
 first use). Only one msg runs at a time; a second is refused, not queued.
 
   --new            Archive the current session id and start a fresh one
+  --backend <b>    auto, claude, or codex (alias openai)
   --model <m>      Repin the session's model; sticks until changed or --new
-  --stream-json    Pass claude's raw NDJSON events through on stdout
+  --stream-json    Emit compatible NDJSON events on stdout
   --dir <path>     Runtime dir (default .ralph)
   --config <file>  Config file (default .ralph/ralph.toml)
 
---model takes anything claude takes (an alias like `opus`, or a full name like
-`claude-fable-5`); it is not checked against the loop's escalation ladder.
+--model takes aliases like `opus` and full model names for Claude or Codex; it is not checked against the loop's escalation ladder.
 ";
 
 /// The session's whole job is to drive the loop through the CLI, so it needs no
@@ -117,6 +120,7 @@ pub fn archive_session(dir: &Path) -> Option<String> {
     let _ = std::fs::remove_file(&path);
     // The pinned model belongs to the retired conversation, not the next one.
     let _ = std::fs::remove_file(model_path(dir));
+    let _ = std::fs::remove_file(dir.join("msg-backend"));
     id
 }
 
@@ -153,58 +157,108 @@ fn claude_args(id: &str, resume: bool, preamble: &str, model: Option<&str>) -> V
     args
 }
 
-/// The final text of a `{"type":"result"}` envelope, if this line is one.
-fn result_text(line: &str) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_str(line).ok()?;
-    if v.get("type").and_then(|t| t.as_str()) != Some("result") {
-        return None;
-    }
-    Some(
-        v.get("result")
-            .and_then(|r| r.as_str())
-            .unwrap_or_default()
-            .to_string(),
-    )
+struct Sent {
+    code: i32,
+    id: Option<String>,
 }
 
-/// Run one message. In `--stream-json` mode claude's stdout is inherited, so the
-/// NDJSON reaches the caller line-by-line unbuffered and unreformatted (ralphd
-/// folds it); otherwise we read it and print only the final text.
-fn send(id: &str, resume: bool, text: &str, stream_json: bool, model: Option<&str>) -> R<i32> {
-    let mut cmd = Command::new("claude");
-    cmd.args(claude_args(id, resume, PREAMBLE, model))
-        .stdin(Stdio::piped())
-        .stdout(if stream_json {
-            Stdio::inherit()
-        } else {
-            Stdio::piped()
-        });
+/// Forward Claude NDJSON verbatim, and adapt Codex events to the same API.
+/// Both paths parse the result before persisting successful session state.
+fn send(
+    cfg: &config::Config,
+    id: &str,
+    resume: bool,
+    text: &str,
+    stream_json: bool,
+    model: Option<&str>,
+) -> R<Sent> {
+    let selection = backend::resolve(cfg, model.unwrap_or(&cfg.model));
+    let codex = selection.backend == Backend::Codex;
+    let mut cmd = Command::new(selection.backend.executable());
+    let mut argv = if codex {
+        let mut argv =
+            backend::codex_args(&selection, (!cfg.yolo).then_some("workspace-write"), false);
+        if resume {
+            argv.extend(["resume".into(), id.into()]);
+        }
+        argv.push("-".into());
+        argv
+    } else {
+        // Preserve the legacy unpinned Claude session's configured CLI model.
+        claude_args(id, resume, PREAMBLE, model.and(selection.model.as_deref()))
+    };
+    if !cfg.yolo {
+        argv.retain(|a| a != "--dangerously-skip-permissions");
+    }
+    cmd.args(argv).stdin(Stdio::piped()).stdout(Stdio::piped());
     let mut child = cmd.spawn()?;
-
-    // Feed the message on its own thread so a long one can't deadlock against
-    // the stream we're reading.
     let mut stdin = child.stdin.take().expect("piped stdin");
-    let body = text.to_string();
+    let body = if codex {
+        format!("{PREAMBLE}\n\n{text}")
+    } else {
+        text.to_string()
+    };
     let writer = std::thread::spawn(move || stdin.write_all(body.as_bytes()));
 
-    let mut final_text = None;
-    if let Some(out) = child.stdout.take() {
-        for line in BufReader::new(out).lines().map_while(Result::ok) {
-            if let Some(t) = result_text(&line) {
-                final_text = Some(t);
+    let mut events = stream::Events::default();
+    let out = child.stdout.take().expect("piped stdout");
+    let mut stdout = std::io::stdout().lock();
+    for line in BufReader::new(out).lines().map_while(Result::ok) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+            events.observe(&v, &line);
+            if stream_json && codex && v["type"] == "item.started" {
+                // Keep the existing --stream-json consumer API (including ralphd).
+                let event = serde_json::json!({"type":"assistant", "message": {
+                    "content":[{"type":"tool_use", "name":v["item"]["type"]}]
+                }});
+                writeln!(stdout, "{event}")?;
             }
         }
+        if stream_json && !codex {
+            writeln!(stdout, "{line}")?;
+        }
+        stdout.flush()?;
     }
     let status = child.wait()?;
     let _ = writer.join();
-
-    let code = status.code().unwrap_or(1);
-    match final_text {
-        Some(t) => println!("{t}"),
-        None if !stream_json => eprintln!("ralph: no result envelope (claude exited {code})"),
-        None => {}
+    let mut code = status.code().unwrap_or(1);
+    if events.envelope.as_ref().is_none_or(|e| e.is_error) && code == 0 {
+        code = 1;
     }
-    Ok(code)
+    if codex && code != 0 && events.envelope.as_ref().is_none_or(|e| !e.is_error) {
+        events.envelope = Some(stream::error_envelope(&format!(
+            "codex exited {code} without a successful result"
+        )));
+    }
+    if let Some(e) = &events.envelope {
+        if stream_json && codex {
+            writeln!(stdout, "{}", e.raw)?;
+        }
+        if !stream_json {
+            writeln!(stdout, "{}", e.result)?;
+        }
+    } else {
+        eprintln!(
+            "ralph: no result envelope ({} exited {code})",
+            selection.backend.executable()
+        );
+    }
+    let established = if codex {
+        events
+            .thread_id
+            .filter(|id| is_uuid(id))
+            .or_else(|| resume.then(|| id.into()))
+    } else {
+        Some(id.into())
+    };
+    if established.is_none() && code == 0 {
+        eprintln!("ralph: Codex did not report a session id");
+        code = 1;
+    }
+    Ok(Sent {
+        code,
+        id: established,
+    })
 }
 
 /// Parsed `ralph msg` argv.
@@ -216,6 +270,7 @@ struct Args {
     dir: Option<PathBuf>,
     /// Repins the session's model; absent leaves the stored pin alone.
     model: Option<String>,
+    backend: Option<Backend>,
     /// Forwarded to config resolution (`--config <file>`).
     passthrough: Vec<String>,
     text: String,
@@ -239,7 +294,8 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--stream-json" => args.stream_json = true,
             "-h" | "--help" => args.help = true,
             "--dir" => args.dir = Some(PathBuf::from(next()?)),
-            "--model" => args.model = Some(next()?),
+            "--model" | "-m" => args.model = Some(next()?),
+            "--backend" => args.backend = Some(Backend::parse(&next()?)?),
             "--config" => {
                 args.passthrough.push(a.clone());
                 args.passthrough.push(next()?);
@@ -289,37 +345,66 @@ pub fn run(argv: &[String]) -> R<i32> {
     }
 
     let existing = read_session(&cfg.dir);
-    let id = match &existing {
-        Some(id) => id.clone(),
-        None => new_uuid()?,
-    };
-
-    // An explicit --model repins; otherwise the stored pin carries the thread.
+    let stored_backend = std::fs::read_to_string(cfg.dir.join("msg-backend"))
+        .ok()
+        .and_then(|s| Backend::parse(&s).ok())
+        .unwrap_or(Backend::Claude);
+    if let Some(backend) = args.backend {
+        cfg.backend = backend;
+    } else if existing.is_some() {
+        cfg.backend = args
+            .model
+            .as_deref()
+            .and_then(backend::infer_model)
+            .unwrap_or(stored_backend);
+    }
     let model = args.model.clone().or_else(|| read_model(&cfg.dir));
     if let Some(m) = &model {
-        eprintln!("ralph: session {id} on {m}");
+        if !backend::valid_model(m) {
+            return Err(format!("invalid model name '{m}'").into());
+        }
     }
+    config::validate(&cfg)?;
+    let selection = backend::resolve(&cfg, model.as_deref().unwrap_or(&cfg.model));
+    let same_backend = existing.is_some() && stored_backend == selection.backend;
+    let id = if same_backend {
+        existing.clone().unwrap()
+    } else {
+        new_uuid()?
+    };
+    eprintln!(
+        "ralph: {} session {} on {}",
+        selection.backend.executable(),
+        if same_backend { &id } else { "new" },
+        selection.model.as_deref().unwrap_or("configured default")
+    );
 
-    let code = send(
+    let sent = send(
+        &cfg,
         &id,
-        existing.is_some(),
+        same_backend,
         &args.text,
         args.stream_json,
         model.as_deref(),
     )?;
-    // Record a new id only once claude has established it, or every later
-    // --resume would fail against a session that never existed. A repin is
-    // persisted on the same terms, so a rejected model name can't brick the
-    // session the way a phantom id would.
-    if code == 0 {
-        if existing.is_none() {
+    // Backend changes start a new conversation. Retire old state only after the
+    // new call succeeds, so a rejected model cannot destroy a working session.
+    if sent.code == 0 {
+        if existing.is_some() && !same_backend {
+            archive_session(&cfg.dir);
+        }
+        if let Some(id) = sent.id {
             std::fs::write(session_path(&cfg.dir), format!("{id}\n"))?;
         }
-        if let Some(m) = args.model {
+        std::fs::write(
+            cfg.dir.join("msg-backend"),
+            format!("{}\n", selection.backend.executable()),
+        )?;
+        if let Some(m) = model {
             std::fs::write(model_path(&cfg.dir), format!("{m}\n"))?;
         }
     }
-    Ok(code)
+    Ok(sent.code)
 }
 
 #[cfg(test)]
@@ -503,15 +588,5 @@ mod tests {
         assert_eq!(run(&argv).unwrap(), 0);
         assert!(!session_path(&dir).exists());
         assert!(!pidfile(&dir).exists()); // guard released
-    }
-
-    #[test]
-    fn the_result_envelope_is_the_final_text() {
-        let line = r#"{"type":"result","subtype":"success","is_error":false,"result":"queued 3.1","total_cost_usd":0.01}"#;
-        assert_eq!(result_text(line).unwrap(), "queued 3.1");
-        assert_eq!(result_text(r#"{"type":"assistant","message":{}}"#), None);
-        assert_eq!(result_text("not json"), None);
-        // A result with no text still terminates the stream.
-        assert_eq!(result_text(r#"{"type":"result"}"#).unwrap(), "");
     }
 }

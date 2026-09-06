@@ -91,7 +91,7 @@ where
     W: Write,
     F: FnMut(&IterStatus),
 {
-    let mut envelope = None;
+    let mut parser = Events::default();
     for line in reader.lines() {
         let line = line?;
         writeln!(raw, "{line}")?;
@@ -99,18 +99,99 @@ where
         status.events += 1;
         if let Ok(v) = serde_json::from_str::<Value>(&line) {
             update_status(status, &v);
-            if v.get("type").and_then(Value::as_str) == Some("result") {
-                envelope = Some(parse_envelope(&v, &line));
+            parser.observe(&v, &line);
+            if let Some(e) = &parser.envelope {
+                status.out_tokens = e.output_tokens;
             }
         }
         emit(status);
     }
-    Ok(envelope)
+    Ok(parser.envelope)
+}
+
+/// Adapt Codex events to the existing result envelope. Only the last completed
+/// agent message is final text; reasoning and tool output can never complete a run.
+#[derive(Default)]
+pub struct Events {
+    pub envelope: Option<ResultEnvelope>,
+    pub thread_id: Option<String>,
+    final_text: String,
+}
+
+impl Events {
+    pub fn observe(&mut self, v: &Value, line: &str) {
+        match v["type"].as_str().unwrap_or("") {
+            "result" => self.envelope = Some(parse_envelope(v, line)),
+            "thread.started" => self.thread_id = v["thread_id"].as_str().map(String::from),
+            "turn.started" => {
+                self.final_text.clear();
+                self.envelope = None;
+            }
+            "item.completed" if v["item"]["type"] == "agent_message" => {
+                self.final_text = v["item"]["text"].as_str().unwrap_or("").to_string();
+            }
+            "turn.completed" => {
+                let usage = &v["usage"];
+                let cached = usage["cached_input_tokens"].as_u64().unwrap_or(0);
+                let normalized = serde_json::json!({
+                    "type": "result", "is_error": false, "result": self.final_text,
+                    "num_turns": 1, "total_cost_usd": 0.0,
+                    "usage": {
+                        "input_tokens": usage["input_tokens"].as_u64().unwrap_or(0).saturating_sub(cached),
+                        "cache_read_input_tokens": cached,
+                        "output_tokens": usage["output_tokens"].as_u64().unwrap_or(0),
+                    }
+                });
+                self.envelope = Some(parse_envelope(&normalized, &normalized.to_string()));
+            }
+            // An error event may describe a reconnect attempt. A subsequent
+            // completed turn supersedes it; a stream ending here is a failure.
+            "turn.failed" | "error" => {
+                let err = v.get("error").unwrap_or(v);
+                let message = err
+                    .as_str()
+                    .or_else(|| err["message"].as_str())
+                    .unwrap_or(line);
+                let status = err
+                    .get("status_code")
+                    .or_else(|| err.get("http_status_code"));
+                let normalized = serde_json::json!({
+                    "type": "result", "is_error": true, "result": message,
+                    "api_error_status": status,
+                });
+                self.envelope = Some(parse_envelope(&normalized, &normalized.to_string()));
+            }
+            _ => {}
+        }
+    }
+}
+
+pub fn error_envelope(text: &str) -> ResultEnvelope {
+    let value = serde_json::json!({"type":"result", "is_error":true, "result":text});
+    parse_envelope(&value, &value.to_string())
 }
 
 /// Fold one parsed event into the live status.
 fn update_status(status: &mut IterStatus, v: &Value) {
     let ty = v.get("type").and_then(Value::as_str).unwrap_or("");
+    if ty.starts_with("item.") {
+        let item = &v["item"];
+        match item["type"].as_str().unwrap_or("") {
+            "agent_message" => status.last_text = item["text"].as_str().map(String::from),
+            "command_execution" | "file_change" | "mcp_tool_call" | "web_search" => {
+                status.current_tool = if ty == "item.completed" {
+                    None
+                } else {
+                    item["command"]
+                        .as_str()
+                        .or_else(|| item["tool"].as_str())
+                        .or_else(|| item["type"].as_str())
+                        .map(String::from)
+                };
+            }
+            _ => {}
+        }
+    }
     if ty == "assistant" {
         if let Some(msg) = v.get("message") {
             if let Some(content) = msg.get("content").and_then(Value::as_array) {
@@ -202,6 +283,35 @@ fn now_secs() -> u64 {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn codex_uses_only_the_last_agent_message_of_a_completed_turn() {
+        let input = concat!(
+            "{\"type\":\"turn.started\"}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"RALPH_COMPLETE\"}}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"still working\"}}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"reasoning\",\"text\":\"RALPH_COMPLETE\"}}\n",
+        );
+        assert!(
+            drain(input).0.is_none(),
+            "a partial stream cannot complete a turn"
+        );
+        let (env, _, raw) = drain(&format!(
+            "{input}{{\"type\":\"turn.completed\",\"usage\":{{}}}}\n"
+        ));
+        assert_eq!(env.unwrap().result, "still working");
+        assert!(raw.starts_with(input));
+    }
+
+    #[test]
+    fn codex_failures_and_recovered_errors() {
+        let fail = r#"{"type":"turn.failed","error":{"message":"rate limit","status_code":"429"}}"#;
+        let env = drain(fail).0.unwrap();
+        assert!(env.is_error);
+        assert_eq!(env.api_error_status, Some(429));
+        let recovered = format!("{fail}\n{{\"type\":\"turn.completed\",\"usage\":{{}}}}\n");
+        assert!(!drain(&recovered).0.unwrap().is_error);
+    }
 
     fn drain(input: &str) -> (Option<ResultEnvelope>, IterStatus, String) {
         let mut raw: Vec<u8> = Vec::new();
