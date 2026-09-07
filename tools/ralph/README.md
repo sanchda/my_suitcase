@@ -67,7 +67,8 @@ Rebuild after source changes by re-running that script.
    ```bash
    ralph schema
    ralph lint
-   ralph brief
+   ralph brief --full
+   ralph doctor
    ralph --max-iterations 30      # from the repo root
    ```
 
@@ -94,6 +95,9 @@ by the backend CLI, so new model names do not require a Ralph release.
 
 `backend` defaults to `auto`: `gpt-*`, `chatgpt-*`, `codex-*`, and `o1`/`o3`/`o4`
 model names (including suffixed variants) select Codex; other names select Claude.
+The short aliases `astra`, `sol`, `terra`, and `luna` also select Codex.
+`fable` selects Claude Fable 5.1 (`claude-fable-5-1`); `astra` selects
+GPT-6 Astra (`gpt-6-astra`). Explicit versioned IDs are passed through unchanged.
 Use `--backend codex` for custom OpenAI model names. `openai` is an alias for
 `codex`, and `anthropic` for `claude`. An explicit backend governs the run’s
 worker, synthesizer, judge, and learning calls. Authentication comes from the
@@ -138,6 +142,94 @@ CLI supports. `--no-yolo` runs Codex in `workspace-write` with approvals disable
 for unattended operation; otherwise Ralph uses Codex’s bypass flag. Codex helper
 calls use a read-only sandbox.
 
+### Exclusive model selection
+
+Prefix a model with `!` to require that model for the call. For example:
+
+```bash
+ralph --model '!astra' --once
+ralph model '!fable'
+ralph msg --model '!astra' "review the plan"
+```
+
+The same syntax works in model configuration values and in the task's header:
+
+```markdown
+- [ ] **12 — Review the architecture.** !fable — use Fable exclusively.
+  Verify: cargo test
+```
+
+`@!fable` is also accepted. Exclusive selections choose the model's provider,
+overriding a conflicting `backend`, and disable automatic provider failover and
+Claude's configured overload fallback. Usage limits retain the existing wait/retry
+behavior on that provider. An exclusive task annotation outranks escalation and
+one-shot overrides; no-progress limits still apply. Helper models are configured
+separately and can also use `!`. Plain `@astra` and `@fable` permit failover.
+
+### Automatic provider failover
+
+Failover is **on by default**. When a worker reports depleted usage, quota, or
+credits, Ralph immediately retries the task on the other provider using its
+existing CLI login. The default pairings work in both directions:
+
+| Anthropic | OpenAI |
+|---|---|
+| Fable (`claude-fable-5-1`) | Astra (`gpt-6-astra`) |
+| Opus | Sol (`gpt-5.6-sol`) |
+| Sonnet | Terra (`gpt-5.6-terra`) |
+| Haiku | Luna (`gpt-5.6-luna`) |
+
+Versioned family names use the same pairing. Unknown models use Sonnet/Terra;
+OpenAI mini models use Haiku. These are routing defaults and can be overridden.
+Ralph reads reset hints from worker errors, including `try again in 2h 15m`,
+`Retry-After: 60`, ISO timestamps, and `resets 5pm (America/Chicago)`.
+Dated reset times and named timezones are honored; clock times without a zone
+use the machine's local timezone. Unrecognized, invalid, or stale hints fall
+back to configured waits.
+
+Anthropic and OpenAI have independent deadlines and backoff counters, saved in
+`.ralph/provider-limits.json` as Unix UTC seconds (`retry_at`). Restarting Ralph
+preserves these timers. Workers use the available provider and return to the
+preferred provider when its deadline expires. If both providers are blocked,
+Ralph waits until the earliest usable provider resets, without probing either
+early. Logs and `.ralph/live` show when the next retry is scheduled. Long limit
+waits honor STOP and the wall-clock budget. One-shot model choices survive
+quota retries within the loop process, and logs and spend records identify the
+model that actually ran.
+
+Without a reset hint, depletion uses `failover_cooldown` (30 minutes by default)
+when an alternate provider is usable. Otherwise, limits use capped exponential
+backoff (`limit_wait` → `limit_wait_max`), tracked independently per provider.
+Explicit reset hints take precedence over these fallback waits, including their
+caps. Plain rate limits (including a bare HTTP 429) wait on the same provider;
+network and authentication errors keep their existing handling. A missing
+alternate CLI, disabled failover, or an active USD budget that cannot be enforced
+on Codex excludes that alternate from scheduling.
+CLI-specific `extra_args` are omitted when switching providers; Ralph preserves
+the permission mode and translates reasoning effort.
+
+Helper calls and `ralph msg` also try the other provider once on depletion.
+A message switch starts a conversation using project files; provider-specific
+conversation history is not transferred. The successful provider/model is saved
+for subsequent messages; failure preserves the old session. Each helper attempt
+has its own timeout.
+
+No configuration is required. Optional settings in `.ralph/ralph.toml`:
+
+```toml
+# provider_failover = false  # opt out (also --provider-failover false)
+# failover_cooldown = "30m"  # fallback when depletion output has no reset time
+
+# Exact source → destination overrides; add both directions if desired.
+# [failover_models]
+# opus = "gpt-5.6-sol"
+# "gpt-5.6-sol" = "opus"
+```
+
+An explicit `--backend` chooses the preferred provider; automatic failover still
+applies unless disabled. `fallback_model` remains Claude's separate overload
+fallback setting.
+
 ### `ralph init`
 Scaffolds `.ralph/` in the current repo: writes `PROMPT.md` (from the
 template), stub `ralph.toml` / `BACKLOG.md` / `VISION.md` / `PROGRESS.md`
@@ -179,12 +271,14 @@ backlog, and never leaves one behind.
   activity): `cat .ralph/live`
 - **Raw stream of the active iteration** (includes thinking): `tail -f .ralph/current.log`
 - **High-level progress:** `tail -f .ralph/run.log`
-- **Stop gracefully** after the current iteration: `ralph stop` (or
-  `touch .ralph/STOP`). Honored at the boundary, so a long turn finishes first.
-- **Stop now**, without waiting for the turn: `ralph stop --now`. Writes STOP
-  *and* signals the loop, which tears down the `claude` session group — that
-  teardown is the point, since `claude` runs in its own session and a naive kill
-  would orphan it and its subprocesses. Suppresses `--restart` either way.
+- **Stop gracefully and wait:** `ralph stop` writes STOP and waits until the
+  recorded loop exits after its current iteration (including acceptance and handoff).
+- **Request a stop without waiting:** `ralph stop --async` returns immediately.
+  With no live loop, either form returns immediately and leaves STOP for the next launch.
+- **Halt immediately and wait for teardown:** `ralph stop --force` also sends
+  SIGTERM; the runner kills the active worker, helper, or verification process group.
+  `--now` remains an alias. Add `--async` to return after sending the signal.
+  Both graceful and forced stops suppress `--restart`. Force may leave partial work.
 - **Start via ralphd** without Discord: `ralph start` writes `.ralph/START`, the
   symmetric counterpart to STOP. A running ralphd consumes the marker and
   launches the loop; with no ralphd watching, nothing happens.
@@ -262,7 +356,7 @@ ralph msg --new                  # retire the session; next msg starts fresh
 - **`--model` is sticky** — it repins the thread until changed or `--new`, and
   the active model prints to stderr on every call so a lingering `opus` pin is
   never an invisible cost. It accepts anything `claude` accepts (`opus`, or a
-  full name like `claude-fable-5`) and is *not* checked against the escalation
+  full name like `claude-fable-5-1`) and is *not* checked against the escalation
   ladder, which governs the loop rather than this session.
 - Only one `msg` runs at a time; a second is refused, not queued (`.ralph/msg.pid`).
 
@@ -357,7 +451,7 @@ Commands — each acts on the loop that owns the channel you type it in:
 | Command | Shells out to |
 |---|---|
 | `/start [model]` | `ralph <profile args> [--model …]` |
-| `/stop [now]` | `ralph stop` / `ralph stop --now` |
+| `/stop [now]` | `ralph stop --async` / `ralph stop --force --async` |
 | `/model <tier>` | `ralph model <tier>` |
 | `/status`, `/next` | `ralph status --json` |
 | `/add <title> [verify] [id] [under]` | `ralph add [--under P] [id] <title> [--verify …]` |
@@ -409,7 +503,8 @@ default `RALPH_COMPLETE`, **and** the backlog agrees. Your `PROMPT.md` must
 instruct the model to emit it only when the whole goal is genuinely done and
 verified.
 
-The backlog is the gate: the runner re-resolves it after the turn, and a marker
+Completion follows the Git contract audit, any configured acceptance policy, and
+reconciliation of queued mutations. The runner re-resolves the backlog, and a marker
 that arrives while a pending task or a schema error remains is discarded with
 `⚠ completion marker ignored: <reason>` and the loop simply continues.
 
@@ -472,7 +567,9 @@ label's closing `**`, closed by ` — ` before the prose:
 - [ ] **12 — Rework the shared base.** @opus — big, cross-cutting change.
 ```
 
-Only `@haiku`, `@sonnet`, and `@opus` are accepted, at most one per task. A task
+Tier decorations (`@haiku`, `@sonnet`, `@opus`), known model families and aliases
+(such as `@astra` or `@fable`), and exclusive selections (`!astra`, `!fable`)
+are accepted, at most one per task. A task
 with no decoration starts its prose right after the ` — `. Because the slot is
 positional, an `@opus` anywhere else in the body is inert prose, and the
 decoration cannot wrap onto a second line. Anything malformed in the slot — an
@@ -516,9 +613,13 @@ the reopen stick: the agent closes its leaf through the same queue as every othe
 CLI mutation, so at judge time the check-off is still pending rather than applied,
 and draining it at the next iteration boundary would silently re-close the leaf
 the judge just reopened.
-The harness itself fails **open**: a missing/hung/garbled judge call passes the
-iteration rather than stalling the loop (skepticism belongs in the judgment,
-availability in the harness).
+Legacy tier judging still fails **open** on availability, but records a missing,
+hung, or garbled judge result as **unavailable**, never as a pass. Task-local
+`review = "required"` makes availability mandatory; `review = "advisory"` records
+critiques without blocking (unless legacy `judge_tiers` also requests judgment).
+The judge uses the frozen task contract and commits since that task began.
+Refutation reasons are injected directly into the next attempt, independently of
+the worker's summary.
 
 ## `ralph learn` — durable lessons as files
 Mines `run.log` (plus the current carry-forward) with a one-shot `synth_model`
@@ -545,14 +646,23 @@ named in the prompt rather than silently dropped.
 ## No-progress detection & escalation
 A **progress streak** counts consecutive unproductive iterations. An iteration
 is **no-progress** when it is a `code` iteration that made no new commit, or it
-was a transient/timeout retry. A declared productive non-`code` pass
-(`review`/`plan`) is **excluded** and logged as such. On the streak reaching:
+was a transient/timeout retry. A first declared non-`code` pass (`review`/`plan`) is excluded. Repeated
+non-code passes that change neither the backlog nor the committed product tree
+count as no-progress starting with the second unchanged pass. A commit changing
+neither the product tree nor the backlog also counts as no-progress. On the streak reaching:
 
 - `--escalate-after` (default 2): the model escalates one tier up the ladder
   `haiku → sonnet → opus` for the next attempt;
 - `--abort-after` (default 4): the loop aborts with a clear reason.
 
-A productive `code` iteration resets the streak.
+A productive `code` iteration resets the streak. Streaks, escalation, task
+attempt counts, and the initial task revision persist in `.ralph/thrash.json`.
+Task or contract changes reset them. Four attempts on the same task produce a
+split/reframe diagnostic even if commits continue. `task_attempt_limit = N`
+optionally caps attempts against one unchanged task contract; the default `0`
+only diagnoses, allowing fuzzy or incremental work to continue. Quota retries
+are excluded. To deliberately clear the detector after an external intervention,
+stop the loop and remove `.ralph/thrash.json` before restarting.
 
 A `blocked` pass is different: it means the agent has declared a dead-end only a
 human can clear (a stop gate, missing authority, unresolvable ambiguity). It does
@@ -615,7 +725,7 @@ codes and parses the JSON result envelope (`is_error`, `api_error_status`,
 
 | Class | Trigger | Behavior |
 |-------|---------|----------|
-| **LIMIT** | 429, or text matching `usage limit` / `credit balance` / `quota` / `will reset` / `rate limit` | Wait it out. Unlimited retries, capped exponential backoff (`RALPH_LIMIT_WAIT`=300s → `RALPH_LIMIT_WAIT_MAX`=3600s). Never counts as no-progress. |
+| **LIMIT** | 429, or text matching `usage limit` / `credit balance` / `quota` / `will reset` / `rate limit` | Honor the provider reset time, or use configured cooldown/backoff when unknown. Independent persisted provider timers; retry the earliest usable provider. Unlimited retries; never counts as no-progress. |
 | **TRANSIENT** | 5xx / `overloaded` / network / timeout / empty output (crash/kill) | Short capped backoff (10s → 300s), retried; counts toward no-progress so a truly stuck iteration eventually escalates/aborts. |
 | **FATAL** | 401/403 auth, 400/404 bad model / invalid request | Abort with a clear message — looping won't fix config. |
 
@@ -653,6 +763,9 @@ abort_after = 4
 | `tier_models` | — | — | `{}` (optional tier → model mapping) |
 | `model` | `RALPH_MODEL` | `--model` / `-m` | `sonnet` |
 | `fallback_model` | `RALPH_FALLBACK_MODEL` | `--fallback-model` | `sonnet` |
+| `provider_failover` | `RALPH_PROVIDER_FAILOVER` | `--provider-failover` | `true` |
+| `failover_cooldown` | `RALPH_FAILOVER_COOLDOWN` | `--failover-cooldown` | `1800` (30m) |
+| `failover_models` | — | — | `{}` (overrides default provider pairings) |
 | `synth_model` | — | `--synth-model` | `sonnet` |
 | `effort` | `RALPH_EFFORT` | `--effort` | `auto` |
 | `max_iterations` | `RALPH_MAX_ITER` | `--max-iterations` | `0` |
@@ -715,3 +828,107 @@ Modules: `backend` (CLI/model routing) · `backlog` (schema/lint) · `context` (
 (baseline, contract audit) · `judge` (adversarial check-off gate) · `learn`
 (`ralph learn`) · `init` (`ralph init` scaffolding). See
 `docs/superpowers/specs/2026-07-17-ralph-rust-design.md` for the original design.
+
+
+## Proportional acceptance (opt-in)
+
+`Verify:` remains prose: a qualitative success criterion, an observable outcome,
+or instructions for a targeted check are all valid. Ralph never executes that
+text as shell code. Ordinary tasks make no extra verification or review call.
+Cheap Git invariants apply to every successful turn, including the terminal turn.
+
+For tasks that benefit from a runner-executed gate, configure their IDs in the
+local TOML. A parent ID applies when the parent becomes the integration task;
+it is not automatically run for each child.
+
+```toml
+# Optional, root-level setting; 0 keeps task-attempt limits advisory.
+task_attempt_limit = 0
+
+[acceptance."3.2"]
+command = ["./tools/verify-parser", "--focused"]
+timeout_secs = 120
+
+[acceptance."4"]
+review = "advisory"  # critique recorded; does not block acceptance
+
+[acceptance."5"]
+review = "required"  # refuted or unavailable review prevents acceptance
+
+[acceptance."@complete"]
+command = ["./tools/integration-smoke"]
+timeout_secs = 300
+```
+
+Commands are argv arrays, run from the loop's working directory with
+`RALPH_TASK_ID` set, no interactive stdin, and separate captured stdout/stderr.
+Use an explicit shell invocation if shell syntax is needed. The timeout kills
+the command's process group. Policies are loaded with the launch configuration;
+the selected task's full contract, including ancestor constraints, is frozen
+before dispatch. A gate runs only when that task requests closure. Existing
+`judge_tiers` keeps its earlier per-committed-turn behavior.
+
+A failed command or required review refutation reopens the selected task and
+cancels its queued check-off (and ancestor check-offs). It feeds no-progress
+tracking. Unavailable required review halts with a clear reason instead of
+paying for repeated worker attempts. Advisory review never blocks by itself.
+A configured `@complete` policy runs in the final audit turn after the last task
+closes, rather than on each iteration.
+
+These policies govern worker acceptance within a run. A manual `ralph done`
+while the loop is stopped remains an operator action, without launching checks.
+
+## Failure feedback and run records
+
+`.ralph/previous-attempt.json` stores runner-observed rejection or execution
+failure evidence: task ID, contract fingerprint, reason, revision, and artifact
+path. Matching feedback is injected verbatim (up to 4 KB), independently of
+synthesized notes; it cannot reroute the task. Changed contracts omit stale
+feedback. Successful acceptance clears it. Quota retries preserve the prompt.
+
+Carry-forward notes are limited to 1,200 bytes on synthesis success **and**
+fallback. The context reader also bounds manually enlarged progress files and
+indicates truncation. Complete worker summaries remain in the run artifacts.
+
+Each launch has a unique `.ralph/runs/<run-id>/` directory. It contains `run.json`
+and an `attempt-NNNN/` directory per worker invocation, including retries:
+
+- `prompt.md`, `config.json`, `contract.md`, and driving-file snapshots;
+- `git.json` with the starting branch/revision;
+- `worker-summary.md`, `worker-result.json`, and a pointer to the raw worker log;
+- verification command, revision, exit status, timeout, and output when configured;
+- review prompt, raw response, and pass/refuted/unavailable verdict when configured;
+- `outcome.json`, `accepted.json` for accepted closures, and post-turn backlog.
+
+The configured webhook is omitted from configuration snapshots. These are local,
+gitignored diagnostic artifacts. They are retained until you prune them.
+
+`.ralph/run.json` is the latest run record, atomically replaced. `ralph status
+--json` adds `running`, `run`, and `diagnostics` while preserving the existing
+backlog fields. It reports worker/provider/model, phase, task attempts, artifact
+path, last accepted revision, worker cost (with an unreported-cost flag), and
+terminal reason. Phase distinguishes work, verification, review, handoff, quota
+wait, and transient retry. Status works after backlog archival and exposes
+invalid-backlog diagnostics. ralphd displays the same phase and outcome.
+
+A dead process without a terminal record is shown as interrupted. On restart,
+an interrupted attempt without an acceptance receipt has its check-off revoked
+and gets explicit recovery feedback. Product changes are preserved for inspection;
+Ralph does not automatically reset or restore the worktree. Existing spend-budget
+semantics are unchanged: helper costs are still outside the worker ledger.
+
+## Preflight and exact prompt preview
+
+`ralph doctor [--json]` checks the current worktree/branch, runtime path, backlog,
+prompt placeholders, selected model, executable availability, permission mode,
+budget compatibility, and configured verification commands. It does not call a
+model, probe authentication, or run verification. Unknown task IDs are warnings
+(they may refer to an archived task or a later arc). Errors exit 1; warnings alone
+exit 0. It accepts the normal configuration/path flags.
+
+`ralph brief --full` writes the composed worker prompt to stdout: base prompt,
+learnings, authoritative task context, bounded carry-forward, matching failure
+feedback, and explicit acceptance policy. Size/truncation information goes to
+stderr. It uses the same composition function as launch and does not consume
+model overrides, drain queued mutations, or write runtime state. The preview
+reflects the current files; queued edits appear after the next boundary.

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-const MAX_CARRY_FORWARD_BYTES: usize = 1_200;
+pub const MAX_CARRY_FORWARD_BYTES: usize = 1_200;
 /// Coarse wall-clock cap for the one-shot synth call; a hung worker is killed.
 const SYNTH_TIMEOUT_SECS: u64 = 120;
 
@@ -78,7 +78,7 @@ pub fn synthesize_with(
     let prompt = build_synth_prompt(summary, upcoming, prev);
     match run(&prompt) {
         Some(raw) => bound_output(&raw),
-        None => summary.trim().to_string(),
+        None => bound_output(summary),
     }
 }
 
@@ -94,11 +94,37 @@ pub fn run(cfg: &Config, prompt: &str) -> Option<String> {
 /// a full stdin pipe can't deadlock against a full stdout one.
 pub fn run_oneshot(cfg: &Config, model: &str, timeout_secs: u64, prompt: &str) -> Option<String> {
     let selection = crate::backend::resolve(cfg, model);
+    let result = run_attempt(&selection, timeout_secs, prompt)?;
+    if !result.is_error {
+        return Some(result.result);
+    }
+    if cfg.provider_failover && !selection.exclusive && crate::classify::depleted(&result.result) {
+        let alternate = crate::backend::counterpart(cfg, model, &selection);
+        crate::backend::check_cost_budget(cfg, &alternate).ok()?;
+        eprintln!(
+            "ralph: helper provider failover: {} → {} / {}",
+            selection.backend.executable(),
+            alternate.backend.executable(),
+            alternate.model.as_deref().unwrap_or("configured default")
+        );
+        return run_attempt(&alternate, timeout_secs, prompt)
+            .filter(|e| !e.is_error)
+            .map(|e| e.result);
+    }
+    None
+}
+
+fn run_attempt(
+    selection: &crate::backend::Selection,
+    timeout_secs: u64,
+    prompt: &str,
+) -> Option<crate::stream::ResultEnvelope> {
+    let model = selection.model.as_deref().unwrap_or("configured default");
     let codex = selection.backend == crate::backend::Backend::Codex;
     let mut cmd = Command::new(selection.backend.executable());
     if codex {
         cmd.args(crate::backend::codex_args(
-            &selection,
+            selection,
             Some("read-only"),
             true,
         ));
@@ -109,14 +135,14 @@ pub fn run_oneshot(cfg: &Config, model: &str, timeout_secs: u64, prompt: &str) -
             "--model",
             selection.model.as_deref().unwrap_or(model),
             "--output-format",
-            "text",
+            "json",
             "--no-session-persistence",
             "--exclude-dynamic-system-prompt-sections",
         ]);
     }
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     // Own process group so the watchdog's negative-pid SIGKILL reaps the whole
     // tree (worker + any subprocess) rather than orphaning a hung child.
     #[cfg(unix)]
@@ -126,9 +152,16 @@ pub fn run_oneshot(cfg: &Config, model: &str, timeout_secs: u64, prompt: &str) -
     }
     let mut child = cmd.spawn().ok()?;
     let pid = child.id();
+    let _active = crate::control::ActiveProcess::new(pid);
 
     let mut stdin = child.stdin.take()?;
-    let mut stdout = child.stdout.take()?;
+    let stdout = child.stdout.take()?;
+    let mut stderr = child.stderr.take()?;
+    let diagnostic = thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stderr.read_to_string(&mut text);
+        text
+    });
 
     // Feed the prompt concurrently; a child that stops reading can't block us.
     let prompt_bytes = prompt.as_bytes().to_vec();
@@ -156,27 +189,33 @@ pub fn run_oneshot(cfg: &Config, model: &str, timeout_secs: u64, prompt: &str) -
         }
     });
 
-    let output = if codex {
-        crate::stream::consume(
-            BufReader::new(stdout),
-            &mut std::io::sink(),
-            &mut crate::stream::IterStatus::new(0, model),
-            |_| {},
-        )
-        .map(|envelope| envelope.filter(|e| !e.is_error).map(|e| e.result))
-    } else {
-        let mut text = String::new();
-        stdout.read_to_string(&mut text).map(|_| Some(text))
-    };
+    let output = crate::stream::consume(
+        BufReader::new(stdout),
+        &mut std::io::sink(),
+        &mut crate::stream::IterStatus::new(0, model),
+        |_| {},
+    );
     let status = child.wait().ok();
+    // Reap stray descendants holding output pipes before joining the readers.
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGKILL);
+    }
     done.store(true, Ordering::SeqCst);
     let _ = writer.join();
     let _ = watchdog.join();
+    let diagnostic = diagnostic.join().unwrap_or_default();
 
-    if killed.load(Ordering::SeqCst) || !status.is_some_and(|s| s.success()) {
+    if killed.load(Ordering::SeqCst) {
         return None;
     }
-    output.ok().flatten()
+    let result = output.ok().flatten().or_else(|| {
+        (!diagnostic.trim().is_empty()).then(|| crate::stream::error_envelope(diagnostic.trim()))
+    })?;
+    if result.is_error || status.is_some_and(|s| s.success()) {
+        Some(result)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -233,6 +272,8 @@ mod tests {
     fn failed_run_falls_back_to_summary() {
         let out = synthesize_with("raw summary", &[], "", |_| None);
         assert_eq!(out, "raw summary");
+        let large = synthesize_with(&"é".repeat(4000), &[], "", |_| None);
+        assert_eq!(large.len(), MAX_CARRY_FORWARD_BYTES);
     }
 
     #[test]

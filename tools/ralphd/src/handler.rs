@@ -73,6 +73,18 @@ pub fn reap_finished(lc: &LoopConfig, loop_child: &LoopChild) -> Option<ExitStat
 /// The last abort line from `run.log` (timestamp stripped), for the
 /// abnormal-exit post.
 pub fn last_abort_reason(state_dir: &Path) -> Option<String> {
+    // New runners publish a terminal reason; retain the log fallback for old ones.
+    if let Some(reason) = std::fs::read_to_string(state_dir.join("run.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| {
+            v.get("terminal_reason")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+    {
+        return Some(reason);
+    }
     let text = std::fs::read_to_string(state_dir.join("run.log")).ok()?;
     let tail_start = text.len().saturating_sub(16 * 1024);
     let mut start = tail_start;
@@ -139,9 +151,15 @@ pub async fn watch_start(lc: LoopConfig, loop_child: LoopChild, http: Arc<Http>)
             }
             StartDecision::Launch => match launch_and_record(&lc, &loop_child, &[]) {
                 Ok(pid) => {
-                    eprintln!("ralphd[{}]: START trigger → launched ralph (pid {pid})", lc.name);
+                    eprintln!(
+                        "ralphd[{}]: START trigger → launched ralph (pid {pid})",
+                        lc.name
+                    );
                     let _ = channel
-                        .say(&http, format!("🟢 started ralph (pid {pid}) — via `ralph start`"))
+                        .say(
+                            &http,
+                            format!("🟢 started ralph (pid {pid}) — via `ralph start`"),
+                        )
                         .await;
                 }
                 Err(e) => {
@@ -379,7 +397,10 @@ fn commands() -> Vec<CreateCommand> {
             .add_option(opt_str("model", "model override for this run")),
         CreateCommand::new("stop")
             .description("Stop after the current iteration, or immediately with now")
-            .add_option(opt_bool("now", "signal the running loop instead of waiting")),
+            .add_option(opt_bool(
+                "now",
+                "signal the running loop instead of waiting",
+            )),
         CreateCommand::new("model")
             .description("One-shot model override for the next iteration")
             .add_option(req_str("tier", "a tier on the escalation ladder")),
@@ -393,7 +414,10 @@ fn commands() -> Vec<CreateCommand> {
             .description("Queue a backlog task (validated before saving)")
             .add_option(req_str("title", "task title"))
             .add_option(opt_str("verify", "how to verify the task is done"))
-            .add_option(opt_str("id", "explicit id, e.g. 3.1.1 (inserted under 3.1)"))
+            .add_option(opt_str(
+                "id",
+                "explicit id, e.g. 3.1.1 (inserted under 3.1)",
+            ))
             .add_option(opt_str("under", "parent id — auto-numbers the next child")),
         CreateCommand::new("drop")
             .description("Remove a backlog task (archived, never destroyed)")
@@ -413,8 +437,14 @@ fn commands() -> Vec<CreateCommand> {
         CreateCommand::new("msg")
             .description("Steer the loop through its persistent claude session")
             .add_option(req_str("message", "what to tell the session"))
-            .add_option(opt_str("model", "repin the session's model (sticks until changed)"))
-            .add_option(opt_bool("new", "start a fresh session, archiving the old one")),
+            .add_option(opt_str(
+                "model",
+                "repin the session's model (sticks until changed)",
+            ))
+            .add_option(opt_bool(
+                "new",
+                "start a fresh session, archiving the old one",
+            )),
     ]
 }
 
@@ -561,7 +591,10 @@ mod tests {
             poll_start(&lc, &no_children()),
             (StartDecision::Launch, None)
         );
-        assert!(!lc.state_dir.join("START").exists(), "marker must be consumed");
+        assert!(
+            !lc.state_dir.join("START").exists(),
+            "marker must be consumed"
+        );
     }
 
     #[test]
@@ -617,7 +650,10 @@ mod tests {
             .args(["-c", "exit 0"])
             .spawn()
             .unwrap();
-        let slow = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let slow = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
         let slow_pid = slow.id();
         let lchild: LoopChild = Arc::new(Mutex::new(HashMap::from([
             (a.channel_id, quick),
@@ -629,7 +665,11 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert_eq!(reap_finished(&b, &lchild), None, "the other loop still runs");
+        assert_eq!(
+            reap_finished(&b, &lchild),
+            None,
+            "the other loop still runs"
+        );
         let mut survivor = lchild
             .lock()
             .unwrap()

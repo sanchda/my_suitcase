@@ -179,6 +179,19 @@ fn pending(base: &Path) -> R<Vec<PathBuf>> {
     Ok(files)
 }
 
+pub fn has_pending(base: &Path) -> bool {
+    pending(base).map(|p| !p.is_empty()).unwrap_or(true)
+}
+
+pub fn has_done(base: &Path, id: &str) -> bool {
+    pending(base).unwrap_or_default().iter().any(|p| {
+        std::fs::read_to_string(p)
+            .ok()
+            .and_then(|s| serde_json::from_str::<Request>(&s).ok())
+            .is_some_and(|r| matches!(r, Request::Done { id: q } if q == id))
+    })
+}
+
 /// Park a request that cannot be applied. Removing it is the fallback only
 /// because a file that will not move re-rejects on every future iteration.
 fn reject(base: &Path, path: &Path) {

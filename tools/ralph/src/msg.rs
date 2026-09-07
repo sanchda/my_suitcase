@@ -27,6 +27,7 @@ first use). Only one msg runs at a time; a second is refused, not queued.
   --config <file>  Config file (default .ralph/ralph.toml)
 
 --model takes aliases like `opus` and full model names for Claude or Codex; it is not checked against the loop's escalation ladder.
+Prefix with `!` (e.g. '!astra' or '!fable') to disable model failover.
 ";
 
 /// The session's whole job is to drive the loop through the CLI, so it needs no
@@ -160,6 +161,7 @@ fn claude_args(id: &str, resume: bool, preamble: &str, model: Option<&str>) -> V
 struct Sent {
     code: i32,
     id: Option<String>,
+    depleted: bool,
 }
 
 /// Forward Claude NDJSON verbatim, and adapt Codex events to the same API.
@@ -185,13 +187,42 @@ fn send(
         argv
     } else {
         // Preserve the legacy unpinned Claude session's configured CLI model.
-        claude_args(id, resume, PREAMBLE, model.and(selection.model.as_deref()))
+        claude_args(
+            id,
+            resume,
+            PREAMBLE,
+            if selection.exclusive {
+                selection.model.as_deref()
+            } else {
+                model.and(selection.model.as_deref())
+            },
+        )
     };
     if !cfg.yolo {
         argv.retain(|a| a != "--dangerously-skip-permissions");
     }
-    cmd.args(argv).stdin(Stdio::piped()).stdout(Stdio::piped());
+    cmd.args(argv)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = cmd.spawn()?;
+    let stderr = child.stderr.take().expect("piped stderr");
+    let diagnostic = std::thread::spawn(move || {
+        let mut text = String::new();
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            eprintln!("{line}");
+            text.push_str(&line);
+            text.push('\n');
+            if text.len() > 16_384 {
+                let mut cut = text.len() - 16_384;
+                while !text.is_char_boundary(cut) {
+                    cut += 1;
+                }
+                text.drain(..cut);
+            }
+        }
+        text
+    });
     let mut stdin = child.stdin.take().expect("piped stdin");
     let body = if codex {
         format!("{PREAMBLE}\n\n{text}")
@@ -221,6 +252,10 @@ fn send(
     }
     let status = child.wait()?;
     let _ = writer.join();
+    let diagnostic = diagnostic.join().unwrap_or_default();
+    if events.envelope.is_none() && !diagnostic.trim().is_empty() {
+        events.envelope = Some(stream::error_envelope(diagnostic.trim()));
+    }
     let mut code = status.code().unwrap_or(1);
     if events.envelope.as_ref().is_none_or(|e| e.is_error) && code == 0 {
         code = 1;
@@ -258,6 +293,10 @@ fn send(
     Ok(Sent {
         code,
         id: established,
+        depleted: events
+            .envelope
+            .as_ref()
+            .is_some_and(|e| e.is_error && crate::classify::depleted(&e.result)),
     })
 }
 
@@ -358,15 +397,15 @@ pub fn run(argv: &[String]) -> R<i32> {
             .and_then(backend::infer_model)
             .unwrap_or(stored_backend);
     }
-    let model = args.model.clone().or_else(|| read_model(&cfg.dir));
+    let mut model = args.model.clone().or_else(|| read_model(&cfg.dir));
     if let Some(m) = &model {
         if !backend::valid_model(m) {
             return Err(format!("invalid model name '{m}'").into());
         }
     }
     config::validate(&cfg)?;
-    let selection = backend::resolve(&cfg, model.as_deref().unwrap_or(&cfg.model));
-    let same_backend = existing.is_some() && stored_backend == selection.backend;
+    let mut selection = backend::resolve(&cfg, model.as_deref().unwrap_or(&cfg.model));
+    let mut same_backend = existing.is_some() && stored_backend == selection.backend;
     let id = if same_backend {
         existing.clone().unwrap()
     } else {
@@ -379,7 +418,7 @@ pub fn run(argv: &[String]) -> R<i32> {
         selection.model.as_deref().unwrap_or("configured default")
     );
 
-    let sent = send(
+    let mut sent = send(
         &cfg,
         &id,
         same_backend,
@@ -387,6 +426,36 @@ pub fn run(argv: &[String]) -> R<i32> {
         args.stream_json,
         model.as_deref(),
     )?;
+    if sent.depleted && cfg.provider_failover && !selection.exclusive {
+        let alternate =
+            backend::counterpart(&cfg, model.as_deref().unwrap_or(&cfg.model), &selection);
+        if backend::check_cost_budget(&cfg, &alternate).is_ok() {
+            eprintln!("ralph: provider failover: {} → {} / {}; starting a new conversation using project files",
+                selection.backend.executable(), alternate.backend.executable(),
+                alternate.model.as_deref().unwrap_or("configured default"));
+            let mut fallback = cfg.clone();
+            fallback.backend = alternate.backend;
+            fallback.tier_models.clear();
+            fallback.failover_from = None;
+            let fallback_model = alternate.model.clone();
+            same_backend = existing.is_some() && stored_backend == alternate.backend;
+            let fallback_id = if same_backend {
+                existing.clone().unwrap()
+            } else {
+                new_uuid()?
+            };
+            sent = send(
+                &fallback,
+                &fallback_id,
+                same_backend,
+                &args.text,
+                args.stream_json,
+                fallback_model.as_deref(),
+            )?;
+            model = fallback_model;
+            selection = alternate;
+        }
+    }
     // Backend changes start a new conversation. Retire old state only after the
     // new call succeeds, so a rejected model cannot destroy a working session.
     if sent.code == 0 {

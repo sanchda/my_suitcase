@@ -26,7 +26,8 @@ verification/self-assessment finds no high-value gap.}}
    correct, the backlog must not shift under you.
 3. Otherwise implement one bounded increment in surrounding style.
 4. Verify with targeted checks while editing and one final relevant check:
-   {{PROJECT VERIFICATION CONTRACT: exact commands and success markers.}}
+   {{PROJECT VERIFICATION CONTRACT: success criteria or targeted checks.}}
+   Qualitative criteria and observable outcomes are valid verification.
    Never claim a check you did not run; do not repeat unchanged green suites.
 5. Your end-of-turn summary is the sole handoff to the next iteration: state what
    changed, the exact proof you ran, and any constraint the next iteration must
@@ -37,6 +38,7 @@ verification/self-assessment finds no high-value gap.}}
    `{"status": "code", "model": null, "blocked": null}`:
    - `status`: `code` (committed work), `plan`/`review` (non-code progress), or
      `blocked`. A `code` pass must commit.
+   - `!astra —` / `!fable —` pin a task's model exclusively.
    - `model`: normally null — the next leaf's own `@tier` decoration (`@opus —`
      immediately after its bold label) sets the model automatically. Set
      `haiku`/`sonnet`/`opus` (or a concrete model ID) only to OVERRIDE that tier

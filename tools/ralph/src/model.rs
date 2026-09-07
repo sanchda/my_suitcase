@@ -21,11 +21,19 @@ pub fn validate_tier<'a>(raw: &str, ladder: &'a [String]) -> Option<&'a str> {
 /// The backend CLI checks model availability.
 pub fn normalize_model(raw: &str, ladder: &[String]) -> Option<String> {
     let raw = raw.trim();
+    if let Some(model) = raw.strip_prefix('!') {
+        if !crate::backend::valid_model(raw) {
+            return None;
+        }
+        return normalize_model(model, ladder).map(|m| format!("!{m}"));
+    }
     if let Some(tier) = validate_tier(raw, ladder) {
         return Some(tier.into());
     }
     let lower = raw.to_ascii_lowercase();
-    if crate::backend::is_tier(&lower) {
+    if crate::backend::is_tier(&lower)
+        || matches!(lower.as_str(), "fable" | "astra" | "sol" | "terra" | "luna")
+    {
         return Some(lower);
     }
     crate::backend::valid_model(raw).then(|| raw.into())
@@ -116,5 +124,20 @@ mod tests {
         state.write_model(validate_tier(" Opus ", &ladder()).unwrap());
         assert_eq!(state.take_model(&ladder()), Some("opus".into()));
         assert_eq!(state.take_model(&ladder()), None); // one-shot
+    }
+
+    #[test]
+    fn exclusive_overrides_preserve_the_marker_and_normalize_aliases() {
+        assert_eq!(
+            normalize_model(" !ASTRA ", &ladder()).as_deref(),
+            Some("!astra")
+        );
+        assert_eq!(
+            normalize_model("!Fable", &ladder()).as_deref(),
+            Some("!fable")
+        );
+        for bad in ["!", "!!astra", "!-model", "!fable,sonnet"] {
+            assert!(normalize_model(bad, &ladder()).is_none(), "{bad}");
+        }
     }
 }

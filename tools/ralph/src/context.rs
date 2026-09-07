@@ -27,6 +27,9 @@ pub struct Diagnostic {
 pub struct IterationContext {
     suffix: String,
     pub target: Option<String>,
+    pub task_id: Option<String>,
+    /// Full contract frozen before dispatch, including ancestor constraints.
+    pub contract: String,
     /// The selected leaf's title (the bolded one-liner), for human status lines.
     pub target_title: Option<String>,
     /// The resolved leaf's own `@tier` model decoration, if any.
@@ -122,6 +125,8 @@ pub fn load(backlog_path: &Path, progress_path: &Path) -> IterationContext {
             return IterationContext {
                 suffix: invalid_suffix(backlog_path),
                 target: None,
+                task_id: None,
+                contract: String::new(),
                 target_title: None,
                 model_hint: None,
                 diagnostics,
@@ -184,6 +189,16 @@ pub fn load(backlog_path: &Path, progress_path: &Path) -> IterationContext {
     IterationContext {
         suffix,
         target,
+        task_id: selected.map(|i| doc.tasks[i].id.clone()),
+        contract: selected
+            .map(|i| {
+                task_path_indices(&doc, i)
+                    .into_iter()
+                    .map(|n| doc.own_excerpt(n, usize::MAX))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default(),
         target_title,
         model_hint: selected.and_then(|index| doc.model_hint(index)),
         diagnostics,
@@ -250,12 +265,39 @@ fn build_suffix(
         Some(text) if !text.trim().is_empty() => {
             out.push_str("### Carry-forward (from the previous iteration)\n\n");
             out.push_str("--- BEGIN CARRY-FORWARD ---\n");
-            out.push_str(text.trim_end());
+            out.push_str(crate::runtime::bounded(
+                text.trim_end(),
+                crate::synth::MAX_CARRY_FORWARD_BYTES,
+            ));
+            if text.trim_end().len() > crate::synth::MAX_CARRY_FORWARD_BYTES {
+                out.push_str(
+                    "\n[Carry-forward truncated; full note remains in the progress file.]\n",
+                );
+            }
             out.push_str("\n--- END CARRY-FORWARD ---\n\n");
         }
         _ => out.push_str("Carry-forward: none; use the leaf directly.\n\n"),
     }
     out
+}
+
+/// Used by both launch and `brief --full`, so previews include every injected block.
+pub fn full_prompt(cfg: &crate::config::Config, resolved: &IterationContext) -> crate::R<String> {
+    let mut base = std::fs::read_to_string(&cfg.prompt)?;
+    base.push_str(&crate::learn::injection_block(
+        &crate::learn::learnings_dir(cfg),
+    ));
+    let mut prompt = resolved.compose(&base);
+    let id = resolved.task_id.as_deref().unwrap_or("@complete");
+    prompt.push_str(&crate::runtime::feedback_prompt(
+        &cfg.dir,
+        id,
+        &resolved.contract,
+    ));
+    if let Some(policy) = cfg.acceptance.get(id) {
+        prompt.push_str(&format!("\n## Explicit acceptance policy\nThe runner checks this policy when you request completion of {id}:\n{}\nProse Verify criteria still apply. Do not weaken the contract or edit runner state.\n", serde_json::to_string(policy)?));
+    }
+    Ok(prompt)
 }
 
 fn invalid_suffix(backlog_path: &Path) -> String {

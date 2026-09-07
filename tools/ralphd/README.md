@@ -127,7 +127,7 @@ Each acts on the loop that owns the channel you type it in.
 | Command | Shells out to |
 |---|---|
 | `/start [model]` | `ralph <loop args> [--model …]` |
-| `/stop [now]` | `ralph stop` / `ralph stop --now` |
+| `/stop [now]` | `ralph stop --async` / `ralph stop --force --async` |
 | `/model <tier>` | `ralph model <tier>` |
 | `/status`, `/next` | `ralph status --json` |
 | `/add <title> [verify] [id] [under]` | `ralph add [--under P] [id] <title> [--verify …]` |

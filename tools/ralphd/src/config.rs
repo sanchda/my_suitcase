@@ -149,7 +149,9 @@ pub fn parse(argv: &[String], env: impl Fn(&str) -> Option<String>) -> Result<Bo
                 .unwrap_or_else(|| PathBuf::from("."));
 
             let autostart = has_flag("--autostart")
-                || env("RALPHD_AUTOSTART").map(|v| env_truthy(&v)).unwrap_or(false);
+                || env("RALPHD_AUTOSTART")
+                    .map(|v| env_truthy(&v))
+                    .unwrap_or(false);
 
             let lc = LoopConfig {
                 name: loop_name(&working_dir),
@@ -216,11 +218,7 @@ fn from_toml(
         let working_dir = PathBuf::from(&l.dir);
         let webhook = l
             .webhook
-            .or_else(|| {
-                inherit_webhook
-                    .then(|| env("DISCORD_WEBHOOK"))
-                    .flatten()
-            })
+            .or_else(|| inherit_webhook.then(|| env("DISCORD_WEBHOOK")).flatten())
             .filter(|w| !w.trim().is_empty());
         let lc = LoopConfig {
             name: l.name,
@@ -310,8 +308,17 @@ mod tests {
     #[test]
     fn parse_resolves_relative_dir_against_working_dir() {
         let argv: Vec<String> = [
-            "--guild", "1", "--channel", "2", "--user", "3", "--working-dir", "/repo", "--",
-            "--dir", "custom",
+            "--guild",
+            "1",
+            "--channel",
+            "2",
+            "--user",
+            "3",
+            "--working-dir",
+            "/repo",
+            "--",
+            "--dir",
+            "custom",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -404,7 +411,10 @@ mod tests {
             .collect();
         let cfg = parse(
             &argv,
-            env_map(&[("DISCORD_BOT_TOKEN", "tok"), ("DISCORD_WEBHOOK", "https://hook")]),
+            env_map(&[
+                ("DISCORD_BOT_TOKEN", "tok"),
+                ("DISCORD_WEBHOOK", "https://hook"),
+            ]),
         )
         .unwrap();
         assert_eq!(only(&cfg).webhook.as_deref(), Some("https://hook"));
@@ -465,20 +475,27 @@ autostart = true
             .collect();
         let cfg = parse(
             &argv,
-            env_map(&[("DISCORD_BOT_TOKEN", "tok"), ("DISCORD_WEBHOOK", "https://one")]),
+            env_map(&[
+                ("DISCORD_BOT_TOKEN", "tok"),
+                ("DISCORD_WEBHOOK", "https://one"),
+            ]),
         )
         .unwrap();
         assert!(cfg.loops.values().all(|l| l.webhook.is_none()));
 
         // A lone loop still inherits it, so the historical launch is unchanged.
-        let solo = tmp_toml("guild = 1\nuser = 2\n[[loop]]\nname = \"a\"\nchannel = 10\ndir = \"/a\"\n");
+        let solo =
+            tmp_toml("guild = 1\nuser = 2\n[[loop]]\nname = \"a\"\nchannel = 10\ndir = \"/a\"\n");
         let argv: Vec<String> = ["--config", solo.to_str().unwrap()]
             .iter()
             .map(|s| s.to_string())
             .collect();
         let cfg = parse(
             &argv,
-            env_map(&[("DISCORD_BOT_TOKEN", "tok"), ("DISCORD_WEBHOOK", "https://one")]),
+            env_map(&[
+                ("DISCORD_BOT_TOKEN", "tok"),
+                ("DISCORD_WEBHOOK", "https://one"),
+            ]),
         )
         .unwrap();
         assert_eq!(cfg.loops[&10].webhook.as_deref(), Some("https://one"));
@@ -510,7 +527,8 @@ autostart = true
 
     #[test]
     fn explicit_config_flag_wins_over_the_flag_form() {
-        let path = tmp_toml("guild = 9\nuser = 8\n[[loop]]\nname = \"a\"\nchannel = 77\ndir = \"/a\"\n");
+        let path =
+            tmp_toml("guild = 9\nuser = 8\n[[loop]]\nname = \"a\"\nchannel = 77\ndir = \"/a\"\n");
         let argv: Vec<String> = [
             "--config",
             path.to_str().unwrap(),

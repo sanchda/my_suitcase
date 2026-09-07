@@ -8,10 +8,12 @@ use crate::backend::{self, Backend};
 use crate::classify::{classify, Class};
 use crate::config::Config;
 use crate::context;
+use crate::limits::{Limits, ProviderLimit};
 use crate::notify;
 use crate::state::State;
 use crate::stream::{self, IterStatus, ResultEnvelope};
-use crate::{curate, git, inbox, judge, learn, ledger, supervisor, synth, R};
+use crate::{curate, git, inbox, judge, ledger, supervisor, synth, R};
+use chrono::Utc;
 use std::collections::HashSet;
 use std::io::{BufReader, Write};
 use std::os::raw::c_int;
@@ -49,6 +51,7 @@ pub enum Action {
 
 /// Pure no-progress tracker: counts consecutive unproductive iterations and
 /// decides when to escalate the model tier and when to give up.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Thrash {
     escalate_after: u32,
     abort_after: u32,
@@ -57,6 +60,10 @@ pub struct Thrash {
     streak: u32,
     blocked_streak: u32,
     escalation_idx: Option<usize>,
+    target_key: String,
+    attempts: u32,
+    non_code: u32,
+    base_revision: Option<String>,
 }
 
 /// Consecutive self-declared `blocked` passes before the loop gives up. A hard
@@ -74,7 +81,44 @@ impl Thrash {
             streak: 0,
             blocked_streak: 0,
             escalation_idx: None,
+            target_key: String::new(),
+            attempts: 0,
+            non_code: 0,
+            base_revision: None,
         }
+    }
+
+    fn load(cfg: &Config) -> Self {
+        let mut fresh = Self::new(cfg);
+        if let Ok(text) = std::fs::read_to_string(cfg.dir.join("thrash.json")) {
+            if let Ok(old) = serde_json::from_str::<Self>(&text) {
+                fresh.streak = old.streak;
+                fresh.blocked_streak = old.blocked_streak;
+                fresh.escalation_idx = old.escalation_idx.filter(|i| *i < fresh.ladder.len());
+                fresh.target_key = old.target_key;
+                fresh.attempts = old.attempts;
+                fresh.non_code = old.non_code;
+                fresh.base_revision = old.base_revision;
+            }
+        }
+        fresh
+    }
+
+    fn select(&mut self, cfg: &Config, resolved: &context::IterationContext) {
+        let key = format!(
+            "{}:{}",
+            resolved.task_id.as_deref().unwrap_or("@complete"),
+            crate::runtime::fingerprint(&resolved.contract)
+        );
+        if self.target_key != key {
+            *self = Self::new(cfg);
+            self.target_key = key;
+            self.base_revision = git::head(Path::new("."));
+        }
+    }
+
+    fn save(&self, cfg: &Config) -> R<()> {
+        crate::runtime::write_json(&cfg.dir.join("thrash.json"), self)
     }
 
     /// The model currently forced by escalation, if any.
@@ -118,7 +162,13 @@ impl Thrash {
                         self.streak
                     ));
                 }
-                if self.streak >= self.escalate_after {
+                if self.streak >= self.escalate_after
+                    && !resolved_model.starts_with('!')
+                    && !self
+                        .tier_models
+                        .get(resolved_model)
+                        .is_some_and(|m| m.starts_with('!'))
+                {
                     let cur = self
                         .escalation_idx
                         .or_else(|| self.ladder.iter().position(|m| m == resolved_model))
@@ -148,6 +198,21 @@ impl Thrash {
     }
 }
 
+pub fn preview_model(cfg: &Config, resolved: &context::IterationContext) -> String {
+    let mut thrash = Thrash::load(cfg);
+    thrash.select(cfg, resolved);
+    let one_shot = std::fs::read_to_string(cfg.dir.join("MODEL"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| backend::valid_model(s));
+    choose_model(
+        cfg,
+        thrash.forced_model().or(one_shot),
+        resolved.model_hint.as_deref(),
+    )
+    .model
+}
+
 /// The tier an iteration runs on, plus a log line when the leaf's own `@tier`
 /// decoration had to be discarded.
 struct ModelChoice {
@@ -155,23 +220,35 @@ struct ModelChoice {
     note: Option<String>,
 }
 
-/// Resolve the tier for one iteration. `override_model` is the already-applied
-/// escalation / one-shot `.ralph/MODEL` decision; `hint` is the leaf's `@tier`.
+/// Resolve the model for one iteration. An exclusive task declaration takes
+/// precedence; otherwise `override_model` is the escalation / one-shot decision
+/// and `hint` is the leaf's model decoration.
 ///
 /// A decoration naming a real tier that the operator left off
 /// `escalation_ladder` is valid schema, so lint passes it — lint cannot see
 /// config. Routing is the only place that discrepancy is visible, so it reports
 /// the drop rather than quietly running the task on the default model.
 fn choose_model(cfg: &Config, override_model: Option<String>, hint: Option<&str>) -> ModelChoice {
+    // A task's exclusive declaration also survives a persisted escalation.
+    if let Some(model) = hint.filter(|h| h.starts_with('!')) {
+        return ModelChoice {
+            model: model.into(),
+            note: None,
+        };
+    }
     if let Some(model) = override_model {
         return ModelChoice { model, note: None };
     }
     let hint = hint.map(str::trim).filter(|h| !h.is_empty());
     match hint {
-        Some(tier) if cfg.escalation_ladder.iter().any(|t| t == tier) => ModelChoice {
-            model: tier.to_string(),
-            note: None,
-        },
+        Some(tier)
+            if !backend::is_tier(tier) || cfg.escalation_ladder.iter().any(|t| t == tier) =>
+        {
+            ModelChoice {
+                model: tier.to_string(),
+                note: None,
+            }
+        }
         Some(tier) => ModelChoice {
             model: cfg.model.clone(),
             note: Some(format!(
@@ -269,6 +346,21 @@ struct HbSnapshot {
 /// The running worker's pid, so the SIGTERM handler can reach it.
 static WORKER_PID: AtomicU32 = AtomicU32::new(0);
 
+/// Helpers and verification commands share the force-stop process registry.
+pub struct ActiveProcess(u32);
+impl ActiveProcess {
+    pub fn new(pid: u32) -> Self {
+        WORKER_PID.store(pid, Ordering::SeqCst);
+        Self(pid)
+    }
+}
+impl Drop for ActiveProcess {
+    fn drop(&mut self) {
+        kill_group(self.0);
+        let _ = WORKER_PID.compare_exchange(self.0, 0, Ordering::SeqCst, Ordering::SeqCst);
+    }
+}
+
 /// Tear down `claude` before dying: it leads its own session (see `run_one`), so
 /// no signal aimed at ralph reaches it and skipping this orphans the whole tree.
 /// Then die by the signal, which is what the supervisor classifies on.
@@ -306,6 +398,35 @@ pub fn run(cfg: &Config) -> R<i32> {
     // First thing, so a `ralph stop --now` forwarded here can never find the
     // supervisor's forwarding handler still installed in this process.
     supervisor::install_handler(libc::SIGTERM, terminate);
+    let previous = crate::runtime::read(&cfg.dir);
+    let mut run = crate::runtime::Run::start(cfg)?;
+    if let Some(old) = previous {
+        run.record.last_accepted_revision = old.last_accepted_revision;
+        if old.phase == "interrupted" {
+            if let (Some(task), Some(evidence)) = (old.task, old.artifacts) {
+                if !evidence.join("accepted.json").exists() {
+                    reject_checkoff(cfg, &task)?;
+                    let contract =
+                        std::fs::read_to_string(evidence.join("contract.md")).unwrap_or_default();
+                    crate::runtime::feedback(&cfg.dir, &task, &contract,
+                        "The previous process was interrupted before acceptance. Inspect its partial work and evidence before requesting completion again.", &evidence)?;
+                }
+            }
+        }
+    }
+    let result = run_loop(cfg, &mut run);
+    if run.record.terminal_reason.is_none() {
+        let reason = match &result {
+            Err(e) => format!("error: {e}"),
+            Ok(0) => "stopped".into(),
+            Ok(_) => "aborted".into(),
+        };
+        run.finish(&reason)?;
+    }
+    result
+}
+
+fn run_loop(cfg: &Config, run: &mut crate::runtime::Run) -> R<i32> {
     if !cfg.prompt.exists() {
         return Err(format!("prompt file not found: {}", cfg.prompt.display()).into());
     }
@@ -325,10 +446,15 @@ pub fn run(cfg: &Config) -> R<i32> {
         cfg.yolo,
     ));
 
-    let mut thrash = Thrash::new(cfg);
+    let mut thrash = Thrash::load(cfg);
     let mut iter = state.iteration();
-    let mut lwait = 0u64;
+    run.record.iteration = iter;
     let mut twait = 0u64;
+    let mut failover = Limits::load(&cfg.dir).unwrap_or_else(|e| {
+        state.log(&format!("  ⚠ could not load provider limits: {e}"));
+        Limits::default()
+    });
+    let mut retry_model = None;
     let mut cost_total = 0.0f64;
     let mut seen_context_warnings = HashSet::new();
     let start = Instant::now();
@@ -353,9 +479,11 @@ pub fn run(cfg: &Config) -> R<i32> {
                 ),
             );
             state.clear_stop();
+            run.finish("stop requested")?;
             break;
         }
         if cfg.max_iterations > 0 && iter >= cfg.max_iterations {
+            run.finish("iteration limit")?;
             state.log(&format!(
                 "max iterations ({}) reached → halting",
                 cfg.max_iterations
@@ -370,6 +498,7 @@ pub fn run(cfg: &Config) -> R<i32> {
             break;
         }
         if cfg.max_cost_usd > 0.0 && cost_total >= cfg.max_cost_usd {
+            run.finish("worker cost limit")?;
             state.log(&format!(
                 "cost budget reached (${:.4} ≥ ${:.4}) → halting",
                 cost_total, cfg.max_cost_usd
@@ -388,6 +517,7 @@ pub fn run(cfg: &Config) -> R<i32> {
         if cfg.budget_usd > 0.0 {
             let spent = ledger::spend_since(&cfg.dir, cfg.budget_window);
             if spent >= cfg.budget_usd {
+                run.finish("persisted spend limit")?;
                 let window = match cfg.budget_window {
                     0 => "all time".to_string(),
                     secs => format!("the last {secs}s"),
@@ -407,6 +537,7 @@ pub fn run(cfg: &Config) -> R<i32> {
             }
         }
         if cfg.max_duration > 0 && start.elapsed().as_secs() >= cfg.max_duration {
+            run.finish("duration limit")?;
             state.log(&format!(
                 "wall-clock budget ({}s) reached → halting",
                 cfg.max_duration
@@ -434,28 +565,71 @@ pub fn run(cfg: &Config) -> R<i32> {
             )
             .into());
         }
+        thrash.select(cfg, &resolved);
+        run.record.task = Some(resolved.task_id.as_deref().unwrap_or("@complete").into());
+        run.record.task_attempts = thrash.attempts;
+        if cfg.task_attempt_limit > 0 && thrash.attempts >= cfg.task_attempt_limit {
+            run.finish(&format!(
+                "task attempt limit: {} after {} attempts",
+                resolved.task_id.as_deref().unwrap_or("@complete"),
+                thrash.attempts
+            ))?;
+            return Ok(1);
+        }
         // Model precedence: escalation > a one-shot `.ralph/MODEL` override the
         // agent wrote > the resolved leaf's own `@tier` decoration > default.
+        let retry = retry_model.take();
         let choice = choose_model(
             cfg,
             thrash
                 .forced_model()
-                .or_else(|| state.take_model(&cfg.escalation_ladder)),
+                .or_else(|| state.take_model(&cfg.escalation_ladder))
+                .or(retry),
             resolved.model_hint.as_deref(),
         );
         let model = choice.model;
+        let primary = backend::resolve(cfg, &model);
+        let now = Utc::now().timestamp();
+        let until = failover.wait_until(primary.backend, alternate_usable(cfg, &model), now);
+        if until > now {
+            retry_model = Some(model.clone());
+            let message = format!(
+                "  limit backoff: waiting until {} ({}s), then retry iter {next}",
+                reset_label(until),
+                until - now
+            );
+            state.log(&message);
+            state.write_live_status(&format!("{message}\n"));
+            run.record.retry_at = Some(until);
+            run.phase("waiting_for_quota")?;
+            wait_for_limit(cfg, &state, until, start);
+            continue;
+        }
+        let routed = route_config(cfg, &model, &failover);
+        let selection = backend::resolve(&routed, &model);
+        let actual_model = selection.model.as_deref().unwrap_or(&model);
         // Learnings ride the stable base: they change rarely, so the
         // prompt-cache prefix survives across iterations.
-        let mut base_prompt = std::fs::read_to_string(&cfg.prompt)?;
-        base_prompt.push_str(&learn::injection_block(&learn::learnings_dir(cfg)));
-        let iteration_prompt = resolved.compose(&base_prompt);
+        let iteration_prompt = context::full_prompt(cfg, &resolved)?;
         let head_before = git::head(repo);
+        let tree_before = git::tree(repo);
         let branch_before = git::branch(repo);
-
+        let backlog_before = std::fs::read_to_string(&cfg.backlog)?;
+        let task_id = resolved.task_id.as_deref().unwrap_or("@complete");
+        let policy = cfg.acceptance.get(task_id).cloned().unwrap_or_default();
+        let evidence = run.begin_attempt(
+            &routed,
+            next,
+            Some(task_id),
+            actual_model,
+            selection.backend.executable(),
+            &iteration_prompt,
+        )?;
+        std::fs::write(evidence.join("contract.md"), &resolved.contract)?;
         let target = resolved.target.as_deref().unwrap_or("completion audit");
         state.log(&format!(
-            "iter {next} → {model} (effort={}, target={target})",
-            effort_for(cfg, &model).unwrap_or_else(|| "inherited".into()),
+            "iter {next} → {actual_model} (effort={}, target={target}, requested={model})",
+            effort_for(&routed, &model).unwrap_or_else(|| "inherited".into()),
         ));
         if let Some(note) = &choice.note {
             state.log(note);
@@ -467,14 +641,14 @@ pub fn run(cfg: &Config) -> R<i32> {
         };
         notify::notify(
             &notifier,
-            &format!("▶️ **iter {next}** → `{model}` · {task_label}"),
+            &format!("▶️ **iter {next}** → `{actual_model}` · {task_label}"),
         );
         for warning in resolved.warnings() {
             if seen_context_warnings.insert(context_warning_key(warning)) {
                 state.log(&format!("  ⚠ {warning}"));
             }
         }
-        let ran = run_one(cfg, &state, next, &model, &iteration_prompt)?;
+        let ran = run_one(&routed, &state, next, &model, &iteration_prompt)?;
 
         let (class, cost, text) = match &ran.envelope {
             Some(env) => {
@@ -486,7 +660,38 @@ pub fn run(cfg: &Config) -> R<i32> {
             None => (Class::Transient, 0.0, String::new()),
         };
         cost_total += cost;
-        if let Err(e) = ledger::append(&cfg.dir, next, &model, cost) {
+        run.record.worker_cost_usd = cost_total;
+        run.record.cost_unreported |= selection.backend == Backend::Codex;
+        std::fs::write(evidence.join("worker-summary.md"), &text)?;
+        if let Some(env) = &ran.envelope {
+            crate::runtime::write_json(&evidence.join("worker-result.json"), &env.raw)?;
+        }
+        if let Ok(log) = std::fs::read_link(cfg.dir.join("current.log")) {
+            std::fs::write(
+                evidence.join("worker-log-path.txt"),
+                cfg.dir.join(log).display().to_string(),
+            )?;
+        }
+        if class != Class::Limit {
+            thrash.attempts += 1;
+            run.record.task_attempts = thrash.attempts;
+            thrash.save(cfg)?;
+            run.save()?;
+        }
+        if class != Class::Success {
+            reject_checkoff(cfg, task_id)?;
+            if class != Class::Limit {
+                crate::runtime::feedback(
+                    &cfg.dir,
+                    task_id,
+                    &resolved.contract,
+                    &format!("Worker did not complete successfully: {class:?}\n{text}"),
+                    &evidence,
+                )?;
+            }
+        }
+
+        if let Err(e) = ledger::append(&cfg.dir, next, actual_model, cost) {
             state.log(&format!("  ⚠ could not append to the spend ledger: {e}"));
         }
         if let Some(env) = &ran.envelope {
@@ -510,7 +715,8 @@ pub fn run(cfg: &Config) -> R<i32> {
             Class::Success => {
                 iter = next;
                 state.set_iteration(iter)?;
-                lwait = 0;
+                *failover.get_mut(selection.backend) = ProviderLimit::default();
+                save_limits(&failover, cfg, &state);
                 twait = 0;
                 let snippet: String = text.chars().take(160).collect();
                 state.log(&format!(
@@ -518,36 +724,8 @@ pub fn run(cfg: &Config) -> R<i32> {
                     snippet.replace('\n', " ")
                 ));
 
-                if stream::has_marker(&text, &cfg.marker) {
-                    let post_iteration = context::load(&cfg.backlog, &cfg.progress);
-                    if post_iteration.is_complete() {
-                        state.log("  marker seen and backlog has no pending task → COMPLETE");
-                        archive_backlog(cfg, &state);
-                        finish_arc(cfg, &state);
-                        state.log(&format!("=== ralph COMPLETE after {iter} iterations ==="));
-                        notify::notify(
-                            &notifier,
-                            &format!(
-                                "✅ **ralph COMPLETE** — backlog done · {}",
-                                run_scope(iter, cost_total, start.elapsed())
-                            ),
-                        );
-                        break;
-                    }
-                    let reason = if post_iteration.has_errors() {
-                        "backlog is invalid".to_string()
-                    } else {
-                        format!(
-                            "backlog still selects {}",
-                            post_iteration.target.as_deref().unwrap_or("pending work")
-                        )
-                    };
-                    state.log(&format!("  ⚠ completion marker ignored: {reason}"));
-                }
-
-                // The consolidated handoff wins; the legacy STATUS/MODEL pair
-                // still governs when it's absent. A handoff-declared model
-                // bridges into the existing one-shot MODEL path.
+                let marker = stream::has_marker(&text, &cfg.marker);
+                run.phase("auditing")?;
                 let handoff = state.take_handoff(&cfg.escalation_ladder);
                 if let Some(m) = handoff.as_ref().and_then(|h| h.model.as_deref()) {
                     state.write_model(m);
@@ -556,169 +734,289 @@ pub fn run(cfg: &Config) -> R<i32> {
                     .as_ref()
                     .and_then(|h| h.status.clone())
                     .or_else(|| state.read_status());
-                let blocked_reason = handoff.as_ref().and_then(|h| h.blocked.clone());
-
-                // Audit the commit/safety contract: a branch switch is fatal;
-                // a rewrite or committed runtime files count as no-progress.
+                state.clear_status();
+                let blocked = handoff
+                    .as_ref()
+                    .and_then(|h| h.blocked.as_deref())
+                    .unwrap_or("needs human intervention (no reason given)");
                 let breaches = git::audit_iteration(repo, &branch_before, &head_before, &cfg.dir);
-                for b in &breaches {
-                    state.log(&format!("  ⛔ contract breach: {}", b.message));
-                    notify::notify(
-                        &notifier,
-                        &format!("⛔ **ralph contract breach** — {}", b.message),
-                    );
-                    if b.fatal {
-                        state.log("=== ralph ABORTED — fatal contract breach ===");
-                        notify::notify(
-                            &notifier,
-                            &format!(
-                                "🔴 **ralph ABORTED** — {} · {}",
-                                b.message,
-                                run_scope(iter, cost_total, start.elapsed())
-                            ),
-                        );
-                        return Ok(1);
-                    }
-                }
-                let contract_breached = !breaches.is_empty();
-
+                let mut rejection = breaches
+                    .iter()
+                    .map(|b| b.message.clone())
+                    .collect::<Vec<_>>();
+                let mut fatal_breach = breaches.iter().any(|b| b.fatal);
+                let advanced = git::advanced_since(repo, &head_before);
                 let mut verdict = match status.as_deref() {
                     Some("blocked") => {
-                        let reason = blocked_reason
-                            .as_deref()
-                            .unwrap_or("needs human intervention (no reason given)");
-                        state.log(&format!(
-                            "  ⛔ iteration declared itself blocked — {reason}"
-                        ));
-                        notify::notify(&notifier, &format!("⛔ **ralph blocked** — {reason}"));
+                        rejection.push(format!("Blocked: {blocked}"));
                         Verdict::Blocked
                     }
-                    Some(s) if s != "code" => {
-                        state.log(&format!(
-                            "  · non-code pass ({s}) — excluded from progress streak"
-                        ));
-                        Verdict::Excluded
-                    }
-                    _ => {
-                        if !git::advanced_since(repo, &head_before) {
-                            state.log(
-                                "  ⚠ code iteration with no new commit — counts as no-progress",
-                            );
-                            Verdict::NoProgress
-                        } else if contract_breached {
-                            state.log(
-                                "  ⚠ commit landed but breached the contract — counts as no-progress",
-                            );
-                            Verdict::NoProgress
-                        } else {
-                            Verdict::Made
-                        }
-                    }
+                    Some("plan" | "review") => Verdict::Excluded,
+                    _ if advanced => Verdict::Made,
+                    _ => Verdict::NoProgress,
                 };
-                newly_dirty_warn(&state, repo);
-                state.clear_status();
-
-                // Opt-in adversarial judge: a refuted check-off reopens the leaf
-                // and counts as no-progress. Fail-open, and must run before
-                // curation so the leaf is still in the backlog.
-                if verdict == Verdict::Made && judge::wants_judgment(cfg, &model) {
-                    if let (Some(target), Some(title)) = (&resolved.target, &resolved.target_title)
-                    {
-                        let leaf_id = target.rsplit(" > ").next().unwrap_or(target.as_str());
-                        state.log(&format!(
-                            "  ⚖ judging check-off of {leaf_id} with {}",
-                            cfg.judge_model
-                        ));
-                        match judge::judge_iteration(cfg, repo, &head_before, leaf_id, title, &text)
-                        {
-                            Some(reason) => {
-                                state.log(&format!(
-                                    "  ⚖ judge REFUTED {leaf_id} — reopened; counts as no-progress: {reason}"
-                                ));
-                                // The agent's own `ralph done` is still sitting in the inbox;
-                                // draining it next iteration would re-close the leaf the judge
-                                // just reopened, making every refutation a no-op.
-                                match inbox::discard_done(&cfg.dir, leaf_id) {
-                                    Ok(n) if n > 0 => state.log(&format!(
-                                        "  ⚖ discarded {n} queued check-off(s) of {leaf_id}"
-                                    )),
-                                    Ok(_) => {}
-                                    Err(e) => state.log(&format!(
-                                        "  ⚠ could not discard queued check-off of {leaf_id}: {e}"
-                                    )),
-                                }
-                                notify::notify(
-                                    &notifier,
-                                    &format!(
-                                        "🔍 **judge refuted** `{leaf_id}` — reopened · {reason}"
-                                    ),
-                                );
-                                verdict = Verdict::NoProgress;
+                let closing = if task_id == "@complete" {
+                    marker
+                } else {
+                    inbox::has_done(&cfg.dir, task_id) || task_checked(cfg, task_id)
+                };
+                let checked = closing && rejection.is_empty() && !policy.command.is_empty();
+                if checked {
+                    run.phase("verifying")?;
+                    let receipt = crate::acceptance::check(&policy, task_id, &evidence)?;
+                    if !receipt.passed() {
+                        rejection.push(crate::acceptance::failure_text(&receipt, &evidence));
+                    }
+                }
+                let legacy_judge = verdict == Verdict::Made
+                    && judge::wants_judgment(cfg, &model)
+                    && task_id != "@complete";
+                let wants_review = closing && policy.review != crate::acceptance::Review::Off;
+                let mut unavailable = false;
+                let reviewed = rejection.is_empty() && (legacy_judge || wants_review);
+                if reviewed {
+                    run.phase("reviewing")?;
+                    let contract = if resolved.contract.is_empty() {
+                        iteration_prompt.clone()
+                    } else {
+                        resolved.contract.clone()
+                    };
+                    match crate::acceptance::review(
+                        &routed,
+                        &contract,
+                        &text,
+                        &thrash.base_revision,
+                        &evidence,
+                    )? {
+                        judge::Decision::Pass => state.log("  judge: pass"),
+                        judge::Decision::Refuted(reason) => {
+                            if policy.review == crate::acceptance::Review::Advisory && !legacy_judge
+                            {
+                                state.log(&format!("  advisory review: {reason} (recorded; acceptance is unchanged)"));
+                            } else {
+                                rejection.push(format!("Judge REFUTED: {reason}"));
                             }
-                            None => state.log("  ⚖ judge: pass"),
+                        }
+                        judge::Decision::Unavailable => {
+                            state.log("  judge: unavailable (not a pass)");
+                            if policy.review == crate::acceptance::Review::Required {
+                                unavailable = true;
+                                rejection.push("Required review unavailable; retry after the reviewer is usable".into());
+                            }
                         }
                     }
                 }
-
-                // Distill this turn's summary into the next carry-forward, then
-                // sweep completed backlog sections.
-                {
-                    let doc = crate::backlog::Document::parse(
-                        &std::fs::read_to_string(&cfg.backlog).unwrap_or_default(),
-                    );
-                    let upcoming = doc.upcoming_leaf_labels(3);
-                    let prev = std::fs::read_to_string(&cfg.progress).unwrap_or_default();
-                    // Synth is a small second model call per successful turn; its cost
-                    // isn't counted toward max_cost_usd, and it can block up to
-                    // SYNTH_TIMEOUT_SECS.
-                    let carry =
-                        synth::synthesize_with(&text, &upcoming, &prev, |p| synth::run(cfg, p));
-                    if std::fs::write(&cfg.progress, carry).is_err() {
-                        state.log("  ⚠ could not write carry-forward to PROGRESS");
+                // A check command/reviewer is also subject to the branch/history contract.
+                if checked || reviewed {
+                    for breach in git::audit_iteration(repo, &branch_before, &head_before, &cfg.dir)
+                    {
+                        fatal_breach |= breach.fatal;
+                        if !rejection.contains(&breach.message) {
+                            rejection.push(breach.message);
+                        }
                     }
-
+                }
+                let rejected = !rejection.is_empty();
+                if rejected {
+                    reject_checkoff(cfg, task_id)?;
+                    let reason = rejection.join("\n");
+                    state.log(&format!("  acceptance rejected: {reason}"));
+                    notify::notify(
+                        &notifier,
+                        &format!("⚠️ **ralph acceptance rejected** — {task_id}: {reason}"),
+                    );
+                    crate::runtime::feedback(
+                        &cfg.dir,
+                        task_id,
+                        &resolved.contract,
+                        &reason,
+                        &evidence,
+                    )?;
+                    if verdict != Verdict::Blocked {
+                        verdict = Verdict::NoProgress;
+                    }
+                }
+                crate::runtime::write_json(
+                    &evidence.join("outcome.json"),
+                    &serde_json::json!({
+                        "task": task_id, "contract": crate::runtime::fingerprint(&resolved.contract),
+                        "closing_requested": closing, "rejections": rejection, "revision": git::head(repo),
+                    }),
+                )?;
+                if fatal_breach || unavailable {
+                    thrash.save(cfg)?;
+                    run.finish(if fatal_breach {
+                        "Git contract breach"
+                    } else {
+                        "required review unavailable"
+                    })?;
+                    return Ok(1);
+                }
+                // Reconcile before completion, and only after rejecting failed check-offs.
+                drain_inbox(cfg, &state, &notifier);
+                let post = context::load(&cfg.backlog, &cfg.progress);
+                if !rejected && closing && (task_checked(cfg, task_id) || task_id == "@complete") {
+                    run.record.last_accepted_revision = git::head(repo);
+                    crate::runtime::write_json(
+                        &evidence.join("accepted.json"),
+                        &serde_json::json!({"task": task_id, "revision": git::head(repo)}),
+                    )?;
+                    let _ = std::fs::remove_file(cfg.dir.join("previous-attempt.json"));
+                }
+                // Completion policies get their own audit turn when the last leaf closes.
+                let final_policy_pending =
+                    task_id != "@complete" && cfg.acceptance.contains_key("@complete");
+                if marker
+                    && !rejected
+                    && post.is_complete()
+                    && !inbox::has_pending(&cfg.dir)
+                    && !final_policy_pending
+                {
+                    newly_dirty_warn(&state, repo);
+                    state.log("  marker seen and backlog has no pending task → COMPLETE");
+                    archive_backlog(cfg, &state);
+                    finish_arc(cfg, &state);
+                    let _ = std::fs::remove_file(cfg.dir.join("thrash.json"));
+                    let _ = std::fs::remove_file(cfg.dir.join("previous-attempt.json"));
+                    run.finish("complete")?;
+                    notify::notify(
+                        &notifier,
+                        &format!(
+                            "✅ **ralph COMPLETE** — backlog done · {}",
+                            run_scope(iter, cost_total, start.elapsed())
+                        ),
+                    );
+                    break;
+                }
+                if marker {
+                    state.log("  ⚠ completion marker ignored: pending work, rejected acceptance, or final policy remains");
+                }
+                newly_dirty_warn(&state, repo);
+                let backlog_after = std::fs::read_to_string(&cfg.backlog).unwrap_or_default();
+                if !rejected && verdict == Verdict::Excluded {
+                    if backlog_after == backlog_before && tree_before == git::tree(repo) {
+                        thrash.non_code += 1;
+                        if thrash.non_code >= 2 {
+                            verdict = Verdict::NoProgress;
+                            state.log("  repeated non-code pass without a changed plan or product tree → no-progress");
+                        }
+                    } else {
+                        thrash.non_code = 0;
+                    }
+                } else {
+                    thrash.non_code = 0;
+                }
+                if !rejected
+                    && verdict == Verdict::Made
+                    && tree_before.is_some()
+                    && tree_before == git::tree(repo)
+                    && backlog_before == backlog_after
+                {
+                    verdict = Verdict::NoProgress;
+                    state.log("  commit changed neither product tree nor plan → no-progress");
+                }
+                if thrash.attempts >= 4 && post.task_id == resolved.task_id {
+                    state.log(&format!("  task {} still selected after {} attempts; split/reframe if needed (task_attempt_limit is {})", task_id, thrash.attempts, cfg.task_attempt_limit));
+                }
+                run.phase("handoff")?;
+                let doc = crate::backlog::Document::parse(&backlog_after);
+                let upcoming = doc.upcoming_leaf_labels(3);
+                let prev = std::fs::read_to_string(&cfg.progress).unwrap_or_default();
+                let carry =
+                    synth::synthesize_with(&text, &upcoming, &prev, |p| synth::run(&routed, p));
+                crate::backlog_edit::write_atomic(&cfg.progress, &carry)?;
+                if !rejected {
                     let swept = curate::sweep(&cfg.backlog, &cfg.dir.join("archive"));
                     if swept > 0 {
                         state.log(&format!(
                             "  ✂ curated {swept} completed section(s) → archive"
                         ));
                     }
-
-                    // Webhook posts are free, so surface every successful turn.
-                    let summary = snippet.replace('\n', " ");
-                    notify::notify(
-                        &notifier,
-                        &iteration_report(
-                            iter,
-                            cfg.max_iterations,
-                            doc.pending_leaf_count(),
-                            ran.envelope.as_ref(),
-                            cost,
-                            &summary,
-                        ),
-                    );
                 }
-
-                if apply_verdict(&mut thrash, verdict, &model, &state, &notifier) {
+                std::fs::copy(&cfg.backlog, evidence.join("BACKLOG-after.md"))?;
+                notify::notify(
+                    &notifier,
+                    &iteration_report(
+                        iter,
+                        cfg.max_iterations,
+                        doc.pending_leaf_count(),
+                        ran.envelope.as_ref(),
+                        cost,
+                        &snippet.replace('\n', " "),
+                    ),
+                );
+                let abort = apply_verdict(&mut thrash, verdict, &model, &state, &notifier);
+                thrash.save(cfg)?;
+                run.save()?;
+                if abort {
+                    run.finish(if verdict == Verdict::Blocked {
+                        "repeated human block"
+                    } else {
+                        "no progress"
+                    })?;
                     return Ok(1);
                 }
                 if cfg.once {
-                    state.log("--once → stop");
+                    run.finish("single iteration finished")?;
                     break;
                 }
             }
             Class::Limit => {
-                // Pure wait — never feeds thrash; unlimited retries.
+                // Preserve one-shot sizing across quota retries; never feed thrash.
+                retry_model = Some(model.clone());
                 let snippet: String = text.chars().take(160).collect();
                 state.log(&format!(
                     "  USAGE/RATE LIMIT — {}",
                     snippet.replace('\n', " ")
                 ));
-                lwait = next_backoff(lwait, cfg.limit_wait, cfg.limit_wait_max);
+                let now = Utc::now();
+                let depleted = crate::classify::depleted(&text);
+                let limit = failover.get_mut(selection.backend);
+                limit.backoff = next_backoff(limit.backoff, cfg.limit_wait, cfg.limit_wait_max);
+                let fallback = if depleted && alternate_usable(cfg, &model) {
+                    cfg.failover_cooldown
+                } else {
+                    limit.backoff
+                };
+                let parsed = crate::limits::reset_at(&text, now);
+                // Saturating arithmetic keeps malformed configuration from wrapping deadlines.
+                limit.retry_at = parsed
+                    .map(|at| {
+                        at.timestamp()
+                            .saturating_add(i64::from(at.timestamp_subsec_nanos() > 0))
+                    })
+                    .unwrap_or_else(|| {
+                        now.timestamp()
+                            .saturating_add(fallback.min(i64::MAX as u64) as i64)
+                    });
+                limit.allow_failover = depleted;
                 state.log(&format!(
-                    "  limit backoff: sleeping {lwait}s, then retry iter {next}"
+                    "  {} limited until {} ({}); independent provider timer saved",
+                    selection.backend.executable(),
+                    reset_label(limit.retry_at),
+                    if parsed.is_some() {
+                        "from provider output"
+                    } else {
+                        "configured fallback"
+                    }
                 ));
-                thread::sleep(Duration::from_secs(lwait));
+                save_limits(&failover, cfg, &state);
+                let next_cfg = route_config(cfg, &model, &failover);
+                let next_selection = backend::resolve(&next_cfg, &model);
+                if next_selection.backend != selection.backend
+                    && failover.get(next_selection.backend).retry_at <= Utc::now().timestamp()
+                {
+                    state.log(&format!(
+                        "  provider failover: {} / {} → {} / {}; retry iter {next}",
+                        selection.backend.executable(),
+                        actual_model,
+                        next_selection.backend.executable(),
+                        next_selection
+                            .model
+                            .as_deref()
+                            .unwrap_or("configured default"),
+                    ));
+                }
             }
             Class::Transient => {
                 let reason = if ran.killed {
@@ -729,16 +1027,31 @@ pub fn run(cfg: &Config) -> R<i32> {
                 };
                 state.log(&format!("  {reason}"));
                 // A transient (including a timeout strike) is no-progress.
-                if apply_verdict(&mut thrash, Verdict::NoProgress, &model, &state, &notifier) {
+                let abort =
+                    apply_verdict(&mut thrash, Verdict::NoProgress, &model, &state, &notifier);
+                thrash.save(cfg)?;
+                if abort {
+                    run.finish("repeated transient failures")?;
                     return Ok(1);
                 }
                 twait = next_backoff(twait, cfg.transient_wait, cfg.transient_wait_max);
                 state.log(&format!(
                     "  transient backoff: sleeping {twait}s, then retry iter {next}"
                 ));
-                thread::sleep(Duration::from_secs(twait));
+                run.phase("waiting_for_retry")?;
+                let deadline = Instant::now() + Duration::from_secs(twait);
+                while Instant::now() < deadline && !state.stop_requested() {
+                    if cfg.max_duration > 0 && start.elapsed().as_secs() >= cfg.max_duration {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
             }
             Class::Fatal => {
+                run.finish(&format!(
+                    "fatal provider error: {}",
+                    crate::runtime::bounded(&text, 512)
+                ))?;
                 let snippet: String = text.chars().take(200).collect();
                 state.log(&format!(
                     "=== ralph ABORTED (fatal) — {} ===",
@@ -749,6 +1062,35 @@ pub fn run(cfg: &Config) -> R<i32> {
         }
     }
     Ok(0)
+}
+
+fn task_checked(cfg: &Config, id: &str) -> bool {
+    let text = std::fs::read_to_string(&cfg.backlog).unwrap_or_default();
+    crate::backlog::Document::parse(&text)
+        .tasks
+        .iter()
+        .any(|t| t.id == id && t.checked)
+}
+
+fn reject_checkoff(cfg: &Config, id: &str) -> R<()> {
+    if id == "@complete" {
+        return Ok(());
+    }
+    // Also discard ancestor closure requests; otherwise a refuted child can be
+    // re-closed by a queued parent integration check-off.
+    let text = std::fs::read_to_string(&cfg.backlog).unwrap_or_default();
+    let doc = crate::backlog::Document::parse(&text);
+    let mut index = doc.tasks.iter().position(|t| t.id == id);
+    inbox::discard_done(&cfg.dir, id)?;
+    while let Some(i) = index {
+        inbox::discard_done(&cfg.dir, &doc.tasks[i].id)?;
+        index = doc.tasks[i].parent;
+    }
+    if doc.tasks.iter().any(|t| t.id == id && t.checked) {
+        let text = crate::backlog_edit::apply_uncheck(&text, id)?;
+        crate::backlog_edit::write_atomic(&cfg.backlog, &text)?;
+    }
+    Ok(())
 }
 
 /// On completion, archive whatever backlog remains. With incremental curation the
@@ -844,6 +1186,62 @@ fn newly_dirty_warn(state: &State, repo: &Path) {
     }
 }
 
+fn reset_label(timestamp: i64) -> String {
+    chrono::DateTime::from_timestamp(timestamp, 0)
+        .map(|at| at.to_rfc3339())
+        .unwrap_or_else(|| timestamp.to_string())
+}
+
+fn save_limits(limits: &Limits, cfg: &Config, state: &State) {
+    if let Err(e) = limits.save(&cfg.dir) {
+        state.log(&format!("  ⚠ could not save provider limits: {e}"));
+    }
+}
+
+fn alternate_usable(cfg: &Config, model: &str) -> bool {
+    let primary = backend::resolve(cfg, model);
+    let alternate = backend::counterpart(cfg, model, &primary);
+    cfg.provider_failover
+        && !primary.exclusive
+        && which(alternate.backend.executable()).is_some()
+        && backend::check_cost_budget(cfg, &alternate).is_ok()
+}
+
+/// Long quota windows must remain responsive to STOP and wall-clock budgets.
+fn wait_for_limit(cfg: &Config, state: &State, until: i64, start: Instant) {
+    while Utc::now().timestamp() < until {
+        if state.stop_requested()
+            || (cfg.max_duration > 0 && start.elapsed().as_secs() >= cfg.max_duration)
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Route workers and their helpers away from a depleted provider.
+fn route_config(cfg: &Config, model: &str, failover: &Limits) -> Config {
+    let mut routed = cfg.clone();
+    let primary = backend::resolve(cfg, model);
+    if cfg.provider_failover
+        && !primary.exclusive
+        && failover.route(primary.backend, Utc::now().timestamp())
+    {
+        let alternate = backend::counterpart(cfg, model, &primary);
+        if which(alternate.backend.executable()).is_some()
+            && backend::check_cost_budget(cfg, &alternate).is_ok()
+        {
+            routed.failover_from = Some(primary.backend);
+            // CLI-specific options must not leak into the other CLI grammar.
+            if let Some(effort) = extra_effort(&cfg.extra_args) {
+                routed.effort = effort;
+            }
+            routed.extra_args.clear();
+        }
+    }
+    routed
+}
+
 /// Spawn an iteration and collect its result.
 fn run_one(cfg: &Config, state: &State, n: u64, model: &str, prompt: &str) -> R<Ran> {
     let log_path = state.new_iter_log(n)?;
@@ -861,7 +1259,7 @@ fn run_one(cfg: &Config, state: &State, n: u64, model: &str, prompt: &str) -> R<
     let args = if selection.backend == Backend::Codex {
         let mut args =
             backend::codex_args(&selection, (!cfg.yolo).then_some("workspace-write"), true);
-        args.extend(cfg.extra_args.iter().cloned());
+        args.extend(backend::extra_args(cfg, &selection));
         args.push("-".into());
         args
     } else {
@@ -995,7 +1393,7 @@ fn run_one(cfg: &Config, state: &State, n: u64, model: &str, prompt: &str) -> R<
 
     // Consume the stream on this thread (blocks until EOF / child exit / kill).
     let mut raw = std::fs::OpenOptions::new().append(true).open(&log_path)?;
-    let mut status = IterStatus::new(n, model);
+    let mut status = IterStatus::new(n, selection.model.as_deref().unwrap_or(model));
     state.write_live_status(&status.render());
     let reader = BufReader::new(stdout);
     let hb_emit = hb_shared.clone();
@@ -1026,16 +1424,19 @@ fn run_one(cfg: &Config, state: &State, n: u64, model: &str, prompt: &str) -> R<
     }
 
     let killed = killed.load(Ordering::SeqCst);
-    let envelope = if killed {
+    let mut envelope = if killed {
         None
-    } else if selection.backend == Backend::Codex
-        && envelope.is_none()
-        && !diagnostic.trim().is_empty()
-    {
+    } else if envelope.is_none() && !diagnostic.trim().is_empty() {
         Some(stream::error_envelope(diagnostic.trim()))
     } else {
         envelope
     };
+    if let Some(env) = envelope.as_mut().filter(|env| env.is_error) {
+        if !diagnostic.trim().is_empty() && !env.result.contains(diagnostic.trim()) {
+            env.result.push('\n');
+            env.result.push_str(diagnostic.trim());
+        }
+    }
     state.write_live_status(&format!("iter {n} finished (killed={killed})\n"));
     if !killed {
         match prompt_result {
@@ -1076,7 +1477,7 @@ fn claude_args(cfg: &Config, requested: &str) -> Vec<String> {
     args.push("--model".into());
     args.push(model.to_string());
     let fallback = backend::resolve(cfg, &cfg.fallback_model);
-    if fallback.backend == Backend::Claude {
+    if !selection.exclusive && fallback.backend == Backend::Claude {
         if let Some(fb) = fallback.model.filter(|fb| !fb.is_empty() && fb != model) {
             args.extend(["--fallback-model".into(), fb]);
         }
@@ -1088,12 +1489,12 @@ fn claude_args(cfg: &Config, requested: &str) -> Vec<String> {
         args.push("--exclude-dynamic-system-prompt-sections".into());
     }
     if extra_effort(&cfg.extra_args).is_none() {
-        if let Some(effort) = selection.effort {
+        if let Some(effort) = &selection.effort {
             args.push("--effort".into());
-            args.push(effort);
+            args.push(effort.clone());
         }
     }
-    args.extend(cfg.extra_args.iter().cloned());
+    args.extend(backend::extra_args(cfg, &selection));
     args
 }
 
@@ -1148,14 +1549,7 @@ fn kill_group(pid: u32) {
 
 /// Minimal PATH lookup for a program (avoids a `which` dependency).
 fn which(prog: &str) -> Option<std::path::PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let cand = dir.join(prog);
-        if cand.is_file() {
-            return Some(cand);
-        }
-    }
-    None
+    crate::doctor::executable(prog)
 }
 
 #[cfg(test)]
@@ -1317,6 +1711,28 @@ mod tests {
         assert_eq!(choose_model(&cfg, None, Some("haiku")).model, "haiku");
         // No decoration → configured default.
         assert_eq!(choose_model(&cfg, None, None).model, cfg.model);
+    }
+
+    #[test]
+    fn exclusive_task_survives_escalation_and_concrete_hints_bypass_ladder() {
+        let cfg = Config::default();
+        assert_eq!(
+            choose_model(&cfg, Some("opus".into()), Some("!astra")).model,
+            "!astra"
+        );
+        assert_eq!(choose_model(&cfg, None, Some("fable")).model, "fable");
+        let mut thrash = Thrash::new(&cfg);
+        for _ in 0..cfg.abort_after - 1 {
+            assert_eq!(
+                thrash.record(Verdict::NoProgress, "!fable"),
+                Action::Continue
+            );
+        }
+        assert!(matches!(
+            thrash.record(Verdict::NoProgress, "!fable"),
+            Action::Abort(_)
+        ));
+        assert!(thrash.forced_model().is_none());
     }
 
     #[test]

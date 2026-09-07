@@ -101,7 +101,8 @@ impl Ralph {
     /// `ralph stop [--now]` — graceful halt after the current iteration, or
     /// `--now` to also signal the running loop.
     pub async fn stop(&self, now: bool) -> std::io::Result<Output> {
-        let mut a = argv(["stop"]);
+        // Discord acknowledges the request immediately; CLI stop waits by default.
+        let mut a = argv(["stop", "--async"]);
         if now {
             a.push("--now".into());
         }
@@ -267,7 +268,10 @@ mod tests {
     fn new_captures_the_loops_launch_profile() {
         let r = Ralph::new(&loop_with(&["--model", "opus"]));
         assert_eq!(r.working_dir, PathBuf::from("/repo"));
-        assert_eq!(r.ralph_args, vec!["--model".to_string(), "opus".to_string()]);
+        assert_eq!(
+            r.ralph_args,
+            vec!["--model".to_string(), "opus".to_string()]
+        );
         assert_eq!(r.webhook.as_deref(), Some("https://hook"));
     }
 
@@ -281,7 +285,10 @@ mod tests {
         // A relative --dir travels resolved, since the callee's own default is
         // relative to its cwd and would otherwise be re-relativized.
         let r = Ralph::new(&loop_with(&["--dir", "state"]));
-        assert_eq!(r.relocation, vec![("RALPH_DIR", PathBuf::from("/repo/state"))]);
+        assert_eq!(
+            r.relocation,
+            vec![("RALPH_DIR", PathBuf::from("/repo/state"))]
+        );
 
         let r = Ralph::new(&loop_with(&["--config", "/etc/ralph.toml"]));
         assert_eq!(
@@ -303,7 +310,9 @@ mod tests {
         // No --dir/--config means ralph's own resolution (its config file, then
         // ralphd's environment) must keep deciding — pinning the defaults here
         // would override a `dir` set in the repo's ralph.toml.
-        assert!(Ralph::new(&loop_with(&["--model", "opus"])).relocation.is_empty());
+        assert!(Ralph::new(&loop_with(&["--model", "opus"]))
+            .relocation
+            .is_empty());
         assert!(Ralph::new(&loop_with(&[])).relocation.is_empty());
     }
 }

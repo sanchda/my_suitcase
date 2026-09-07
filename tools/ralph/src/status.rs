@@ -31,6 +31,9 @@ pub struct Report {
     pub pending_leaf_count: usize,
     pub current: Option<CurrentTask>,
     pub upcoming: Vec<String>,
+    pub running: bool,
+    pub run: Option<crate::runtime::Record>,
+    pub diagnostics: Vec<String>,
 }
 
 /// Build the snapshot from a parsed backlog and the current iteration counter.
@@ -55,6 +58,9 @@ fn build_report(doc: &Document, iteration: u64) -> Report {
         pending_leaf_count: doc.pending_leaf_count(),
         current,
         upcoming,
+        running: false,
+        run: None,
+        diagnostics: Vec::new(),
     }
 }
 
@@ -66,18 +72,43 @@ pub fn run(args: &[String]) -> R<i32> {
         .filter(|a| a.as_str() != "--json")
         .cloned()
         .collect();
-    let cfg: Config = crate::config::load_base(&rest)?;
-    let iteration = read_iteration(&cfg.dir);
-    let text = std::fs::read_to_string(&cfg.backlog)
-        .map_err(|e| format!("{}: cannot read backlog: {e}", cfg.backlog.display()))?;
-    let doc = Document::parse(&text);
-    if doc.has_errors() {
-        return Err("backlog schema is invalid; run `ralph lint` for details".into());
+    let mut cfg: Config = crate::config::load_base(&rest)?;
+    if crate::config::apply_args(&mut cfg, &rest)? {
+        println!("Usage: ralph status [--json] [--dir <path>] [--config <file>]");
+        return Ok(0);
     }
-    let report = build_report(&doc, iteration);
+    let iteration = read_iteration(&cfg.dir);
+    let text = match std::fs::read_to_string(&cfg.backlog) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => crate::backlog_edit::empty_backlog(),
+        Err(e) => {
+            return Err(format!("{}: cannot read backlog: {e}", cfg.backlog.display()).into())
+        }
+    };
+    let doc = Document::parse(&text);
+    let invalid = cfg.backlog.exists() && doc.has_errors();
+    let mut report = build_report(&doc, iteration);
+    report.running = crate::pidguard::read(&crate::supervisor::pidfile(&cfg.dir))
+        .is_some_and(crate::pidguard::is_alive);
+    report.run = crate::runtime::read(&cfg.dir);
+    if invalid {
+        report.diagnostics = doc.issues.iter().map(|i| i.message.clone()).collect();
+    }
     if json {
         println!("{}", serde_json::to_string(&report)?);
     } else {
+        if let Some(run) = &report.run {
+            println!(
+                "{} · {} · task attempts {}{}",
+                run.run_id,
+                run.phase,
+                run.task_attempts,
+                run.terminal_reason
+                    .as_ref()
+                    .map(|r| format!(" · {r}"))
+                    .unwrap_or_default()
+            );
+        }
         match &report.current {
             Some(c) => println!(
                 "iter {} · {} pending · current: {}",
@@ -88,8 +119,11 @@ pub fn run(args: &[String]) -> R<i32> {
         for label in &report.upcoming {
             println!("  next: {label}");
         }
+        for detail in &report.diagnostics {
+            println!("  diagnostic: {detail}");
+        }
     }
-    Ok(0)
+    Ok(if invalid { 1 } else { 0 })
 }
 
 #[cfg(test)]

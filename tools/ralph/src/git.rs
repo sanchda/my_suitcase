@@ -29,6 +29,11 @@ pub fn head(dir: &Path) -> Option<String> {
     git(dir, &["rev-parse", "HEAD"]).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
 
+pub fn tree(dir: &Path) -> Option<String> {
+    git(dir, &["rev-parse", "HEAD^{tree}"])
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
 /// Current branch name; `None` when detached, unborn, or not a repo.
 pub fn branch(dir: &Path) -> Option<String> {
     git(dir, &["symbolic-ref", "--short", "-q", "HEAD"])
@@ -105,11 +110,15 @@ pub fn audit_iteration(
         return Vec::new();
     }
     let mut breaches = Vec::new();
-    if let (Some(before), Some(now)) = (branch_before, branch(dir)) {
-        if before != &now {
+    if let Some(before) = branch_before {
+        let now = branch(dir);
+        if now.as_ref() != Some(before) {
             breaches.push(Breach {
                 fatal: true,
-                message: format!("agent switched branches: `{before}` → `{now}`"),
+                message: format!(
+                    "agent switched branches: `{before}` → `{}`",
+                    now.as_deref().unwrap_or("detached HEAD")
+                ),
             });
         }
     }

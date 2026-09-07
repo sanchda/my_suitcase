@@ -29,9 +29,12 @@ const RALPH_TOML_STUB: &str = "\
 # iteration_timeout = \"45m\"
 # escalate_after = 2
 # abort_after = 4
+# task_attempt_limit = 0        # 0 = diagnose only; optional per-task attempt cap
 # backlog = \".ralph/BACKLOG.md\"
 # progress = \".ralph/PROGRESS.md\"
 # effort = \"auto\" # haiku=low, sonnet=medium, opus=high; or set one level
+# provider_failover = true      # automatic Claude ↔ Codex on depleted usage
+# failover_cooldown = \"30m\"      # fallback wait when depletion has no reset time
 # extra_args = [\"--add-dir\", \"/some/path\"]
 # Self-contained prompt only: omit hooks/plugins/MCP/memory and unused tools.
 # extra_args = [\"--safe-mode\", \"--tools\", \"Bash,Edit,Read,Write\"]
@@ -55,7 +58,7 @@ routes that leaf to a model tier. See `ralph schema`; validate with
 
 - [ ] **1 — First item.**
   Describe the bounded outcome.
-  Verify: {{{{exact command and success condition}}}}
+  Verify: {{{{observable success criterion or targeted check}}}}
 ",
         crate::backlog::SCHEMA_MARKER
     )
@@ -94,7 +97,7 @@ pub fn run() -> R<i32> {
         eprintln!("  ⚠ {w}");
     }
     println!(
-        "\n.ralph/ ready. See `ralph hints` and `ralph schema`, fill in PROMPT.md and BACKLOG.md, then run `ralph lint`."
+        "\n.ralph/ ready. See `ralph hints` and `ralph schema`, fill in PROMPT.md and BACKLOG.md, then run `ralph lint` and `ralph doctor`."
     );
     Ok(0)
 }

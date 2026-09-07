@@ -111,7 +111,10 @@ mod tests {
 
     #[test]
     fn splits_at_line_boundaries() {
-        let text = (0..100).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let text = (0..100)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let chunks = chunk_message(&text, 120);
         assert!(chunks.len() > 1);
         assert_well_formed(&chunks, 120);

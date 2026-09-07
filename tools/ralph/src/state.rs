@@ -166,7 +166,11 @@ impl State {
     pub fn new_iter_log(&self, n: u64) -> R<PathBuf> {
         let name = format!("logs/iter-{:04}-{}.log", n, timestamp());
         let full = self.dir.join(&name);
-        fs::File::create(&full)?;
+        // Immediate provider retries can share a timestamp; keep both attempts.
+        fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&full)?;
         // Best-effort: ignore symlink failures.
         let link = self.path("current.log");
         let _ = fs::remove_file(&link);

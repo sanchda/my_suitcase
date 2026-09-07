@@ -38,12 +38,17 @@ slot immediately after the closing `**`, closed by an em dash before the prose:
   Verify: cargo test
 ```
 
-Only `@haiku`, `@sonnet`, and `@opus` are accepted, at most one per task, and
-only in that slot — an `@opus` anywhere else is prose. A misspelling, a delimiter
+Tier decorations (`@haiku`, `@sonnet`, `@opus`) and known model families or
+aliases (`@astra`, `@fable`, `@claude-fable-5-1`) are accepted. Use `!astra` or
+`!fable` (also spelled `@!astra` or `@!fable`) to require that model exclusively:
+no provider failover, overload fallback, or automatic model escalation. An
+exclusive task annotation outranks one-shot overrides. Fable resolves to
+`claude-fable-5-1`, Astra to `gpt-6-astra`; explicit versioned IDs stay unchanged.
+Each task may have at most one decoration, and only in that slot — an `@opus` anywhere else is prose. A misspelling, a delimiter
 that is not ` — `, or a leftover v1 parenthetical such as `(opus/pedagogy.)` in
 the body is a lint error rather than a silently dropped route.
 
-The slot is position-anchored, so task prose may not begin with `@`: in
+The slot is position-anchored, so task prose may not begin with `@` or `!`: in
 `**1 — Notify the team.** @channel — ping everyone.` the `@channel` is read as a
 decoration and rejected. Rephrase so `@` is not the first token — `**1 — Notify
 the team.** Ping @channel before the release.`

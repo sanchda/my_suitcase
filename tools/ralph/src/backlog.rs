@@ -465,19 +465,21 @@ fn delimiter_error(cursor: &str) -> String {
 /// early, and a decoration after that is never reached.
 fn split_decoration(rest: &str) -> Result<(Option<String>, &str), String> {
     let rest = rest.trim_start();
-    if !rest.starts_with('@') {
+    if !rest.starts_with(['@', '!']) {
         return Ok((None, rest));
     }
     let mut tiers: Vec<&str> = Vec::new();
     let mut cursor = rest;
-    while let Some(after_at) = cursor.strip_prefix('@') {
+    while cursor.starts_with(['@', '!']) {
+        let after_at = cursor.strip_prefix('@').unwrap_or(cursor);
         let end = after_at
-            .find(|ch: char| !ch.is_ascii_alphanumeric())
+            .find(|ch: char| ch.is_whitespace() || ch == '—' || ch == '–')
             .unwrap_or(after_at.len());
         let word = &after_at[..end];
-        if !MODEL_TIERS.contains(&word) {
+        let model = word.strip_prefix('!').unwrap_or(word);
+        if !crate::backend::valid_model(word) || crate::backend::infer_model(model).is_none() {
             return Err(format!(
-                "unknown decoration `@{word}`; expected @haiku, @sonnet, or @opus"
+                "unknown decoration `@{word}`; expected a model such as @opus, @astra, !astra, or !fable"
             ));
         }
         tiers.push(word);
@@ -729,6 +731,25 @@ mod tests {
         assert_eq!(doc.model_hint(idx("1")).as_deref(), Some("opus"));
         assert_eq!(doc.model_hint(idx("2")).as_deref(), Some("haiku"));
         assert_eq!(doc.model_hint(idx("3")), None);
+    }
+
+    #[test]
+    fn model_annotations_support_exclusive_and_concrete_models() {
+        for (annotation, expected) in [
+            ("!astra", "!astra"),
+            ("!fable", "!fable"),
+            ("@!fable", "!fable"),
+            ("@astra", "astra"),
+            ("@claude-fable-5-1", "claude-fable-5-1"),
+        ] {
+            let doc = Document::parse(&format!(
+                "{SCHEMA_MARKER}\n- [ ] **1 — Work.** {annotation} — implement.\n  Verify: true\n"
+            ));
+            assert_eq!(doc.model_hint(0).as_deref(), Some(expected));
+        }
+        for annotation in ["!", "!!astra", "!fable !astra", "!fable @opus"] {
+            assert!(split_decoration(&format!("{annotation} — implement.")).is_err());
+        }
     }
 
     #[test]

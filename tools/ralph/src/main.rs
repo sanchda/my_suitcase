@@ -7,6 +7,7 @@
 //! See `docs/superpowers/specs/` for the design and `README.md` for usage. The
 //! driving files (PROMPT/VISION/BACKLOG/PROGRESS) are local to the target repo.
 
+mod acceptance;
 mod backend;
 mod backlog;
 mod backlog_cli;
@@ -16,6 +17,7 @@ mod config;
 mod context;
 mod control;
 mod curate;
+mod doctor;
 mod git;
 mod hints;
 mod inbox;
@@ -23,10 +25,12 @@ mod init;
 mod judge;
 mod learn;
 mod ledger;
+mod limits;
 mod model;
 mod msg;
 mod notify;
 mod pidguard;
+mod runtime;
 mod schema;
 mod state;
 mod status;
@@ -46,12 +50,13 @@ Usage: ralph [options]             Run the loop here until the backlog completes
 Setup and lifecycle
   ralph init                       Scaffold .ralph/ in the current repo
   ralph start [options]            Ask a running ralphd to launch the loop
-  ralph stop [--now]               Halt after the current task; --now kills it too
+  ralph stop [--async] [--force]    Wait for a graceful stop; --force halts now
 
 Inspect
   ralph status [--json]            Backlog frontier: iteration, current, upcoming
   ralph lint [options]             Validate backlog schema and task routing
-  ralph brief [options]            Print the runner-resolved iteration brief
+  ralph brief [--full] [options]   Resolved brief, or the exact composed prompt
+  ralph doctor [--json] [options]  Check setup without calling models or tests
 
 Backlog — schema-checked, and queued while a loop runs (see below)
   ralph add [<id>] <title> [--verify <cmd>]
@@ -85,6 +90,8 @@ Options
   --synth-model <name>     Carry-forward / learning model
   --judge-model <name>     Adversarial judge model
   --effort <level>         auto, inherit, low, medium, high, xhigh, or max
+  --provider-failover <bool> Switch providers on depleted usage (default true)
+  --failover-cooldown <dur> Fallback wait when reset time is unknown (default 30m)
   --fallback-model <name>  Overloaded-fallback model (\"\" disables)
   --max-iterations <n>     Stop after n iterations (0 = unlimited)
   --max-cost <usd>         Stop once cumulative cost reaches this (0 = off)
@@ -102,9 +109,9 @@ Options
   -h, --help               This help
 
 Config-file-only settings (.ralph/ralph.toml — no flag; see README):
-  tier_models, judge_tiers, escalation_ladder,
+  tier_models, failover_models, judge_tiers, escalation_ladder,
   limit_wait[_max], transient_wait[_max], extra_args,
-  budget_usd, budget_window
+  budget_usd, budget_window, acceptance, task_attempt_limit
 
 Backlog mutations never write BACKLOG.md in place. While a loop is running they
 queue to .ralph/inbox/ and apply at the next iteration boundary — so `add` and
@@ -156,6 +163,9 @@ fn run() -> R<i32> {
     if argv.first().map(String::as_str) == Some("status") {
         return status::run(&argv[1..]);
     }
+    if argv.first().map(String::as_str) == Some("doctor") {
+        return doctor::run(&argv[1..]);
+    }
     if argv.first().map(String::as_str) == Some("backlog") {
         return backlog_edit::run(&argv[1..]);
     }
@@ -181,6 +191,13 @@ fn run() -> R<i32> {
     let subcommand = matches!(command, Some("brief" | "lint" | "start"));
     let inspect_only = matches!(command, Some("brief" | "lint"));
     let args = if subcommand { &argv[1..] } else { &argv[..] };
+    let full = command == Some("brief") && args.iter().any(|a| a == "--full");
+    let filtered = args
+        .iter()
+        .filter(|a| !full || a.as_str() != "--full")
+        .cloned()
+        .collect::<Vec<_>>();
+    let args = filtered.as_slice();
 
     // Resolve the config path first (from flags/env), load the file, then apply
     // the full precedence chain: defaults ← file ← env ← flags.
@@ -204,7 +221,16 @@ fn run() -> R<i32> {
     if inspect_only {
         let resolved = context::load(&cfg.backlog, &cfg.progress);
         if command == Some("brief") {
-            print!("{}", resolved.render());
+            if full {
+                let prompt = context::full_prompt(&cfg, &resolved)?;
+                eprintln!("ralph: full prompt {} bytes; task {}; carry-forward capped at {} bytes; leaf excerpt 8192 bytes, ancestors 4096 bytes total", prompt.len(), resolved.task_id.as_deref().unwrap_or("@complete"), synth::MAX_CARRY_FORWARD_BYTES);
+                for warning in resolved.warnings() {
+                    eprintln!("ralph: {warning}");
+                }
+                print!("{prompt}");
+            } else {
+                print!("{}", resolved.render());
+            }
         } else {
             print!("{}", resolved.lint_report());
         }

@@ -36,6 +36,36 @@ const LIMIT_WORDS: &[&str] = &[
     "rate limit",
 ];
 
+/// Subscription/credit exhaustion merits switching accounts/providers. A plain
+/// 429 or burst rate limit still uses the normal short-term retry policy.
+pub fn depleted(text: &str) -> bool {
+    let text = normalize(&text.replace('_', " ").replace('’', "'"));
+    contains_any(
+        &text,
+        &[
+            "usage limit",
+            "credit balance",
+            "out of credit",
+            "insufficient credit",
+            "insufficient quota",
+            "insufficient funds",
+            "quota exceeded",
+            "quota has been exceeded",
+            "exceeded your current quota",
+            "credits exhausted",
+            "credits depleted",
+            "hit your limit",
+            "reached your limit",
+            "weekly limit",
+            "monthly limit",
+            "daily limit",
+            "reset at",
+            "resets at",
+            "will reset",
+        ],
+    )
+}
+
 /// Words meaning a transient/retryable failure.
 const TRANSIENT_WORDS: &[&str] = &[
     "overloaded",
@@ -74,7 +104,7 @@ pub fn classify(is_error: bool, status: Option<u16>, text: &str) -> Class {
         return Class::Success;
     }
     let t = normalize(text);
-    if contains_any(&t, LIMIT_WORDS) {
+    if depleted(text) || contains_any(&t, LIMIT_WORDS) {
         return Class::Limit;
     }
     match status {
@@ -109,6 +139,30 @@ fn contains_any(haystack: &str, needles: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exhaustion_is_distinct_from_burst_limits_and_other_failures() {
+        for text in [
+            "You've hit your limit · resets 5pm",
+            "You’ve hit your limit",
+            "insufficient_quota",
+            "usage\nlimit reached",
+            "exceeded your current quota",
+            "credit balance is too low",
+        ] {
+            assert!(depleted(text), "{text}");
+            assert_eq!(classify(true, None, text), Class::Limit);
+            assert_eq!(classify(false, None, text), Class::Success);
+        }
+        for text in [
+            "rate limit exceeded",
+            "too many requests",
+            "overloaded",
+            "invalid api key",
+        ] {
+            assert!(!depleted(text), "{text}");
+        }
+    }
 
     #[test]
     fn not_error_is_success() {

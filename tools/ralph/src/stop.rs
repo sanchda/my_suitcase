@@ -1,15 +1,16 @@
-//! `ralph stop [--now]` — request a graceful halt, and optionally signal the
-//! running loop so a hung turn doesn't outlast the request.
+//! Stop requests wait for the recorded loop to exit unless `--async` is set.
 
 use crate::state::State;
 use crate::{config, pidguard, supervisor, R};
 use std::path::Path;
 
 const USAGE: &str = "\
-Usage: ralph stop [--now] [--dir <path>] [--config <file>]
+Usage: ralph stop [--async] [--force|--now] [--dir <path>] [--config <file>]
 
-Writes STOP, honored after the current task. --now also SIGTERMs the running
-loop, which tears down its claude session on the way out.
+Writes STOP and waits for the current loop to exit after its current task.
+--async returns immediately after requesting the stop.
+--force (alias --now) also signals the loop to tear down its active process tree.
+With no running loop, returns immediately; STOP remains for the next launch.
 ";
 
 /// SIGTERM the recorded loop, if one is alive. `Ok(None)` means nothing to
@@ -22,17 +23,21 @@ fn signal_loop(dir: &Path) -> R<Option<u32>> {
     // invoking shell's process group and would take the shell down with it.
     if unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) } != 0 {
         let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ESRCH) {
+            return Ok(None);
+        }
         return Err(format!("signalling loop pid {pid}: {err}").into());
     }
     Ok(Some(pid))
 }
 
 pub fn run(args: &[String]) -> R<i32> {
-    let now = args.iter().any(|a| a == "--now");
+    let now = args.iter().any(|a| a == "--now" || a == "--force");
+    let asynchronous = args.iter().any(|a| a == "--async");
     // Strip our own flag before config resolution, which rejects unknown args.
     let rest: Vec<String> = args
         .iter()
-        .filter(|a| a.as_str() != "--now")
+        .filter(|a| !matches!(a.as_str(), "--now" | "--force" | "--async"))
         .cloned()
         .collect();
     let mut cfg = config::load_base(&rest)?;
@@ -43,18 +48,39 @@ pub fn run(args: &[String]) -> R<i32> {
     config::validate(&cfg)?;
 
     let state = State::open(&cfg.dir)?;
+    let pidfile = supervisor::pidfile(&cfg.dir);
+    let running = pidguard::running(&pidfile);
     state.request_stop()?;
+    if running.is_some() {
+        if let Err(e) = crate::runtime::note_stop(&cfg.dir, now) {
+            eprintln!("ralph: could not record stop diagnostic: {e}");
+        }
+    }
     println!(
         "ralph: stop requested → {} (loop halts after the current task; suppresses --restart)",
         cfg.dir.join("STOP").display()
     );
     if now {
         match signal_loop(&cfg.dir)? {
-            Some(pid) => println!("ralph: SIGTERM → pid {pid} (loop and claude stop now)"),
+            Some(pid) => {
+                println!("ralph: SIGTERM → pid {pid} (loop and active subprocesses stop now)")
+            }
             None => println!(
                 "ralph: no live loop recorded in {} — STOP will be honored when one starts",
                 supervisor::pidfile(&cfg.dir).display()
             ),
+        }
+    }
+    if !asynchronous {
+        if let Some(pid) = running {
+            println!("ralph: waiting for pid {pid} to stop (use --async to return immediately)");
+            while pidguard::read(&pidfile) == Some(pid) && pidguard::is_alive(pid) {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            if !pidguard::read(&pidfile).is_some_and(pidguard::is_alive) {
+                state.clear_stop();
+            }
+            println!("ralph: loop stopped");
         }
     }
     Ok(0)

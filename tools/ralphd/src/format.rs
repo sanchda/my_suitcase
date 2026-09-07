@@ -2,7 +2,8 @@
 
 use serde_json::Value;
 
-/// `running` is ralphd's own pid-liveness verdict — ralph does not know it.
+/// Retains pid-liveness fallback for older Ralph binaries; newer snapshots also
+/// carry the runner's lifecycle phase and terminal reason.
 pub fn status_message(json: &str, running: bool) -> String {
     let v: Value = match serde_json::from_str(json) {
         Ok(v) => v,
@@ -19,6 +20,23 @@ pub fn status_message(json: &str, running: bool) -> String {
         "⏸️ idle"
     };
     let mut out = format!("**ralph** — {run} · iter {iter} · {pending} pending\n");
+    if let Some(record) = v.get("run").and_then(Value::as_object) {
+        if let Some(phase) = record.get("phase").and_then(Value::as_str) {
+            out.push_str(&format!("**phase:** {phase}"));
+            if let Some(attempts) = record.get("task_attempts").and_then(Value::as_u64) {
+                out.push_str(&format!(" · {attempts} task attempts"));
+            }
+            out.push('\n');
+        }
+        if let Some(reason) = record.get("terminal_reason").and_then(Value::as_str) {
+            out.push_str(&format!("**outcome:** {reason}\n"));
+        }
+    }
+    if let Some(diagnostics) = v.get("diagnostics").and_then(Value::as_array) {
+        for detail in diagnostics.iter().filter_map(Value::as_str).take(3) {
+            out.push_str(&format!("⚠️ {detail}\n"));
+        }
+    }
     match v.get("current") {
         Some(Value::Object(c)) => {
             let label = c.get("label").and_then(Value::as_str).unwrap_or("?");
@@ -57,5 +75,13 @@ mod tests {
         let msg = status_message(json, false);
         assert!(msg.contains("idle"));
         assert!(msg.contains("backlog complete"));
+    }
+
+    #[test]
+    fn shows_runner_phase_and_terminal_reason() {
+        let json = r#"{"iteration":3,"run":{"phase":"stopped","terminal_reason":"required review unavailable","task_attempts":2}}"#;
+        let msg = status_message(json, false);
+        assert!(msg.contains("required review unavailable"));
+        assert!(msg.contains("2 task attempts"));
     }
 }

@@ -97,7 +97,10 @@ pub fn ingest(line: &str, stats: &mut Stats, summary: &mut Option<Summary>) {
                     .and_then(|x| x.as_str())
                     .unwrap_or("")
                     .to_string(),
-                total_cost_usd: v.get("total_cost_usd").and_then(|x| x.as_f64()).unwrap_or(0.0),
+                total_cost_usd: v
+                    .get("total_cost_usd")
+                    .and_then(|x| x.as_f64())
+                    .unwrap_or(0.0),
                 input_tokens: u("input_tokens"),
                 cache_read_input_tokens: u("cache_read_input_tokens"),
                 output_tokens: u("output_tokens"),
@@ -252,7 +255,9 @@ async fn transition(ctx: &Context, command: &CommandInteraction, live: &mut Live
 /// with mentions suppressed — a session must not be able to ping anyone.
 async fn finalize(ctx: &Context, command: &CommandInteraction, live: &Live, text: String) {
     let chunks = cap_chunks(chunk_message(&text, DISCORD_LIMIT), MAX_CHUNKS);
-    let (first, rest) = chunks.split_first().expect("chunk_message never returns empty");
+    let (first, rest) = chunks
+        .split_first()
+        .expect("chunk_message never returns empty");
     let no_mentions = CreateAllowedMentions::new();
 
     let err = match live {
@@ -442,7 +447,15 @@ mod tests {
         assert!(t.starts_with("❌ claude failed after 30s"), "{t}");
         assert!(t.contains("rate limited"), "{t}");
 
-        let none = final_text(None, &Stats { steps: 2, output_tokens: 10, current_tool: None }, Duration::from_secs(90));
+        let none = final_text(
+            None,
+            &Stats {
+                steps: 2,
+                output_tokens: 10,
+                current_tool: None,
+            },
+            Duration::from_secs(90),
+        );
         assert!(none.contains("without a result"), "{none}");
         assert!(none.contains("1m30s"), "{none}");
     }

@@ -5,16 +5,22 @@
 //! precedence rules can be unit-tested without touching the real process
 //! environment.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Fully-resolved runtime configuration.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Config {
     pub backend: crate::backend::Backend,
     pub tier_models: std::collections::BTreeMap<String, String>,
     pub model: String,
     pub fallback_model: String,
+    /// Switch providers on depleted subscription/API credit errors.
+    pub provider_failover: bool,
+    pub failover_cooldown: u64,
+    pub failover_models: std::collections::BTreeMap<String, String>,
+    /// Runtime-only routing for workers and their helper calls.
+    pub failover_from: Option<crate::backend::Backend>,
     /// Model used by the handoff synthesizer (distills carry-forward notes).
     pub synth_model: String,
     pub max_iterations: u64,
@@ -66,6 +72,10 @@ pub struct Config {
     pub judge_tiers: Vec<String>,
     /// Model used for the adversarial judge call.
     pub judge_model: String,
+    /// Opt-in acceptance policies keyed by task ID; @complete is the arc gate.
+    pub acceptance: std::collections::BTreeMap<String, crate::acceptance::Policy>,
+    /// Cap attempts on one unchanged task contract, including committing turns (0 = advisory only).
+    pub task_attempt_limit: u32,
 }
 
 impl Default for Config {
@@ -75,6 +85,10 @@ impl Default for Config {
             tier_models: Default::default(),
             model: "sonnet".into(),
             fallback_model: "sonnet".into(),
+            provider_failover: true,
+            failover_cooldown: 1800,
+            failover_models: Default::default(),
+            failover_from: None,
             synth_model: "sonnet".into(),
             max_iterations: 0,
             marker: "RALPH_COMPLETE".into(),
@@ -104,6 +118,8 @@ impl Default for Config {
             heartbeat_interval: 0,
             judge_tiers: Vec::new(),
             judge_model: "sonnet".into(),
+            acceptance: Default::default(),
+            task_attempt_limit: 0,
         }
     }
 }
@@ -117,6 +133,9 @@ pub struct FileConfig {
     pub tier_models: Option<std::collections::BTreeMap<String, String>>,
     pub model: Option<String>,
     pub fallback_model: Option<String>,
+    pub provider_failover: Option<bool>,
+    pub failover_cooldown: Option<DurationSpec>,
+    pub failover_models: Option<std::collections::BTreeMap<String, String>>,
     pub synth_model: Option<String>,
     pub max_iterations: Option<u64>,
     pub marker: Option<String>,
@@ -145,6 +164,8 @@ pub struct FileConfig {
     pub heartbeat_interval: Option<DurationSpec>,
     pub judge_tiers: Option<Vec<String>>,
     pub judge_model: Option<String>,
+    pub acceptance: std::collections::BTreeMap<String, crate::acceptance::Policy>,
+    pub task_attempt_limit: Option<u32>,
 }
 
 /// `extra_args` may be a single string ("--foo --bar") or an array of strings.
@@ -219,6 +240,19 @@ fn split_args(s: &str) -> Vec<String> {
 }
 
 pub fn apply_file(cfg: &mut Config, f: FileConfig) -> Result<(), String> {
+    cfg.acceptance = f.acceptance;
+    if let Some(v) = f.task_attempt_limit {
+        cfg.task_attempt_limit = v;
+    }
+    if let Some(v) = f.provider_failover {
+        cfg.provider_failover = v;
+    }
+    if let Some(v) = f.failover_cooldown {
+        cfg.failover_cooldown = v.resolve()?;
+    }
+    if let Some(v) = f.failover_models {
+        cfg.failover_models = v;
+    }
     if let Some(v) = f.backend {
         cfg.backend = v;
     }
@@ -340,6 +374,12 @@ pub fn apply_env<F: Fn(&str) -> Option<String>>(cfg: &mut Config, get: F) -> Res
     }
     set_str!("RALPH_MODEL", cfg.model);
     set_str!("RALPH_FALLBACK_MODEL", cfg.fallback_model);
+    if let Some(v) = get("RALPH_PROVIDER_FAILOVER") {
+        cfg.provider_failover = parse_bool(&v)?;
+    }
+    if let Some(v) = get("RALPH_FAILOVER_COOLDOWN") {
+        cfg.failover_cooldown = parse_duration(&v)?;
+    }
     set_parse!("RALPH_MAX_ITER", cfg.max_iterations, u64);
     set_str!("RALPH_MARKER", cfg.marker);
     if let Some(v) = get("RALPH_PROMPT") {
@@ -413,6 +453,8 @@ pub fn apply_args(cfg: &mut Config, args: &[String]) -> Result<bool, String> {
             "--synth-model" => cfg.synth_model = next()?,
             "--judge-model" => cfg.judge_model = next()?,
             "--fallback-model" => cfg.fallback_model = next()?,
+            "--provider-failover" => cfg.provider_failover = parse_bool(&next()?)?,
+            "--failover-cooldown" => cfg.failover_cooldown = parse_duration(&next()?)?,
             "--max-iterations" => {
                 cfg.max_iterations = next()?.parse().map_err(|_| "bad --max-iterations")?
             }
@@ -501,6 +543,25 @@ fn validate_tiers(field: &str, tiers: &[String]) -> Result<(), String> {
 }
 
 pub fn validate(cfg: &Config) -> Result<(), String> {
+    for (id, policy) in &cfg.acceptance {
+        policy
+            .validate()
+            .map_err(|e| format!("acceptance.{id}: {e}"))?;
+    }
+    if cfg.failover_cooldown == 0 {
+        return Err("failover_cooldown must be greater than zero".into());
+    }
+    for (source, target) in &cfg.failover_models {
+        let from = crate::backend::infer_model(source);
+        let to = crate::backend::infer_model(target);
+        if !crate::backend::valid_model(source)
+            || !crate::backend::valid_model(target)
+            || to.is_none()
+            || from.is_some_and(|b| Some(b) == to)
+        {
+            return Err(format!("invalid failover_models pair '{source}' = '{target}': target must identify the other provider"));
+        }
+    }
     if cfg.abort_after < cfg.escalate_after {
         return Err(format!(
             "abort_after ({}) must be >= escalate_after ({})",
@@ -539,6 +600,42 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failover_defaults_and_configuration_precedence() {
+        let mut cfg = Config::default();
+        assert!(cfg.provider_failover);
+        assert_eq!(cfg.failover_cooldown, 1800);
+        apply_file(&mut cfg, toml::from_str("provider_failover = false\nfailover_cooldown = '1h'\n[failover_models]\nopus = 'gpt-custom'\n").unwrap()).unwrap();
+        assert!(!cfg.provider_failover);
+        assert_eq!(cfg.failover_cooldown, 3600);
+        assert!(validate(&cfg).is_ok());
+        apply_env(&mut cfg, |k| match k {
+            "RALPH_PROVIDER_FAILOVER" => Some("true".into()),
+            "RALPH_FAILOVER_COOLDOWN" => Some("5m".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert!(cfg.provider_failover);
+        assert_eq!(cfg.failover_cooldown, 300);
+        apply_args(
+            &mut cfg,
+            &[
+                "--provider-failover".into(),
+                "false".into(),
+                "--failover-cooldown".into(),
+                "1m".into(),
+            ],
+        )
+        .unwrap();
+        assert!(!cfg.provider_failover);
+        assert_eq!(cfg.failover_cooldown, 60);
+        cfg.failover_models.insert("opus".into(), "sonnet".into());
+        assert!(validate(&cfg).unwrap_err().contains("other provider"));
+        cfg.failover_models.clear();
+        cfg.failover_cooldown = 0;
+        assert!(validate(&cfg).unwrap_err().contains("greater than zero"));
+    }
 
     #[test]
     fn backend_and_model_precedence_and_mapping_validation() {

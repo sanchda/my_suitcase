@@ -10,7 +10,9 @@ use crate::ledger::{self, Budget, Spend};
 use crate::ralph::Ralph;
 use crate::{format, loop_pid};
 
-use serenity::all::{ChannelId, CreateAllowedMentions, CreateMessage, EditMessage, Http, MessageId};
+use serenity::all::{
+    ChannelId, CreateAllowedMentions, CreateMessage, EditMessage, Http, MessageId,
+};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -109,7 +111,7 @@ async fn render(lc: &LoopConfig, running: Option<u32>) -> String {
         .status_json()
         .await
         .ok()
-        .filter(|o| o.ok)
+        .filter(|o| !o.stdout.trim().is_empty())
         .map(|o| o.stdout)
         .unwrap_or_else(|| "{}".to_string());
     let now = now_unix();
@@ -186,10 +188,21 @@ mod tests {
 
     #[test]
     fn ended_card_drops_live_line_and_reads_past_tense() {
-        let text = card_text("grove", STATUS, None, Some("iter 7 | stale"), None, None, 1_700_000_000);
+        let text = card_text(
+            "grove",
+            STATUS,
+            None,
+            Some("iter 7 | stale"),
+            None,
+            None,
+            1_700_000_000,
+        );
         assert!(text.contains("ended"), "{text}");
         assert!(text.contains("idle"), "{text}");
-        assert!(!text.contains("stale"), "stale live line must not survive the end: {text}");
+        assert!(
+            !text.contains("stale"),
+            "stale live line must not survive the end: {text}"
+        );
     }
 
     #[test]

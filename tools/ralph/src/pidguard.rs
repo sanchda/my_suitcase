@@ -26,6 +26,17 @@ pub fn is_alive(pid: u32) -> bool {
     if pid == 0 || pid > i32::MAX as u32 {
         return false;
     }
+    // A terminated child may remain a zombie until its parent reaps it.
+    // It can no longer do work and must not hold a stop waiter indefinitely.
+    #[cfg(target_os = "linux")]
+    if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        if stat
+            .rsplit_once(") ")
+            .is_some_and(|(_, tail)| tail.starts_with('Z') || tail.starts_with('X'))
+        {
+            return false;
+        }
+    }
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 

@@ -152,6 +152,10 @@ impl Events {
                     .as_str()
                     .or_else(|| err["message"].as_str())
                     .unwrap_or(line);
+                let message = match err.get("code").and_then(Value::as_str) {
+                    Some(code) => format!("{message} ({code})"),
+                    None => message.to_string(),
+                };
                 let status = err
                     .get("status_code")
                     .or_else(|| err.get("http_status_code"));
@@ -240,14 +244,27 @@ fn parse_envelope(v: &Value, raw_line: &str) -> ResultEnvelope {
             .and_then(Value::as_u64)
             .unwrap_or(0)
     };
+    let mut result = v
+        .get("result")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if v.get("is_error").and_then(Value::as_bool) == Some(true) {
+        if let Some(errors) = v.get("errors").and_then(Value::as_array) {
+            for error in errors {
+                if let Some(error) = error.as_str() {
+                    if !result.is_empty() {
+                        result.push('\n');
+                    }
+                    result.push_str(error);
+                }
+            }
+        }
+    }
     ResultEnvelope {
         is_error: v.get("is_error").and_then(Value::as_bool).unwrap_or(false),
         api_error_status,
-        result: v
-            .get("result")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
+        result,
         total_cost_usd: v
             .get("total_cost_usd")
             .and_then(Value::as_f64)
@@ -311,6 +328,22 @@ mod tests {
         assert_eq!(env.api_error_status, Some(429));
         let recovered = format!("{fail}\n{{\"type\":\"turn.completed\",\"usage\":{{}}}}\n");
         assert!(!drain(&recovered).0.unwrap().is_error);
+    }
+
+    #[test]
+    fn structured_quota_diagnostics_survive_normalization() {
+        for line in [
+            r#"{"type":"turn.failed","error":{"message":"request failed","code":"insufficient_quota"}}"#,
+            r#"{"type":"result","is_error":true,"errors":["You've hit your limit"]}"#,
+        ] {
+            let result = drain(line).0.unwrap();
+            assert!(result.is_error);
+            assert!(
+                crate::classify::depleted(&result.result),
+                "{}",
+                result.result
+            );
+        }
     }
 
     fn drain(input: &str) -> (Option<ResultEnvelope>, IterStatus, String) {

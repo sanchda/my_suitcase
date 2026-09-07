@@ -165,7 +165,11 @@ async fn main() {
             loop_child.clone(),
             client.http.clone(),
         ));
-        tokio::spawn(card::watch_card(lc, loop_child.clone(), client.http.clone()));
+        tokio::spawn(card::watch_card(
+            lc,
+            loop_child.clone(),
+            client.http.clone(),
+        ));
     }
 
     eprintln!("ralphd: connecting…");
