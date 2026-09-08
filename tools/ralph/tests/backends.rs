@@ -869,6 +869,46 @@ fn depletion_fails_over_by_default_in_both_directions() {
 }
 
 #[test]
+fn claude_session_limit_fails_over_without_waiting_for_reset() {
+    let repo = Repo::new();
+    let out = repo
+        .command(&[
+            "--model",
+            "claude-fable-5-1",
+            "--once",
+            "--max-duration",
+            "2s",
+        ])
+        .env("TEST_AGENT_MODE", "claude-depleted")
+        .env(
+            "TEST_CLAUDE_LIMIT_MESSAGE",
+            "You've hit your session limit · resets 10:20pm (America/Chicago)",
+        )
+        .output()
+        .unwrap();
+    success(&out);
+    let calls = repo.calls();
+    assert_eq!(
+        calls.len(),
+        2,
+        "session exhaustion should immediately retry on Codex"
+    );
+    assert_eq!(calls[0]["agent"], "claude");
+    assert_eq!(calls[1]["agent"], "codex");
+    assert!(has_pair(&calls[1], "--model", "gpt-6-astra"));
+    assert_eq!(calls[0]["prompt"], calls[1]["prompt"]);
+    let limits: Value = serde_json::from_str(
+        &fs::read_to_string(repo.0.join(".ralph/provider-limits.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(limits["anthropic"]["allow_failover"], true);
+    assert_eq!(limits["openai"]["retry_at"], 0);
+    let log = fs::read_to_string(repo.0.join(".ralph/run.log")).unwrap();
+    assert!(log.contains("provider failover: claude / claude-fable-5-1 → codex / gpt-6-astra"));
+    assert!(!log.contains("limit backoff:"));
+}
+
+#[test]
 fn failover_keeps_one_shot_and_explicit_backend_and_drops_foreign_flags() {
     let repo = Repo::new();
     repo.config("backend = 'claude'\nextra_args = ['--allowedTools', 'Read', '--effort', 'max']\n");

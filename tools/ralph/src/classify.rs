@@ -44,6 +44,7 @@ pub fn depleted(text: &str) -> bool {
         &text,
         &[
             "usage limit",
+            "session limit",
             "credit balance",
             "out of credit",
             "insufficient credit",
@@ -144,6 +145,8 @@ mod tests {
     fn exhaustion_is_distinct_from_burst_limits_and_other_failures() {
         for text in [
             "You've hit your limit · resets 5pm",
+            "You've hit your session limit · resets 10:20pm (America/Chicago)",
+            "You’ve hit your session limit · resets 10:20pm (America/Chicago)",
             "You’ve hit your limit",
             "insufficient_quota",
             "usage\nlimit reached",

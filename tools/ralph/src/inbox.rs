@@ -25,11 +25,15 @@ pub enum Request {
         under: Option<String>,
         title: String,
         body: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     Edit {
         id: String,
         title: String,
         verify: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     Drop {
         id: String,
@@ -68,6 +72,7 @@ impl Request {
                 under,
                 title,
                 body,
+                model,
             } => {
                 let (text, new_id) = match (id, under) {
                     (Some(id), _) => backlog_edit::apply_add_with_id(current, id, title, body)?,
@@ -76,10 +81,23 @@ impl Request {
                     }
                     (None, None) => backlog_edit::apply_add_top(current, title, body)?,
                 };
+                let text = match model {
+                    Some(model) => backlog_edit::apply_model(&text, &new_id, model)?,
+                    None => text,
+                };
                 Ok(plain(text, format!("added task {new_id}")))
             }
-            Request::Edit { id, title, verify } => {
+            Request::Edit {
+                id,
+                title,
+                verify,
+                model,
+            } => {
                 let text = backlog_edit::apply_edit(current, id, title, verify)?;
+                let text = match model {
+                    Some(model) => backlog_edit::apply_model(&text, id, model)?,
+                    None => text,
+                };
                 Ok(plain(text, format!("edited task {id}")))
             }
             Request::Drop { id, recursive } => {
@@ -337,6 +355,7 @@ mod tests {
             under: None,
             title: title.into(),
             body: "Verify: cargo test".into(),
+            model: None,
         }
     }
 
@@ -491,6 +510,23 @@ mod tests {
     }
 
     #[test]
+    fn old_requests_without_model_still_replay_and_edits_preserve_strictness() {
+        let add: Request =
+            serde_json::from_str(r#"{"kind":"add","title":"Task","body":"Verify: true"}"#).unwrap();
+        let added = add.apply(&backlog_edit::empty_backlog()).unwrap();
+        assert!(added.text.contains("**1 — Task**\n"));
+        let strict = backlog_edit::apply_model(&added.text, "1", "!opus").unwrap();
+        let edit: Request =
+            serde_json::from_str(r#"{"kind":"edit","id":"1","title":"Renamed","verify":"true"}"#)
+                .unwrap();
+        assert!(edit
+            .apply(&strict)
+            .unwrap()
+            .text
+            .contains("**1 — Renamed** !opus —"));
+    }
+
+    #[test]
     fn requests_round_trip_through_json() {
         for req in [
             add("T"),
@@ -499,11 +535,13 @@ mod tests {
                 under: None,
                 title: "T".into(),
                 body: "Verify: y".into(),
+                model: Some("!opus".into()),
             },
             Request::Edit {
                 id: "1".into(),
                 title: "T".into(),
                 verify: "y".into(),
+                model: Some("sonnet".into()),
             },
             Request::Drop {
                 id: "1".into(),

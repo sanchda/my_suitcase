@@ -63,12 +63,26 @@ disk:
 ralph add "<title>" --verify "<cmd>"            # next free top-level id
 ralph add --under 3 "<title>" --verify "<cmd>"  # next free 3.N stage
 ralph add 3.1.1 "<title>" --verify "<cmd>"      # explicit id; parent 3.1 must exist
+ralph add "<title>" --model opus --verify "<cmd>"  # overridable task model
+ralph add --under 3 "<title>" --model '!opus' --verify "<cmd>"  # strict task model
 ralph done 3.1                                  # check off (never cascades)
 ralph uncheck 3.1                               # reopen, plus ancestors it closed
 ralph drop 3 --recursive                        # remove a subtree (archived, not deleted)
 ```
 
 `ralph backlog add …` / `ralph backlog edit …` are older flag-style aliases on the same path.
+Both accept `--model <name>` (aliases `--tier` and `-m`), as does `ralph add`.
+For example, `ralph backlog edit --id 3.1 --title "Review" --verify "cargo test" --model '!opus'`
+sets a strict selection; omitting `--model` on an edit preserves the existing selection.
+
+Use the model flag instead of embedding `@opus` in a title or body: those positions are inert
+prose. The CLI writes the routing slot and preserves it through queued insertion, including
+`--under`, explicit IDs, and piped bodies. `--model opus` is overridable; `--model '!opus'`
+outranks escalation and one-shot overrides and disables provider failover and Claude's overload
+fallback. Quote `!` names in interactive shells. Tier mappings still apply; use a strict concrete
+model ID when the ID itself must be pinned. An omitted model adds an undecorated task.
+Unknown flags and invalid model names fail before enqueueing. Use `--config`, `--dir`, and
+`--backlog` to target non-default paths.
 
 Omit `--verify` and pipe a full multi-line body (prose + a `Verify:` line) on stdin instead. A
 duplicate id exits **3**, not a lint dump. `drop` archives what it removed to
@@ -93,7 +107,9 @@ duplicate id exits **3**, not a lint dump. `drop` archives what it removed to
 ```
 
 Immediately after the label's closing `**`, then ` — ` (em dash U+2014 + space) before the prose.
-Only `@haiku`/`@sonnet`/`@opus`, at most one, only in that slot. A misspelling, an en dash, an ASCII
+Tiers (`@haiku`/`@sonnet`/`@opus`), known aliases (`@astra`, `@fable`), recognized concrete
+model IDs (`@gpt-*`, `@claude-*`), and strict selections (`!opus`, `!astra`) are accepted,
+at most one, only in that slot. A misspelling, an en dash, an ASCII
 hyphen, a missing space, two tiers, or a leftover v1 `(opus/…)` parenthetical in a pending task's
 body is a **hard lint error** that refuses the iteration — never a silent fallback. Consequence:
 task prose may not begin with `@` — rewrite `**1 — Notify.** @channel — …` so `@` is not first. A
@@ -157,11 +173,12 @@ tail -f .ralph/run.log       # one line per iteration + perf + warnings
 
 ## Model precedence — exactly, highest first
 
-1. Escalation override (from the no-progress streak)
-2. One-shot `.ralph/MODEL` — written by `ralph model <tier>` or a HANDOFF `model` field; consumed
-   and cleared on read. Must be on the configured `escalation_ladder`.
-3. The resolved leaf's own `@tier` decoration
-4. The run default (`--model` / `model`, default `sonnet`)
+1. The resolved leaf's strict `!model` decoration
+2. Escalation override (from the no-progress streak)
+3. One-shot `.ralph/MODEL` — written by `ralph model <name>` or a HANDOFF `model` field; consumed
+   and cleared on read. Accepts tiers and concrete model IDs, including `!` selections.
+4. The resolved leaf's own overridable `@model` decoration
+5. The run default (`--model` / `model`, default `sonnet`)
 
 Effort follows: `effort = "auto"` (default) maps haiku→low, sonnet→medium, opus→high; `inherit` defers to Claude settings; an explicit level or an `--effort` in `extra_args` wins. Config precedence overall is **defaults ← `.ralph/ralph.toml` ← `RALPH_*` env ← flags**, with these keys TOML-only (no flag): `synth_model`, `judge_tiers`, `judge_model`, `escalation_ladder`, `limit_wait[_max]`, `transient_wait[_max]`, `extra_args`, `budget_usd`, `budget_window`. Tier lists accept only `haiku`/`sonnet`/`opus`; anything else fails config validation.
 

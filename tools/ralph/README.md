@@ -297,7 +297,7 @@ local tools/tests visible without mining raw NDJSON.
 - `ralph status [--json]` — a snapshot of the backlog frontier: iteration,
   pending-leaf count, the current selected task, and the next few upcoming
   tasks. `--json` emits one machine-readable line.
-- `ralph add [<id>] "<title>" [--verify "<cmd>"]` — queue a task. With no id it
+- `ralph add [<id>] "<title>" [--verify "<cmd>"] [--model <name>]` — queue a task. With no id it
   takes the next top-level number; an explicit id places a child (`3.1.1` goes
   under `3.1`, whose parent must exist), and `--under <parent>` picks the next
   free `<parent>.N` for you. A duplicate id is an error, not a lint dump. Pipe
@@ -315,6 +315,32 @@ local tools/tests visible without mining raw NDJSON.
   the next iteration. Accepts tiers and concrete model IDs; tier aliases are
   trimmed and matched case-insensitively. Supports `--dir` and `--config`.
 - `ralph backlog add|edit …` — the older flag-style forms, kept as aliases.
+  Both accept `--model`; editing without it preserves the existing selection.
+
+Set a task's model through the CLI, which writes the header decoration for you:
+
+```bash
+ralph add "Rework the shared base" --model opus --verify "cargo test"
+ralph add --under 3 "Review the migration" --model '!opus' --verify "cargo test"
+ralph backlog add --title "Check compatibility" --model astra --verify "cargo test"
+ralph backlog edit --id 3.1 --title "Review the migration" --model '!opus' --verify "cargo test"
+```
+
+`--model` (aliases `--tier` and `-m`) accepts tiers, known aliases, and recognized
+model IDs such as `gpt-*` or `claude-*`, optionally prefixed with `!`. `opus`
+writes `**…** @opus —`: escalation, one-shot overrides, and provider failover
+can replace it. `'!opus'` writes `**…** !opus —`: the task selection outranks
+escalation and one-shot overrides and disables provider failover and Claude's
+overload fallback. Existing `tier_models` mappings still resolve the tier to a
+concrete model; use a strict concrete ID to pin that ID. Quote `!` names in
+interactive shells. Omit the flag to add a task with no model decoration.
+
+The selection survives queued insertion, including explicit IDs, `--under`,
+and piped task bodies. Putting `@opus` in the title or body does **not** set its
+model. Unsupported flags and invalid model names are rejected before enqueueing.
+Backlog mutation commands accept `--config`, `--dir`, and `--backlog` path flags.
+After upgrading, restart existing loops before queueing model-bearing additions:
+older running binaries do not read the new request's model field.
 
 Every one of these is schema-checked before it lands: the result is parsed in
 memory and, if it would fail lint, rejected without touching the file.
@@ -554,7 +580,8 @@ half-comply; the legacy files are still honored when no handoff is present.
 Malformed JSON or invalid field values are warned about and ignored (never
 abort). See the PROMPT template for the exact instructions given to the model.
 
-**Model precedence** (highest first): escalation override → one-shot `.ralph/MODEL`
+**Model precedence** (highest first): strict task selection (`!model`) →
+escalation override → one-shot `.ralph/MODEL`
 → the resolved leaf's own `@tier` decoration → the run default. So model tier
 lives with the task in the backlog; the agent need not restate it. An active
 escalation short-circuits the rest, so a pending `.ralph/MODEL` is *not* consumed

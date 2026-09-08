@@ -18,6 +18,7 @@ pub const EXIT_CONFLICT: i32 = 3;
 
 const USAGE: &str = "\
 Usage: ralph add [<id>] <title> [--verify <cmd>] [--under <parent>]
+                 [--model <name> | --tier <name> | -m <name>]
        ralph drop <id> [--recursive]
        ralph done <id>
        ralph uncheck <id>
@@ -26,25 +27,30 @@ An explicit <id> inserts under the parent it implies (3.1.1 → under 3.1);
 --under <parent> numbers the next free stage for you. With no id the task is
 appended at top level. The body is `--verify <cmd>`, or — when --verify is
 omitted and stdin is piped — the full text (prose plus a Verify: line) on stdin.
+--model opus writes an overridable @opus decoration; --model '!opus' writes
+a strict !opus decoration. Quote ! names in interactive shells. Model aliases
+and recognized concrete model IDs are accepted. Unknown flags are errors.
 ";
 
-/// Our own flags, split from the config flags `load_base` still needs to see.
+/// Mutation flags, split from the supported config/path flags.
 struct Args {
     positional: Vec<String>,
     verify: Option<String>,
     under: Option<String>,
+    model: Option<String>,
     recursive: bool,
     help: bool,
     rest: Vec<String>,
 }
 
-/// Split argv. A `--flag value` we don't own is forwarded whole, so `--config`
-/// and `--dir` keep working alongside positional arguments.
+/// Split argv, accepting only mutation and config/path flags so typos cannot
+/// silently drop requested task metadata.
 fn parse(argv: &[String]) -> R<Args> {
     let mut args = Args {
         positional: Vec::new(),
         verify: None,
         under: None,
+        model: None,
         recursive: false,
         help: false,
         rest: Vec::new(),
@@ -54,6 +60,7 @@ fn parse(argv: &[String]) -> R<Args> {
         let a = argv[i].as_str();
         let value = || {
             argv.get(i + 1)
+                .filter(|value| !value.starts_with("--"))
                 .cloned()
                 .ok_or_else(|| format!("{a} needs a value"))
         };
@@ -66,6 +73,13 @@ fn parse(argv: &[String]) -> R<Args> {
                 args.under = Some(value()?);
                 i += 2;
             }
+            "--model" | "--tier" | "-m" => {
+                if args.model.is_some() {
+                    return Err("specify only one --model / --tier / -m".into());
+                }
+                args.model = Some(value()?);
+                i += 2;
+            }
             "--recursive" | "-r" => {
                 args.recursive = true;
                 i += 1;
@@ -74,14 +88,12 @@ fn parse(argv: &[String]) -> R<Args> {
                 args.help = true;
                 i += 1;
             }
-            _ if a.starts_with("--") => {
+            "--config" | "--dir" | "--backlog" => {
                 args.rest.push(argv[i].clone());
-                if let Some(v) = argv.get(i + 1).filter(|v| !v.starts_with("--")) {
-                    args.rest.push(v.clone());
-                    i += 1;
-                }
-                i += 1;
+                args.rest.push(value()?);
+                i += 2;
             }
+            _ if a.starts_with('-') => return Err(format!("unknown arg: {a}").into()),
             _ => {
                 args.positional.push(argv[i].clone());
                 i += 1;
@@ -154,6 +166,7 @@ fn request(sub: &str, args: &Args, text: &str, body: String) -> R<Result<Request
                 under: args.under.clone(),
                 title,
                 body,
+                model: args.model.clone(),
             }))
         }
         "drop" => Ok(Ok(Request::Drop {
@@ -221,7 +234,16 @@ pub fn run(sub: &str, argv: &[String]) -> R<i32> {
         print!("{USAGE}");
         return Ok(0);
     }
-    let cfg = config::load_base(&args.rest)?;
+    if sub != "add" && (args.model.is_some() || args.verify.is_some() || args.under.is_some()) {
+        return Err(
+            format!("{sub}: --model, --tier, --verify and --under are add-only options").into(),
+        );
+    }
+    if sub != "drop" && args.recursive {
+        return Err(format!("{sub}: --recursive is a drop-only option").into());
+    }
+    let mut cfg = config::load_base(&args.rest)?;
+    config::apply_args(&mut cfg, &args.rest)?;
     let text = current(&cfg.backlog)?;
     // Only `add` carries a body, and only it may consume stdin.
     let body = if sub == "add" {

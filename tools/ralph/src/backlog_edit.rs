@@ -115,6 +115,35 @@ fn check_title(title: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Use the same model vocabulary as the backlog parser, including strict `!`
+/// selections. Never let an arbitrary string become header syntax.
+fn model_decoration(raw: &str) -> Result<String, String> {
+    let model = crate::model::normalize_model(raw, &[])
+        .filter(|model| crate::backend::infer_model(model).is_some())
+        .ok_or_else(|| format!("invalid backlog model '{raw}': expected a tier, model alias, or recognized model ID (optionally prefixed with !)"))?;
+    let prefix = if model.starts_with('!') { "" } else { "@" };
+    Ok(format!(" {prefix}{model} —"))
+}
+
+/// Attach a selection to a freshly generated add/edit header. The queued
+/// request carries the model separately from title/body until this lint gate.
+pub fn apply_model(current: &str, id: &str, model: &str) -> Result<String, String> {
+    let decoration = model_decoration(model)?;
+    let doc = Document::parse(current);
+    let task = doc
+        .tasks
+        .iter()
+        .find(|task| task.id == id)
+        .ok_or_else(|| format!("no task with id `{id}`"))?;
+    let mut lines: Vec<String> = current.lines().map(String::from).collect();
+    let header = &mut lines[task.line - 1];
+    let end = header.rfind("**").ok_or("task has no bold label")? + 2;
+    header.truncate(end);
+    header.push_str(&decoration);
+    let text = format!("{}\n", lines.join("\n"));
+    gated(text, id).map(|(text, _)| text)
+}
+
 /// Append a task at the end of the backlog under the next top-level id; returns
 /// `(new_text, new_id)` or the lint errors that would result.
 pub fn apply_add_top(current: &str, title: &str, body: &str) -> Result<(String, String), String> {
@@ -307,8 +336,14 @@ pub fn apply_edit(current: &str, id: &str, title: &str, verify: &str) -> Result<
     }
     let indent = " ".repeat(task.indent);
     let checkbox = if task.checked { "x" } else { " " };
+    let decoration = task
+        .tier
+        .as_deref()
+        .map(model_decoration)
+        .transpose()?
+        .unwrap_or_default();
     let new_body = format!(
-        "{indent}- [{checkbox}] **{id} — {}**\n{indent}  Verify: {}\n",
+        "{indent}- [{checkbox}] **{id} — {}**{decoration}\n{indent}  Verify: {}\n",
         title.trim(),
         verify.trim()
     );
@@ -340,7 +375,42 @@ pub fn apply_edit(current: &str, id: &str, title: &str, verify: &str) -> Result<
 pub fn run(args: &[String]) -> R<i32> {
     let sub = args.first().map(String::as_str);
     let rest = args.get(1..).unwrap_or(&[]);
-    let cfg = crate::config::load_base(rest)?;
+    if !matches!(sub, Some("add" | "edit")) {
+        return Err("backlog: expected `add` or `edit`".into());
+    }
+    if rest
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--help" | "-h"))
+    {
+        println!("Usage: ralph backlog add --title <text> --verify <cmd> [--model <name>]\n       ralph backlog edit --id <id> --title <text> --verify <cmd> [--model <name>]\nModel aliases: --tier, -m. Use opus for an overridable model or '!opus' for a strict model.\nAn edit without --model preserves the task's existing selection.\nPath options: --config <file>, --dir <path>, --backlog <file>.");
+        return Ok(0);
+    }
+    let mut paths = Vec::new();
+    let mut model = None;
+    let mut flags = rest.iter();
+    while let Some(flag) = flags.next() {
+        match flag.as_str() {
+            "--title" | "--verify" | "--model" | "--tier" | "-m" | "--config" | "--dir"
+            | "--backlog" => {}
+            "--id" if sub == Some("edit") => {}
+            _ => return Err(format!("unknown arg: {flag}").into()),
+        }
+        let value = flags
+            .next()
+            .filter(|value| !value.starts_with("--"))
+            .ok_or_else(|| format!("{flag} needs a value"))?;
+        match flag.as_str() {
+            "--model" | "--tier" | "-m" => {
+                if model.replace(value.clone()).is_some() {
+                    return Err("specify only one --model / --tier / -m".into());
+                }
+            }
+            "--config" | "--dir" | "--backlog" => paths.extend([flag.clone(), value.clone()]),
+            _ => {}
+        }
+    }
+    let mut cfg = crate::config::load_base(&paths)?;
+    crate::config::apply_args(&mut cfg, &paths)?;
     let current = crate::backlog_cli::current(&cfg.backlog)?;
     let req = match sub {
         Some("add") => Request::Add {
@@ -352,6 +422,7 @@ pub fn run(args: &[String]) -> R<i32> {
             body: verify_body(
                 flag(rest, "--verify").ok_or("backlog add: --verify <cmd> required")?,
             ),
+            model,
         },
         Some("edit") => Request::Edit {
             id: flag(rest, "--id")
@@ -363,6 +434,7 @@ pub fn run(args: &[String]) -> R<i32> {
             verify: flag(rest, "--verify")
                 .ok_or("backlog edit: --verify <cmd> required")?
                 .to_string(),
+            model,
         },
         other => return Err(format!("backlog: expected `add` or `edit`, got {other:?}").into()),
     };

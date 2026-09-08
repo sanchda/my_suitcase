@@ -59,7 +59,7 @@ Inspect
   ralph doctor [--json] [options]  Check setup without calling models or tests
 
 Backlog — schema-checked, and queued while a loop runs (see below)
-  ralph add [<id>] <title> [--verify <cmd>]
+  ralph add [<id>] <title> [--verify <cmd>] [--model <name>]
                                    Queue a task; <id> places a child, e.g. 3.1.1
   ralph add --under <parent> <title>
                                    Queue the next free <parent>.N stage
@@ -67,6 +67,7 @@ Backlog — schema-checked, and queued while a loop runs (see below)
   ralph uncheck <id>               Queue a reopen
   ralph drop <id> [--recursive]    Queue a removal (archived, never deleted)
   ralph backlog <add|edit> ...     Older flag-style forms, kept as aliases
+                                   --model opus is overridable; '!opus' is strict
 
 Steer a running loop
   ralph model <name>               One-shot model override for the next iteration
