@@ -917,6 +917,11 @@ Carry-forward notes are limited to 1,200 bytes on synthesis success **and**
 fallback. The context reader also bounds manually enlarged progress files and
 indicates truncation. Complete worker summaries remain in the run artifacts.
 
+Set `synthesize_handoff = false` in `ralph.toml` to carry the bounded worker
+summary directly, without a synthesis API call. Default is `true`. With synthesis
+disabled, workers should put next-task constraints first and keep their final
+summary within 1,200 bytes. Verification and review policies are unaffected.
+
 Each launch has a unique `.ralph/runs/<run-id>/` directory. It contains `run.json`
 and an `attempt-NNNN/` directory per worker invocation, including retries:
 

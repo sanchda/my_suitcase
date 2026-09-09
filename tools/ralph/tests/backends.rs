@@ -92,6 +92,21 @@ impl Repo {
 }
 
 #[test]
+fn disabled_handoff_synthesis_preserves_summary_without_a_helper_call() {
+    let repo = Repo::new();
+    repo.backlog();
+    repo.config("synthesize_handoff = false\n");
+    success(&repo.run(&["--once"], "incremental-commit"));
+    assert_eq!(repo.calls().len(), 1, "only the worker should be launched");
+    let progress = fs::read_to_string(repo.0.join(".ralph/PROGRESS.md")).unwrap();
+    assert!(!progress.is_empty());
+    assert!(progress.len() <= 1_200);
+    assert!(fs::read_to_string(repo.0.join(".ralph/BACKLOG.md"))
+        .unwrap()
+        .contains("- [ ] **1"));
+}
+
+#[test]
 fn final_marker_cannot_bypass_git_audit_or_queued_new_work() {
     let repo = Repo::new();
     let out = repo.run(&["--once"], "switch-complete");

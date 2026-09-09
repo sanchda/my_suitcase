@@ -84,6 +84,9 @@ pub fn synthesize_with(
 
 /// The real `run` for [`synthesize_with`], at the configured synth model.
 pub fn run(cfg: &Config, prompt: &str) -> Option<String> {
+    if !cfg.synthesize_handoff {
+        return None;
+    }
     run_oneshot(cfg, &cfg.synth_model, SYNTH_TIMEOUT_SECS, prompt)
 }
 

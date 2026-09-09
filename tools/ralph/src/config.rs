@@ -23,6 +23,8 @@ pub struct Config {
     pub failover_from: Option<crate::backend::Backend>,
     /// Model used by the handoff synthesizer (distills carry-forward notes).
     pub synth_model: String,
+    /// False carries the bounded worker summary without another model call.
+    pub synthesize_handoff: bool,
     pub max_iterations: u64,
     pub marker: String,
     pub prompt: PathBuf,
@@ -90,6 +92,7 @@ impl Default for Config {
             failover_models: Default::default(),
             failover_from: None,
             synth_model: "sonnet".into(),
+            synthesize_handoff: true,
             max_iterations: 0,
             marker: "RALPH_COMPLETE".into(),
             prompt: PathBuf::from(".ralph/PROMPT.md"),
@@ -137,6 +140,7 @@ pub struct FileConfig {
     pub failover_cooldown: Option<DurationSpec>,
     pub failover_models: Option<std::collections::BTreeMap<String, String>>,
     pub synth_model: Option<String>,
+    pub synthesize_handoff: Option<bool>,
     pub max_iterations: Option<u64>,
     pub marker: Option<String>,
     pub prompt: Option<String>,
@@ -241,6 +245,9 @@ fn split_args(s: &str) -> Vec<String> {
 
 pub fn apply_file(cfg: &mut Config, f: FileConfig) -> Result<(), String> {
     cfg.acceptance = f.acceptance;
+    if let Some(v) = f.synthesize_handoff {
+        cfg.synthesize_handoff = v;
+    }
     if let Some(v) = f.task_attempt_limit {
         cfg.task_attempt_limit = v;
     }

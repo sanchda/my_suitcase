@@ -112,6 +112,9 @@ impl Report {
             ("synth", cfg.synth_model.as_str()),
             ("judge", cfg.judge_model.as_str()),
         ] {
+            if role == "synth" && !cfg.synthesize_handoff {
+                continue;
+            }
             if role == "judge"
                 && cfg.judge_tiers.is_empty()
                 && cfg
