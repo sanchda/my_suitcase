@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# with-lock -- serialize access to a named shared resource among cooperating
+# processes (parallel agents, shells, cron).
+#
+# Usage:
+#   with-lock --resource NAME [--label WHO] [--timeout SECS] -- command args...
+#   with-lock --resource NAME --status
+#   with-lock --list
+#
+# The lock is held for exactly the lifetime of the wrapped command; for a
+# multi-command critical section, put the commands in a script and wrap the
+# script. On timeout this exits 75 -- the contract is wait and retry, never
+# bypass. The lock is a kernel flock on a file descriptor, so it is released
+# when the holder dies, even on SIGKILL. The .holder file beside it is
+# best-effort metadata; --status trusts the lock, not the file.
+#
+# Locks live in ${WITH_LOCK_DIR:-$HOME/.locks} -- under $HOME, not /tmp,
+# because some hosts wipe /tmp daily. WITH_LOCK_LABEL sets a default label.
+set -euo pipefail
+
+LOCK_DIR="${WITH_LOCK_DIR:-$HOME/.locks}"
+RESOURCE=""
+TIMEOUT=7200
+LABEL="${WITH_LOCK_LABEL:-unlabelled}"
+STATUS_ONLY=0
+LIST_ONLY=0
+
+usage() {
+  sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//' >&2
+  exit 2
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --resource) RESOURCE="$2"; shift 2 ;;
+    --label)    LABEL="$2"; shift 2 ;;
+    --timeout)  TIMEOUT="$2"; shift 2 ;;
+    --status)   STATUS_ONLY=1; shift ;;
+    --list)     LIST_ONLY=1; shift ;;
+    --)         shift; break ;;
+    -h|--help)  usage ;;
+    *) echo "with-lock: unknown argument '$1'" >&2; usage ;;
+  esac
+done
+
+if [[ ! -d "$LOCK_DIR" ]]; then
+  mkdir -p "$LOCK_DIR"
+  chmod 0700 "$LOCK_DIR"
+fi
+
+# print_status NAME -- FREE/HELD (+ holder line when held and known)
+print_status() {
+  local lock="$LOCK_DIR/$1.lock" holder="$LOCK_DIR/$1.lock.holder"
+  touch "$lock"
+  if flock -n "$lock" true 2>/dev/null; then
+    echo "$1: FREE"
+  else
+    echo "$1: HELD"
+    [[ -f "$holder" ]] && cat "$holder"
+  fi
+}
+
+if [[ "$LIST_ONLY" == 1 ]]; then
+  shopt -s nullglob
+  found=0
+  for lock in "$LOCK_DIR"/*.lock; do
+    name="$(basename "$lock" .lock)"
+    print_status "$name"
+    found=1
+  done
+  [[ "$found" == 1 ]] || echo "no resources in $LOCK_DIR"
+  exit 0
+fi
+
+[[ -n "$RESOURCE" ]] || { echo "with-lock: --resource is required" >&2; usage; }
+
+LOCK_FILE="$LOCK_DIR/$RESOURCE.lock"
+HOLDER_FILE="$LOCK_FILE.holder"
+
+if [[ "$STATUS_ONLY" == 1 ]]; then
+  print_status "$RESOURCE"
+  exit 0
+fi
+
+[[ $# -gt 0 ]] || { echo "with-lock: no command given" >&2; usage; }
+
+touch "$LOCK_FILE"
+exec 9>>"$LOCK_FILE"
+if ! flock -w "$TIMEOUT" 9; then
+  echo "with-lock: timed out after ${TIMEOUT}s waiting for $RESOURCE" >&2
+  if [[ -f "$HOLDER_FILE" ]]; then
+    echo "current holder:" >&2
+    cat "$HOLDER_FILE" >&2
+  fi
+  exit 75
+fi
+
+printf 'label=%s pid=%s since=%s cmd=%q\n' \
+  "$LABEL" "$$" "$(date -Is)" "$*" >"$HOLDER_FILE"
+# Only the holder writes this file, so removing it on exit is race-free
+# enough for its purpose (answering "who has it and since when").
+trap 'rm -f "$HOLDER_FILE"' EXIT
+
+"$@"

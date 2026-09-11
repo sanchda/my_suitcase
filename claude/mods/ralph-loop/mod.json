@@ -1,0 +1,10 @@
+{
+  "description": "ralph autonomous-loop skill (setup, backlog schema, driving, gotchas)",
+  "default": true,
+  "requires": {
+    "files": ["{{LOCAL_BIN}}/ralph"]
+  },
+  "links": {
+    "skills/ralph-loop": "skill"
+  }
+}

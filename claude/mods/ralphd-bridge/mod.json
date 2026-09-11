@@ -1,0 +1,10 @@
+{
+  "description": "ralphd Discord control bridge skill (launch, auth model, commands)",
+  "default": true,
+  "requires": {
+    "files": ["{{LOCAL_BIN}}/ralphd"]
+  },
+  "links": {
+    "skills/ralphd-bridge": "skill"
+  }
+}

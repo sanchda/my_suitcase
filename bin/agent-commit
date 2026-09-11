@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# agent-commit -- commit exactly the named paths from one of several agents
+# sharing a worktree.
+#
+# Usage:
+#   agent-commit --resource NAME --label WHO -m "subject" -- path [path...]
+#
+# Why this exists: committing from a parallel agent has two races, and the
+# obvious incantation loses both.
+#
+#   1. The INDEX race. This
+#          with-lock ... -- git add mine.rs
+#          with-lock ... -- git commit -m "..."
+#      is two acquisitions, and the index survives the gap. A peer staging in
+#      that window is swept into your commit. This script closes it: one
+#      acquisition, and `git commit --only <paths>`, which ignores the index.
+#      (`--only` cannot name an untracked file, so a new path needs
+#      `git add --intent-to-add` first -- inside the same acquisition. It
+#      stages no content, so it cannot carry a peer's file.)
+#
+#   2. The WORKING-TREE race. `--only <path>` commits that path's *whole
+#      working tree*, so if a peer has uncommitted edits in a file you also
+#      touch, they land in your commit. **This script does not fix that, and
+#      no git primitive does** short of interactive staging. It is prevented
+#      by ownership, not by tooling: two agents must never hold write access
+#      to one file at the same time. `--check` below is a tripwire, not a fix.
+#
+# Options:
+#   --check    refuse to commit if any named path has working-tree changes,
+#              and print them. Blunt on purpose and of limited use: it cannot
+#              tell your own in-progress edit from a peer's, so it fires on
+#              every normal commit of a file you are editing. Useful only when
+#              you expect a path to be clean -- e.g. touching a file you did
+#              not write. Auditing the diff is the reliable check.
+#   --author-name / --author-email   identity (or AGENT_COMMIT_NAME/_EMAIL)
+set -euo pipefail
+
+RESOURCE=""
+LABEL="${WITH_LOCK_LABEL:-agent}"
+MESSAGE=""
+AUTHOR_NAME="${AGENT_COMMIT_NAME:-}"
+AUTHOR_EMAIL="${AGENT_COMMIT_EMAIL:-}"
+TIMEOUT=600
+CHECK=0
+
+usage() {
+  sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//' >&2
+  exit 2
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --resource)     RESOURCE="$2"; shift 2 ;;
+    --label)        LABEL="$2"; shift 2 ;;
+    --timeout)      TIMEOUT="$2"; shift 2 ;;
+    --author-name)  AUTHOR_NAME="$2"; shift 2 ;;
+    --author-email) AUTHOR_EMAIL="$2"; shift 2 ;;
+    --check)        CHECK=1; shift ;;
+    -m|--message)   MESSAGE="$2"; shift 2 ;;
+    --)             shift; break ;;
+    -h|--help)      usage ;;
+    *) echo "agent-commit: unknown argument '$1'" >&2; usage ;;
+  esac
+done
+
+[[ -n "$RESOURCE" ]] || { echo "agent-commit: --resource is required" >&2; usage; }
+[[ -n "$MESSAGE" ]]  || { echo "agent-commit: -m is required" >&2; usage; }
+[[ $# -gt 0 ]]       || { echo "agent-commit: name at least one path after --" >&2; usage; }
+
+for p in "$@"; do
+  [[ -e "$p" ]] || { echo "agent-commit: no such path: $p" >&2; exit 2; }
+done
+
+if [[ "$CHECK" == 1 ]]; then
+  # Only meaningful for paths you did not edit; you cannot tell your own
+  # changes from a peer's here. Ownership is the real control.
+  dirty="$(git status --porcelain -- "$@")"
+  if [[ -n "$dirty" ]]; then
+    echo "agent-commit: --check: these paths carry working-tree changes:" >&2
+    echo "$dirty" >&2
+    echo "agent-commit: if any of that is a peer's, hand the edit back rather than committing it" >&2
+    exit 3
+  fi
+fi
+
+GIT_ARGS=()
+[[ -n "$AUTHOR_NAME" ]]  && GIT_ARGS+=(-c "user.name=$AUTHOR_NAME")
+[[ -n "$AUTHOR_EMAIL" ]] && GIT_ARGS+=(-c "user.email=$AUTHOR_EMAIL")
+
+export AC_MESSAGE="$MESSAGE"
+export AC_GIT_ARGS="${GIT_ARGS[*]-}"
+
+# One acquisition covering intent-to-add and commit: the index must never be
+# observable by a peer between them.
+exec with-lock --resource "$RESOURCE" --label "$LABEL" --timeout "$TIMEOUT" -- \
+  bash -c '
+    set -euo pipefail
+    read -r -a git_args <<< "${AC_GIT_ARGS}"
+    for p in "$@"; do
+      git ${git_args[@]+"${git_args[@]}"} add --intent-to-add -- "$p"
+    done
+    git ${git_args[@]+"${git_args[@]}"} commit --only --no-gpg-sign --no-verify \
+      -m "${AC_MESSAGE}" -- "$@"
+  ' _ "$@"

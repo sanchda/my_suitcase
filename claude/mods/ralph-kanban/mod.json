@@ -1,0 +1,11 @@
+{
+  "description": "Parallel ralph backlog skill (kanban waves via multi-agent-coordination)",
+  "default": true,
+  "requires": {
+    "commands": ["flock"],
+    "files": ["{{LOCAL_BIN}}/ralph", "{{SUITCASE}}/bin/with-lock"]
+  },
+  "links": {
+    "skills/ralph-kanban": "skill"
+  }
+}

@@ -52,6 +52,9 @@ setup_claude_statusline.sh --status     # what it owns
 
 `setup_bark.sh` and `setup_plan_vim_gate.sh` build their binary first and then
 ensure their mod; `--disable` and `--status` short-circuit before the build.
+`setup_ralph_skills.sh` manages the four skill mods (agent-coord, ralph-loop,
+ralphd-bridge, ralph-kanban) at once and nags -- pointing at `setup_ralph.sh` --
+when the ralph/ralphd binaries they require are not installed yet.
 `zz_setup_claude_mods.sh` is the catch-all (`ensure --default` plus `doctor`), so
 a new mod with `"default": true` needs no script at all. Adding one for a new mod:
 
