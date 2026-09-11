@@ -49,19 +49,21 @@ shell/
   bash.sh               Bash-only: prompt, shopt, completions
   zsh.sh                Zsh-only: setopt, starship, atuin
   functions/*.sh        Auto-sourced shell functions (git worktree helpers, …)
-bin/                    On PATH: sc-doctor, cc-mod, cc-statusline, getCost.sh
+bin/                    On PATH: sc-doctor, cc-mod, cc-statusline, with-lock, agent-commit, getCost.sh
 claude/mods/            Reversible ~/.claude/settings.json fragments (cc-mod)
 lib/cc-mod.jq           The merge/unmerge jq library behind cc-mod
 tools/                  Rust tools: bark, ralph, ralphd, claude-top
 atuin/  tmux.conf  htoprc
 personalize/  scripts/  Optional per-machine extras (run manually)
-tests/                  Fixture tests for the shell tooling (tests/cc-mod.sh)
+tests/                  Fixture tests for the shell tooling (tests/cc-mod.sh, tests/with-lock.sh)
 ```
 
 ## Claude Code config
 
 `~/.claude/settings.json` is managed in reversible pieces called mods: a status
-line, an ExitPlanMode plan reviewer, Discord notifications. `cc-mod list` shows
+line, an ExitPlanMode plan reviewer, Discord notifications, a multi-agent
+coordination skill (see `docs/agent-coordination.md`), and ralph skills
+(loop, Discord bridge, parallel kanban). `cc-mod list` shows
 them, `cc-mod disable <mod>` takes one back out (and it stays out across
 personalize runs). Each has a `personalize/scripts/` switch taking the same
 flags -- `setup_claude_statusline.sh --disable`, `setup_bark.sh --status`. See
