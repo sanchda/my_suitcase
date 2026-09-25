@@ -13,18 +13,12 @@
 #   --enable    start again after a --disable
 #   --status    show what the mod owns
 #
-# The webhook is read from $BARK_WEBHOOK when set, otherwise DEFAULT_WEBHOOK
-# below. An existing config is never touched, so this is safe to re-run.
-#
-# NOTE: DEFAULT_WEBHOOK is a personal webhook URL living in a git repo. Anyone
-# with the repo can post to that channel; rotate it in Discord (Channel Settings
-# -> Integrations -> Webhooks) if that stops being acceptable, or clear it here
-# and export BARK_WEBHOOK instead.
+# The webhook is read from $BARK_WEBHOOK. Never commit a real webhook URL here:
+# anyone holding it can post to the channel. An existing config is never
+# touched, so this is safe to re-run.
 #
 # Requires: cargo (rustup). At runtime: curl.
 set -e
-
-DEFAULT_WEBHOOK="https://discord.com/api/webhooks/1538974466154037289/hkQbkIPV-aQRVt2ooNQqcBpvtvmhvx6l2NjLtuJj3UvfOdMQ4XvYId1oUHVlHtJNCnJK"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SUITCASE_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -75,7 +69,7 @@ echo "Installed: $BIN"
 if [ -f "$CONFIG" ]; then
   echo "Config already present, leaving it alone: $CONFIG"
 else
-  WEBHOOK="${BARK_WEBHOOK:-$DEFAULT_WEBHOOK}"
+  WEBHOOK="${BARK_WEBHOOK:-}"
   if [ -z "$WEBHOOK" ]; then
     echo "No webhook to seed (set BARK_WEBHOOK, or run 'bark init --webhook <url>')."
   else
