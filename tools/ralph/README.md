@@ -10,11 +10,11 @@ This is the Rust runner (`tools/ralph/`, a cargo crate). Beyond looping it adds
 **live stream parsing**, **cost / wall-clock budgets**, an **opt-in
 per-iteration timeout**, **schema-validated backlog routing**, bounded iteration
 briefs, and **no-progress detection** that escalates the model tier and then
-aborts. It replaces the previous `ralph.sh`.
+aborts.
 
 ## Global tool vs. local driving files
 
-This directory (`$SUITCASE/tools/ralph/`) is the **global, project-agnostic
+This directory is the **global, project-agnostic
 tool**. Its personalize script builds the binary and installs it to
 `~/.local/bin/ralph`, so `ralph` is on your PATH. The crate contains nothing
 about any one project.
