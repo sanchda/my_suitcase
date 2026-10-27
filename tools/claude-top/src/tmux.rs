@@ -36,11 +36,11 @@ mod tests {
 
     #[test]
     fn parses_panes() {
-        let out = "197 0:0.0 /Users/d/suitcase\n8204 1:0.1 /Users/d/discord\n";
+        let out = "197 0:0.0 /Users/d/suitcase\n8204 1:0.1 /Users/d/project\n";
         let panes = parse_panes(out);
         assert_eq!(panes.len(), 2);
         assert_eq!(panes[0], Pane { pane_pid: 197, label: "0:0.0".into(), path: "/Users/d/suitcase".into() });
-        assert_eq!(panes[1], Pane { pane_pid: 8204, label: "1:0.1".into(), path: "/Users/d/discord".into() });
+        assert_eq!(panes[1], Pane { pane_pid: 8204, label: "1:0.1".into(), path: "/Users/d/project".into() });
     }
 
     #[test]

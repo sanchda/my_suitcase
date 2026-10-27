@@ -1,6 +1,6 @@
-//! Read-only view of `<state_dir>/loop.pid`. `ralph` owns the file now (it
-//! takes it with `create_new` at startup); ralphd only probes it to refuse a
-//! second `/start` and to see a loop it did not launch.
+//! Read-only view of `<state_dir>/loop.pid`. `ralph` owns the guard and its
+//! stale-file recovery; ralphd only probes it to refuse a second `/start` and
+//! to see a loop it did not launch.
 
 use std::path::{Path, PathBuf};
 
@@ -33,16 +33,10 @@ pub fn read(state_dir: &Path) -> Option<u32> {
         .and_then(|s| s.trim().parse().ok())
 }
 
-/// The pid of a live loop; a recorded-but-dead pid is stale, so it is removed.
+/// The pid of a live loop. Ralph alone reclaims stale guards; removing one here
+/// could race with Ralph publishing a replacement.
 pub fn running(state_dir: &Path) -> Option<u32> {
-    match read(state_dir) {
-        Some(pid) if is_alive(pid) => Some(pid),
-        Some(_) => {
-            let _ = std::fs::remove_file(pidfile(state_dir));
-            None
-        }
-        None => None,
-    }
+    read(state_dir).filter(|pid| is_alive(*pid))
 }
 
 #[cfg(test)]
@@ -76,12 +70,12 @@ mod tests {
     }
 
     #[test]
-    fn running_returns_live_pid_and_clears_stale() {
+    fn running_returns_live_pid_and_leaves_stale_guard_for_ralph() {
         let dir = tmp();
         write(&dir, std::process::id()).unwrap();
         assert_eq!(running(&dir), Some(std::process::id()));
         write(&dir, 4_000_000_000).unwrap();
         assert_eq!(running(&dir), None);
-        assert_eq!(read(&dir), None);
+        assert_eq!(read(&dir), Some(4_000_000_000));
     }
 }

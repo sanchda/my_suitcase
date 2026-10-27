@@ -16,7 +16,7 @@ const GITIGNORE_BLOCK: &str = "\
 
 const RALPH_TOML_STUB: &str = "\
 # ralph config — all keys optional; uncomment to override defaults.
-# See `ralph --help` and tools/ralph/README.md.
+# See `ralph --help`.
 # backend = \"auto\" # auto, claude, or codex (alias openai)
 # model = \"sonnet\"
 # fallback_model = \"sonnet\"

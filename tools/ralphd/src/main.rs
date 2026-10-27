@@ -92,7 +92,6 @@ TRAPS
   Run exactly ONE ralphd per guild. Registering slash commands replaces the
   guild's entire command set, so two instances silently unregister each other.
 
-See tools/ralphd/README.md for the rest.
 "##;
 
 #[tokio::main]

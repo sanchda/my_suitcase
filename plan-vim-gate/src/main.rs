@@ -3,7 +3,7 @@
 //! Wired as a `PermissionRequest` hook matching `ExitPlanMode`. Reads the hook
 //! event from stdin, opens the plan in nvim inside a tmux split, blocks until
 //! the editor closes, then emits an allow/deny decision on stdout based on the
-//! edited buffer. See `docs/superpowers/specs/` for the full design.
+//! edited buffer.
 
 mod buffer;
 mod debug;

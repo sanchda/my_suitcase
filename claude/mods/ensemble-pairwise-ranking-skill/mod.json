@@ -1,0 +1,10 @@
+{
+  "description": "Skill: ensemble pairwise ranking via decorrelated voter panels",
+  "default": true,
+  "requires": {
+    "files": ["{{LOCAL_BIN}}/panel"]
+  },
+  "links": {
+    "skills/ensemble-pairwise-ranking": "skill"
+  }
+}

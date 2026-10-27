@@ -94,17 +94,9 @@ fn read_session(dir: &Path) -> Option<String> {
     is_uuid(&id).then_some(id)
 }
 
-/// A fresh session id from the kernel, which keeps `ralph` free of a uuid crate.
+/// A fresh session id from the operating system's random source.
 fn new_uuid() -> R<String> {
-    const SOURCE: &str = "/proc/sys/kernel/random/uuid";
-    let id = std::fs::read_to_string(SOURCE)
-        .map_err(|e| format!("reading {SOURCE}: {e}"))?
-        .trim()
-        .to_string();
-    if !is_uuid(&id) {
-        return Err(format!("{SOURCE} returned a non-UUID session id: {id}").into());
-    }
-    Ok(id)
+    Ok(uuid::Uuid::new_v4().to_string())
 }
 
 /// Retire the current session id into `<dir>/archive/`. Context accretes until it

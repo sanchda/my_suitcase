@@ -105,13 +105,16 @@ mod tests {
     }
 
     #[test]
-    fn signalling_without_a_pidfile_is_a_no_op() {
+    fn signalling_without_a_live_pid_is_a_no_op() {
         let dir = tmp();
         assert_eq!(signal_loop(&dir).unwrap(), None);
-        // A stale pidfile is cleared rather than signalled.
+        // Leave stale guards for acquisition to reclaim under its claim.
         std::fs::write(supervisor::pidfile(&dir), "4000000000\n").unwrap();
         assert_eq!(signal_loop(&dir).unwrap(), None);
-        assert!(!supervisor::pidfile(&dir).exists());
+        assert_eq!(
+            pidguard::read(&supervisor::pidfile(&dir)),
+            Some(4_000_000_000)
+        );
     }
 
     #[test]

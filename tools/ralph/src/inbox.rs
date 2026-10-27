@@ -127,6 +127,55 @@ pub struct Outcome {
     pub rejected: Vec<String>,
 }
 
+/// A batch is recorded before replacing BACKLOG.md. If the process dies after
+/// the replacement but before deleting its request files, recovery can tell
+/// that those requests were already applied and must not replay them.
+#[derive(Serialize, Deserialize)]
+struct DrainJournal {
+    before: String,
+    after: String,
+    requests: Vec<String>,
+}
+
+fn journal_path(base: &Path) -> PathBuf {
+    base.join("drain-journal.json")
+}
+
+fn backlog_text(backlog: &Path) -> R<String> {
+    match std::fs::read_to_string(backlog) {
+        Ok(t) => Ok(t),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(backlog_edit::empty_backlog()),
+        Err(e) => Err(format!("{}: cannot read backlog: {e}", backlog.display()).into()),
+    }
+}
+
+/// Called under the drain guard, before replaying any request.
+fn recover(base: &Path, backlog: &Path) -> R<()> {
+    let path = journal_path(base);
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    let journal: DrainJournal = serde_json::from_str(&raw)?;
+    let current = crate::runtime::fingerprint(&backlog_text(backlog)?);
+    if current == journal.after {
+        for name in &journal.requests {
+            let request = dir(base).join(name);
+            match std::fs::remove_file(request) {
+                Ok(()) => {}
+                Err(e) if e.kind() == ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+    } else if current != journal.before {
+        return Err("inbox recovery: backlog changed outside the pending drain; inspect drain-journal.json before continuing".into());
+    }
+    // `before` means no replacement happened; the requests remain queued.
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
 impl Outcome {
     /// Only the tests care whether a drain was a no-op; the loop logs both lists.
     #[cfg(test)]
@@ -144,8 +193,8 @@ pub fn rejected_dir(base: &Path) -> PathBuf {
     dir(base).join("rejected")
 }
 
-/// The guard that serializes drainers; same `create_new` + liveness probe as the
-/// loop's own pidfile.
+/// The guard that serializes drainers; same atomic publication and liveness
+/// probe as the loop's own pidfile.
 pub fn drain_pidfile(base: &Path) -> PathBuf {
     base.join("drain.pid")
 }
@@ -198,7 +247,7 @@ fn pending(base: &Path) -> R<Vec<PathBuf>> {
 }
 
 pub fn has_pending(base: &Path) -> bool {
-    pending(base).map(|p| !p.is_empty()).unwrap_or(true)
+    journal_path(base).exists() || pending(base).map(|p| !p.is_empty()).unwrap_or(true)
 }
 
 pub fn has_done(base: &Path, id: &str) -> bool {
@@ -248,8 +297,10 @@ pub fn discard_done(base: &Path, id: &str) -> R<usize> {
         return Ok(0);
     }
     // Same guard as `drain`, so this can never delete a file mid-replay.
-    let Ok(_guard) = pidguard::acquire(&drain_pidfile(base)) else {
-        return Ok(0);
+    let _guard = match pidguard::acquire(&drain_pidfile(base)) {
+        Ok(guard) => guard,
+        Err(Some(_)) => return Ok(0),
+        Err(None) => return Err("inbox: cannot acquire drain guard".into()),
     };
     let mut discarded = 0;
     for path in pending(base)? {
@@ -270,20 +321,22 @@ pub fn discard_done(base: &Path, id: &str) -> R<usize> {
 /// idempotent over the queue either way.
 pub fn drain(base: &Path, backlog: &Path) -> R<Outcome> {
     let files = pending(base)?;
+    if files.is_empty() && !journal_path(base).exists() {
+        return Ok(Outcome::default());
+    }
+    let _guard = match pidguard::acquire(&drain_pidfile(base)) {
+        Ok(guard) => guard,
+        Err(Some(_)) => return Ok(Outcome::default()),
+        Err(None) => return Err("inbox: cannot acquire drain guard".into()),
+    };
+    recover(base, backlog)?;
+    // Re-list under the guard; the previous holder may have just applied these.
+    let files = pending(base)?;
     if files.is_empty() {
         return Ok(Outcome::default());
     }
-    let Ok(_guard) = pidguard::acquire(&drain_pidfile(base)) else {
-        return Ok(Outcome::default());
-    };
-    // Re-list under the guard; the previous holder may have just applied these.
-    let files = pending(base)?;
-    let mut text = match std::fs::read_to_string(backlog) {
-        Ok(t) => t,
-        // An absent backlog is the post-completion state: `add` bootstraps it.
-        Err(e) if e.kind() == ErrorKind::NotFound => backlog_edit::empty_backlog(),
-        Err(e) => return Err(format!("{}: cannot read backlog: {e}", backlog.display()).into()),
-    };
+    let mut text = backlog_text(backlog)?;
+    let before = crate::runtime::fingerprint(&text);
     let mut outcome = Outcome::default();
     let mut done = Vec::new();
     let mut archives = Vec::new();
@@ -307,6 +360,15 @@ pub fn drain(base: &Path, backlog: &Path) -> R<Outcome> {
         }
     }
     if !done.is_empty() {
+        let journal = DrainJournal {
+            before,
+            after: crate::runtime::fingerprint(&text),
+            requests: done
+                .iter()
+                .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+                .collect(),
+        };
+        crate::runtime::write_json(&journal_path(base), &journal)?;
         // Archive first: a failed backlog write is retried, and a duplicated
         // archive entry is harmless where a lost subtree is not.
         if !archives.is_empty() {
@@ -315,8 +377,9 @@ pub fn drain(base: &Path, backlog: &Path) -> R<Outcome> {
         backlog_edit::write_atomic(backlog, &text)?;
         // Only now are the requests safe to forget.
         for path in done {
-            let _ = std::fs::remove_file(path);
+            std::fs::remove_file(path)?;
         }
+        std::fs::remove_file(journal_path(base))?;
     }
     Ok(outcome)
 }
@@ -403,6 +466,51 @@ mod tests {
     }
 
     #[test]
+    fn recovery_does_not_replay_a_committed_batch() {
+        let base = tmp();
+        let backlog = seeded(&base);
+        let request = enqueue(&base, &add("Once")).unwrap();
+        let before = std::fs::read_to_string(&backlog).unwrap();
+        let after = add("Once").apply(&before).unwrap().text;
+        let journal = DrainJournal {
+            before: crate::runtime::fingerprint(&before),
+            after: crate::runtime::fingerprint(&after),
+            requests: vec![request.file_name().unwrap().to_string_lossy().into_owned()],
+        };
+        crate::runtime::write_json(&journal_path(&base), &journal).unwrap();
+        backlog_edit::write_atomic(&backlog, &after).unwrap();
+
+        assert!(has_pending(&base));
+        assert!(drain(&base, &backlog).unwrap().is_empty());
+        assert_eq!(std::fs::read_to_string(&backlog).unwrap(), after);
+        assert!(!request.exists());
+        assert!(!journal_path(&base).exists());
+    }
+
+    #[test]
+    fn recovery_replays_a_batch_that_was_not_committed() {
+        let base = tmp();
+        let backlog = seeded(&base);
+        let request = enqueue(&base, &add("Once")).unwrap();
+        let before = std::fs::read_to_string(&backlog).unwrap();
+        let after = add("Once").apply(&before).unwrap().text;
+        let journal = DrainJournal {
+            before: crate::runtime::fingerprint(&before),
+            after: crate::runtime::fingerprint(&after),
+            requests: vec![request.file_name().unwrap().to_string_lossy().into_owned()],
+        };
+        crate::runtime::write_json(&journal_path(&base), &journal).unwrap();
+
+        assert_eq!(
+            drain(&base, &backlog).unwrap().applied,
+            vec!["added task 2"]
+        );
+        assert_eq!(std::fs::read_to_string(&backlog).unwrap(), after);
+        assert!(!request.exists());
+        assert!(!journal_path(&base).exists());
+    }
+
+    #[test]
     fn a_held_guard_defers_the_drain_without_losing_requests() {
         let base = tmp();
         let backlog = seeded(&base);
@@ -414,6 +522,18 @@ mod tests {
 
         drop(held);
         assert_eq!(drain(&base, &backlog).unwrap().applied.len(), 1);
+    }
+
+    #[test]
+    fn blocked_stale_guard_reports_an_error_and_keeps_the_request() {
+        let base = tmp();
+        let backlog = seeded(&base);
+        let queued = enqueue(&base, &add("Later")).unwrap();
+        std::fs::write(drain_pidfile(&base), "4000000000\n").unwrap();
+        std::fs::create_dir(base.join("drain.pid.reap")).unwrap();
+
+        assert!(drain(&base, &backlog).is_err());
+        assert!(queued.exists());
     }
 
     #[test]

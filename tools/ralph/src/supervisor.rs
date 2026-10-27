@@ -192,7 +192,9 @@ pub fn run(cfg: &Config) -> R<i32> {
         return control::run(cfg);
     }
 
-    install_handler(libc::SIGTERM, forward_to_child);
+    for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP, libc::SIGQUIT] {
+        install_handler(sig, forward_to_child);
+    }
     let notifier = notify::Notifier::new(&cfg.discord_webhook);
     let mut guard = RestartGuard::new();
 

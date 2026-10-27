@@ -4,8 +4,7 @@
 //! schema-resolved current-task brief; continuity lives in files, not context.
 //! This runner adds live stream parsing, cost and wall-clock budgets, an opt-in
 //! per-iteration timeout, and no-progress/thrash detection with model escalation.
-//! See `docs/superpowers/specs/` for the design and `README.md` for usage. The
-//! driving files (PROMPT/VISION/BACKLOG/PROGRESS) are local to the target repo.
+//! The driving files (PROMPT/VISION/BACKLOG/PROGRESS) are local to the target repo.
 
 mod acceptance;
 mod backend;
@@ -132,7 +131,7 @@ Watching a running loop:
 
 One loop per repo: the loop holds .ralph/loop.pid and a second `ralph` here
 exits 2 naming the live pid. A pidfile left by a killed loop is reclaimed on
-the next start. Full documentation in tools/ralph/README.md.
+the next start.
 
 With --restart, only an ungraceful death (killed by a signal: OOM, kill, crash)
 relaunches the loop; graceful halts, completion, and abort are terminal, and a

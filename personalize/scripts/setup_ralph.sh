@@ -9,7 +9,7 @@
 # ralph is driven entirely by files LOCAL to whatever repo you run it in
 # (.ralph/PROMPT.md, VISION/BACKLOG/PROGRESS, and an optional ralph.toml — run
 # `ralph init` to scaffold them).
-# See suitcase/tools/ralph/README.md.
+# See `ralph --help`.
 #
 # Requires: cargo (rustup). At runtime: the authenticated `claude` CLI on PATH.
 set -e

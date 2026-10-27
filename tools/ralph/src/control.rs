@@ -15,10 +15,10 @@ use crate::stream::{self, IterStatus, ResultEnvelope};
 use crate::{curate, git, inbox, judge, ledger, supervisor, synth, R};
 use chrono::Utc;
 use std::collections::HashSet;
-use std::io::{BufReader, Write};
+use std::io::{self, BufReader, Write};
 use std::os::raw::c_int;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -343,7 +343,7 @@ struct HbSnapshot {
     tool: Option<String>,
 }
 
-/// The running worker's pid, so the SIGTERM handler can reach it.
+/// The running worker's pid, so deliberate-signal handlers can reach it.
 static WORKER_PID: AtomicU32 = AtomicU32::new(0);
 
 /// Helpers and verification commands share the force-stop process registry.
@@ -358,6 +358,47 @@ impl Drop for ActiveProcess {
     fn drop(&mut self) {
         kill_group(self.0);
         let _ = WORKER_PID.compare_exchange(self.0, 0, Ordering::SeqCst, Ordering::SeqCst);
+    }
+}
+
+/// Own the detached worker until it has been killed and reaped. In particular,
+/// a stream I/O error or panic must not leave a process tree behind.
+struct WorkerProcess {
+    child: Child,
+    pid: u32,
+    done: Arc<AtomicBool>,
+    reaped: bool,
+}
+
+impl WorkerProcess {
+    fn new(child: Child) -> Self {
+        let pid = child.id();
+        WORKER_PID.store(pid, Ordering::SeqCst);
+        Self {
+            child,
+            pid,
+            done: Arc::new(AtomicBool::new(false)),
+            reaped: false,
+        }
+    }
+
+    fn finish(&mut self) -> io::Result<ExitStatus> {
+        self.done.store(true, Ordering::SeqCst);
+        // Sweep descendants before reaping the leader, so its group ID cannot
+        // be reused while cleanup is in progress.
+        kill_group(self.pid);
+        let status = self.child.wait()?;
+        self.reaped = true;
+        let _ = WORKER_PID.compare_exchange(self.pid, 0, Ordering::SeqCst, Ordering::SeqCst);
+        Ok(status)
+    }
+}
+
+impl Drop for WorkerProcess {
+    fn drop(&mut self) {
+        if !self.reaped {
+            let _ = self.finish();
+        }
     }
 }
 
@@ -397,7 +438,9 @@ fn drain_inbox(cfg: &Config, state: &State, notifier: &Option<notify::Notifier>)
 pub fn run(cfg: &Config) -> R<i32> {
     // First thing, so a `ralph stop --now` forwarded here can never find the
     // supervisor's forwarding handler still installed in this process.
-    supervisor::install_handler(libc::SIGTERM, terminate);
+    for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP, libc::SIGQUIT] {
+        supervisor::install_handler(sig, terminate);
+    }
     let previous = crate::runtime::read(&cfg.dir);
     let mut run = crate::runtime::Run::start(cfg)?;
     if let Some(old) = previous {
@@ -1283,13 +1326,12 @@ fn run_one(cfg: &Config, state: &State, n: u64, model: &str, prompt: &str) -> R<
             Ok(())
         });
     }
-    let mut child = cmd.spawn()?;
-    let pid = child.id();
-    WORKER_PID.store(pid, Ordering::SeqCst);
+    let mut worker = WorkerProcess::new(cmd.spawn()?);
+    let pid = worker.pid;
 
-    let stdin = child.stdin.take().expect("piped stdin");
-    let stdout = child.stdout.take().expect("piped stdout");
-    let stderr = child.stderr.take().expect("piped stderr");
+    let stdin = worker.child.stdin.take().expect("piped stdin");
+    let stdout = worker.child.stdout.take().expect("piped stdout");
+    let stderr = worker.child.stderr.take().expect("piped stderr");
 
     // Drain stderr into the same raw log (best-effort) on its own thread.
     let stderr_log = log_path.clone();
@@ -1319,7 +1361,7 @@ fn run_one(cfg: &Config, state: &State, n: u64, model: &str, prompt: &str) -> R<
 
     // Watchdog: kill the child's process group if it outlives the timeout.
     let killed = Arc::new(AtomicBool::new(false));
-    let done = Arc::new(AtomicBool::new(false));
+    let done = worker.done.clone();
     let watchdog = if cfg.iteration_timeout > 0 {
         let (killed_w, done_w) = (killed.clone(), done.clone());
         let deadline = cfg.iteration_timeout;
@@ -1391,29 +1433,25 @@ fn run_one(cfg: &Config, state: &State, n: u64, model: &str, prompt: &str) -> R<
         None
     };
 
-    // Consume the stream on this thread (blocks until EOF / child exit / kill).
-    let mut raw = std::fs::OpenOptions::new().append(true).open(&log_path)?;
-    let mut status = IterStatus::new(n, selection.model.as_deref().unwrap_or(model));
-    state.write_live_status(&status.render());
-    let reader = BufReader::new(stdout);
-    let hb_emit = hb_shared.clone();
-    let envelope = stream::consume(reader, &mut raw, &mut status, |s| {
-        state.write_live_status(&s.render());
-        if let Ok(mut g) = hb_emit.lock() {
-            g.out_tokens = s.out_tokens;
-            g.events = s.events;
-            g.tool = s.current_tool.clone();
-        }
-    })?;
+    // Capture stream errors so cleanup still runs when a log write or pipe read
+    // fails. An early `?` here would leave the detached worker running.
+    let stream_result: R<Option<ResultEnvelope>> = (|| {
+        let mut raw = std::fs::OpenOptions::new().append(true).open(&log_path)?;
+        let mut status = IterStatus::new(n, selection.model.as_deref().unwrap_or(model));
+        state.write_live_status(&status.render());
+        let reader = BufReader::new(stdout);
+        let hb_emit = hb_shared.clone();
+        Ok(stream::consume(reader, &mut raw, &mut status, |s| {
+            state.write_live_status(&s.render());
+            if let Ok(mut g) = hb_emit.lock() {
+                g.out_tokens = s.out_tokens;
+                g.events = s.events;
+                g.tool = s.current_tool.clone();
+            }
+        })?)
+    })();
 
-    // Sweep descendants before reaping the worker so its process-group ID
-    // cannot be reused while cleanup is in progress.
-    done.store(true, Ordering::SeqCst);
-    #[cfg(unix)]
-    kill_group(pid);
-    let _ = child.wait();
-    // Reaped: the pid can be recycled, so the handler must stop aiming at it.
-    WORKER_PID.store(0, Ordering::SeqCst);
+    let child_status = worker.finish();
     let prompt_result = prompt_thread.join();
     let diagnostic = stderr_thread.join().unwrap_or_default();
     if let Some(w) = watchdog {
@@ -1423,6 +1461,8 @@ fn run_one(cfg: &Config, state: &State, n: u64, model: &str, prompt: &str) -> R<
         let _ = h.join();
     }
 
+    child_status?;
+    let envelope = stream_result?;
     let killed = killed.load(Ordering::SeqCst);
     let mut envelope = if killed {
         None
