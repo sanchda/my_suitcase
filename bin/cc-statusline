@@ -5,13 +5,79 @@
 #            showing how far through each window we are, and time-to-reset.
 #
 # Claude Code pipes the status-line JSON on stdin. Both lines degrade
-# gracefully: no npx -> no line 1; no rate_limits in the JSON -> no line 2.
+# gracefully: no ccusage/npx -> no line 1; no rate_limits in the JSON ->
+# no line 2.
 
 input=$(cat)
 
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/cc-statusline"
+LOCK_DIR="$CACHE_DIR/.lock"
+LOCK_STALE_SECS=120
+
 # --- line 1: ccusage ---------------------------------------------------------
-if command -v npx >/dev/null 2>&1; then
-  printf '%s' "$input" | npx -y ccusage statusline 2>/dev/null
+# ccusage takes anywhere from a fraction of a second to tens of seconds
+# depending on how much transcript history it has to chew through. Claude Code
+# re-renders the status line on a timer and does NOT wait for the previous
+# render to exit, so calling ccusage unguarded piles up processes whenever a
+# render outlives the refresh interval — multiplied by every open session.
+# Two guards:
+#   1. a single-flight lock, so at most one ccusage runs across all sessions
+#   2. a per-session cache, so a render that loses the lock prints the last
+#      good line instead of blocking or printing nothing
+# The cache is keyed by session_id because ccusage's session cost is per-session.
+
+# Prefer an installed ccusage. Going through npx costs two extra processes and
+# a registry check on every single refresh; npx stays as the fallback so a box
+# without ccusage installed still gets a status line.
+CCUSAGE_CMD=""
+if command -v ccusage >/dev/null 2>&1; then
+  CCUSAGE_CMD="ccusage"
+elif command -v npx >/dev/null 2>&1; then
+  CCUSAGE_CMD="npx -y ccusage"
+fi
+
+# mtime <path> -> epoch seconds (BSD stat, then GNU stat)
+mtime() {
+  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null
+}
+
+cache_file=""
+if command -v jq >/dev/null 2>&1; then
+  session_id=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null \
+    | tr -cd 'A-Za-z0-9._-')
+  [ -n "$session_id" ] && cache_file="$CACHE_DIR/line1-$session_id"
+fi
+
+if [ -n "$CCUSAGE_CMD" ]; then
+  mkdir -p "$CACHE_DIR" 2>/dev/null
+
+  # Reclaim a lock left behind by a render that was killed mid-flight.
+  if [ -d "$LOCK_DIR" ]; then
+    lock_ts=$(mtime "$LOCK_DIR")
+    if [ -n "$lock_ts" ] && [ $(( $(date +%s) - lock_ts )) -gt "$LOCK_STALE_SECS" ]; then
+      rmdir "$LOCK_DIR" 2>/dev/null
+    fi
+  fi
+
+  # mkdir is the atomic test-and-set here: macOS has no flock(1).
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
+    line1=$(printf '%s' "$input" | $CCUSAGE_CMD statusline 2>/dev/null)
+    if [ -n "$line1" ]; then
+      printf '%s\n' "$line1"
+      if [ -n "$cache_file" ]; then
+        tmp=$(mktemp "$CACHE_DIR/.tmp.XXXXXX" 2>/dev/null) \
+          && printf '%s\n' "$line1" > "$tmp" \
+          && mv "$tmp" "$cache_file"
+      fi
+      # Sessions are ephemeral; don't let their cache files accumulate forever.
+      find "$CACHE_DIR" -name 'line1-*' -mtime +7 -delete 2>/dev/null
+    elif [ -n "$cache_file" ] && [ -s "$cache_file" ]; then
+      cat "$cache_file"
+    fi
+  elif [ -n "$cache_file" ] && [ -s "$cache_file" ]; then
+    cat "$cache_file"
+  fi
 fi
 
 # --- line 2: rate-limit bars -------------------------------------------------

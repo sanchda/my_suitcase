@@ -15,11 +15,20 @@ if [ -d "$HOME/.local/bin" ]; then
 fi
 export PATH
 
-# Locale — C.UTF-8 keeps C's predictable sort/format behavior but enables
-# UTF-8 character handling (needed for tmux to render non-ASCII glyphs).
-LC_ALL=C.UTF-8
-LANG=C.UTF-8
-export LC_ALL LANG
+# Locale — UTF-8 character handling (needed for tmux to render non-ASCII
+# glyphs) with C's predictable sort/format behavior. macOS ships no C.UTF-8
+# locale, and asking for a nonexistent one silently degrades to US-ASCII, so
+# fall back to en_US.UTF-8 there. LC_ALL is left unset: it outranks the
+# per-category vars below and would undo them.
+unset LC_ALL
+if locale -a 2>/dev/null | grep -qxF 'C.UTF-8'; then
+  LANG=C.UTF-8
+else
+  LANG=en_US.UTF-8
+fi
+LC_COLLATE=C
+LC_NUMERIC=C
+export LANG LC_COLLATE LC_NUMERIC
 
 # Work-specific overrides
 if [ -f "$HOME/.workstuff/workstuff" ]; then
@@ -61,7 +70,6 @@ fi
 # macOS GNU path fixups
 case "$(uname -s)" in
   "Darwin")
-    export LC_CTYPE=C.UTF-8
     for dir in /usr/local/opt/coreutils/libexec/gnubin /usr/local/opt/grep/libexec/gnubin /usr/local/opt/llvm/bin; do
       if [[ ":$PATH:" != *":$dir:"* ]]; then
         export PATH="$dir:$PATH"

@@ -385,7 +385,6 @@ gwD() {
     fi
     echo "gwD: Confirmed we're in a git repository"
 
-    # Check if this is a worktree (not the main repository)
     if [ "$(git rev-parse --git-common-dir)" = "$(git rev-parse --git-dir)" ]; then
         echo "Error: You're in the main repository, not a worktree"
         echo "gwD only works from within a worktree directory"
@@ -411,17 +410,15 @@ gwD() {
     echo "gwD: About to remove worktree: $worktree_root"
     echo "gwD: This will permanently delete the worktree directory and all its contents"
 
-    # Move to git repository root for the removal operation
     echo "gwD: Changing to git repository root: $git_root"
     cd "$git_root"
 
-    # Remove the worktree (git worktree remove has built-in confirmation prompts)
+    # No explicit confirmation here: git worktree remove prompts on its own.
     echo "gwD: Executing: git worktree remove '$worktree_root'"
     git worktree remove "$worktree_root"
 
     if [ $? -eq 0 ]; then
         echo "gwD: Successfully removed worktree: $worktree_root"
-        # Delete the local branch now that the worktree is gone
         if [ -n "$branch_name" ]; then
             echo "gwD: Deleting local branch: $branch_name"
             git branch -D "$branch_name"
@@ -535,7 +532,6 @@ gwPrune() {
 
     git worktree prune
 
-    # Delete local branches for successfully removed worktrees
     for i in "${!stale_branches[@]}"; do
         if ! git worktree list --porcelain | grep -q "branch refs/heads/${stale_branches[$i]}$"; then
             echo "Deleting local branch: ${stale_branches[$i]}"

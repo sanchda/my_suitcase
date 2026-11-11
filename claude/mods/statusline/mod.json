@@ -4,7 +4,7 @@
   "requires": {
     "commands": ["jq"],
     "files": ["{{SUITCASE}}/bin/cc-statusline"],
-    "optional": ["npx"]
+    "optional": ["ccusage", "npx"]
   },
   "settings": {
     "statusLine": {

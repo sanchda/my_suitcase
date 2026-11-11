@@ -10,8 +10,10 @@
 #   setup_claude_statusline.sh --enable     on again after a --disable
 #   setup_claude_statusline.sh --status     what it owns
 #
-# Requires jq. At runtime the status line shells out to `npx ccusage`, so the box
-# needs Node.js -- cc-mod prints a note when npx is missing.
+# Requires jq. At runtime the status line shells out to ccusage (installed, else
+# `npx ccusage`), so the box needs Node.js -- cc-mod prints a note when either is
+# missing. Installing ccusage globally is worth it: npx adds two processes and a
+# registry check to every refresh.
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
